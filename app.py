@@ -668,21 +668,34 @@ def main():
                         new_cols.append(c)
                 df.columns = new_cols
 
-                # Map to standard names (take first match only)
-                unit_col = None
+                # Map to standard names – prefer meaningful unit codes over pure numbers
+                unit_candidates = []
                 pq_col = None
                 notes_col = None
                 for c in df.columns:
                     cl = str(c).lower().strip()
-                    if unit_col is None and ("unit" in cl or "owner" in cl or "code" in cl):
-                        unit_col = c
-                    elif pq_col is None and (cl in ("pq", "participation quota", "ratio", "share") or "quota" in cl or cl == "pq"):
+                    if "unit" in cl or "owner" in cl or "code" in cl or cl in ("description", "name"):
+                        unit_candidates.append(c)
+                    elif pq_col is None and (cl in ("pq", "participation quota", "ratio", "share") or "quota" in cl):
                         pq_col = c
                     elif notes_col is None and "note" in cl:
                         notes_col = c
 
+                unit_col = None
+                if unit_candidates:
+                    # Prefer a column whose values contain letters (real unit codes)
+                    for c in unit_candidates:
+                        sample = df[c].astype(str).head(20)
+                        if sample.str.contains(r"[A-Za-z]", regex=True).any():
+                            unit_col = c
+                            break
+                    if unit_col is None:
+                        unit_col = unit_candidates[0]
+
                 if unit_col is None or pq_col is None:
                     st.error("File must contain columns for Unit (or Owner/Code) and PQ (or Ratio). Found columns: " + ", ".join(df.columns.astype(str)))
+                    st.write("Raw preview of uploaded file:")
+                    st.dataframe(df.head(10), use_container_width=True)
                 else:
                     clean = pd.DataFrame({
                         "Unit": df[unit_col].astype(str).str.strip(),
@@ -690,10 +703,21 @@ def main():
                     })
                     if notes_col is not None:
                         clean["Notes"] = df[notes_col].astype(str)
-                    # Drop empty unit rows
-                    clean = clean[clean["Unit"].str.len() > 0].reset_index(drop=True)
+                    # Drop empty / nan unit rows
+                    clean = clean[clean["Unit"].str.len() > 0]
+                    clean = clean[clean["Unit"].str.lower() != "nan"].reset_index(drop=True)
+
+                    pq_sum = clean["PQ"].sum()
+                    # Auto-detect percentage style PQ (sums to ~100) vs decimal (sums to ~1)
+                    if 50 < pq_sum < 150:
+                        clean["PQ"] = clean["PQ"] / 100.0
+                        st.info(f"PQ values looked like percentages (total was {pq_sum:.2f}). Divided by 100 so they now total ~1.000.")
+                    elif pq_sum > 150:
+                        st.warning(f"PQ total is {pq_sum:.4f} — this is unusually high. Check that the correct PQ column was detected.")
+
                     st.session_state.pq_df = clean
                     st.success(f"Loaded {len(clean)} units. PQ total = {clean['PQ'].sum():.6f}")
+                    st.caption(f"Detected columns → Unit: **{unit_col}**  |  PQ: **{pq_col}**")
                     st.dataframe(clean, use_container_width=True)
             except Exception as e:
                 st.error(f"Could not read file: {e}")
