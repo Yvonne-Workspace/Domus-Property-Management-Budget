@@ -561,41 +561,115 @@ def main():
         "📥 Download Excel",
     ])
 
-    def edit_section(key, title, help_text=None):
+    def edit_section(key, title, help_text=None, show_budgeted=True):
         st.subheader(title)
         if help_text:
             st.caption(help_text)
 
-        # Keep a stable DataFrame in session_state so the editor does not reset
         df_key = f"df_{key}"
         if df_key not in st.session_state:
-            st.session_state[df_key] = pd.DataFrame(st.session_state.sections[key])
+            base = pd.DataFrame(st.session_state.sections[key])
+            # Ensure budgeted column exists
+            if "budgeted" not in base.columns:
+                base["budgeted"] = base.apply(
+                    lambda r: float(r.get("actual") or 0) * (1 + float(r.get("pct") or 0) / 100), axis=1
+                )
+            st.session_state[df_key] = base
+
+        df = st.session_state[df_key].copy()
+
+        # Ensure required columns
+        for col, default in [("desc", ""), ("gl", ""), ("actual", 0.0), ("pct", 0.0), ("budgeted", 0.0), ("note", "")]:
+            if col not in df.columns:
+                df[col] = default
+
+        # Recalculate budgeted from actual+% where budgeted was never manually set
+        # We store a flag column _manual_budgeted if user overrode
+        if "_manual_budgeted" not in df.columns:
+            df["_manual_budgeted"] = False
+
+        # Live calculated columns for display
+        calc_budgeted = df.apply(
+            lambda r: float(r.get("actual") or 0) * (1 + float(r.get("pct") or 0) / 100), axis=1
+        )
+        # Where user has not manually overridden, keep budgeted in sync with formula
+        mask = ~df["_manual_budgeted"].astype(bool)
+        df.loc[mask, "budgeted"] = calc_budgeted[mask]
+
+        # Implied % when budgeted was set manually
+        def implied_pct(row):
+            act = float(row.get("actual") or 0)
+            bud = float(row.get("budgeted") or 0)
+            if act == 0:
+                return 0.0 if bud == 0 else 100.0
+            return (bud / act - 1) * 100
+
+        df["implied_pct"] = df.apply(implied_pct, axis=1)
+        df["monthly"] = df["budgeted"].astype(float) / 12
+
+        # Column order for editor
+        display_cols = ["desc", "gl", "actual", "pct", "budgeted", "monthly", "implied_pct", "note"]
+        df_display = df[display_cols].copy()
 
         edited = st.data_editor(
-            st.session_state[df_key],
+            df_display,
             num_rows="dynamic",
             use_container_width=True,
             column_config={
                 "desc": st.column_config.TextColumn("Description", width="medium"),
                 "gl": st.column_config.TextColumn("GL Code", width="small"),
                 "actual": st.column_config.NumberColumn("Actual", format="%.2f"),
-                "pct": st.column_config.NumberColumn("% Increase", format="%.1f"),
+                "pct": st.column_config.NumberColumn("% Increase", format="%.1f",
+                    help="Change this to recalculate Budgeted Yearly"),
+                "budgeted": st.column_config.NumberColumn("Budgeted Yearly", format="%.2f",
+                    help="You can type an amount directly. Implied % will update."),
+                "monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True),
+                "implied_pct": st.column_config.NumberColumn("Implied %", format="%.1f", disabled=True,
+                    help="Shows what % increase the Budgeted Yearly represents vs Actual"),
                 "note": st.column_config.TextColumn("Notes"),
             },
             key=f"ed_{key}",
+            disabled=["monthly", "implied_pct"],
         )
 
-        # Persist the edited dataframe and sync back to sections
-        st.session_state[df_key] = edited
-        # Clean NaNs that data_editor sometimes introduces
-        records = edited.fillna({"desc": "", "gl": "", "actual": 0.0, "pct": 0.0, "note": ""}).to_dict("records")
+        # Detect manual budgeted overrides: if budgeted differs from formula result, mark as manual
+        records = []
+        manual_flags = []
+        for i, row in edited.iterrows():
+            act = float(row.get("actual") or 0)
+            pct = float(row.get("pct") or 0)
+            bud = float(row.get("budgeted") or 0)
+            formula_bud = act * (1 + pct / 100)
+            # If user changed budgeted away from formula, treat as manual
+            is_manual = abs(bud - formula_bud) > 0.02
+            # If they also changed pct to match, clear manual
+            if is_manual and abs(implied_pct({"actual": act, "budgeted": bud}) - pct) < 0.05:
+                is_manual = False
+            records.append({
+                "desc": str(row.get("desc") or ""),
+                "gl": str(row.get("gl") or ""),
+                "actual": act,
+                "pct": pct if not is_manual else implied_pct({"actual": act, "budgeted": bud}),
+                "budgeted": bud,
+                "note": str(row.get("note") or ""),
+                "_manual_budgeted": is_manual,
+            })
+            manual_flags.append(is_manual)
+
+        out_df = pd.DataFrame(records)
+        st.session_state[df_key] = out_df
+        # Store clean records (without internal flag) into sections for Excel export
+        clean_records = []
         for r in records:
-            r["actual"] = float(r.get("actual") or 0)
-            r["pct"] = float(r.get("pct") or 0)
-            r["desc"] = str(r.get("desc") or "")
-            r["gl"] = str(r.get("gl") or "")
-            r["note"] = str(r.get("note") or "")
-        st.session_state.sections[key] = records
+            clean_records.append({
+                "desc": r["desc"],
+                "gl": r["gl"],
+                "actual": r["actual"],
+                "pct": r["pct"],
+                "budgeted": r["budgeted"],
+                "note": r["note"],
+            })
+        st.session_state.sections[key] = clean_records
 
     # ---- Tab 0: Income ----
     with tabs[0]:
@@ -726,7 +800,13 @@ def main():
             st.markdown("#### Preview of calculated monthly levies (approximate)")
 
             def budgeted(items):
-                return sum((i.get("actual") or 0) * (1 + (i.get("pct") or 0) / 100) for i in items)
+                total = 0.0
+                for i in items:
+                    if i.get("budgeted") is not None and i.get("budgeted") != "":
+                        total += float(i.get("budgeted") or 0)
+                    else:
+                        total += float(i.get("actual") or 0) * (1 + float(i.get("pct") or 0) / 100)
+                return total
 
             total_exp = (
                 budgeted(st.session_state.sections["municipal"])
@@ -791,7 +871,13 @@ def main():
         st.subheader("Generate Excel budget pack")
 
         def budgeted(items):
-            return sum((i.get("actual") or 0) * (1 + (i.get("pct") or 0) / 100) for i in items)
+            total = 0.0
+            for i in items:
+                if i.get("budgeted") is not None and i.get("budgeted") != "":
+                    total += float(i.get("budgeted") or 0)
+                else:
+                    total += float(i.get("actual") or 0) * (1 + float(i.get("pct") or 0) / 100)
+            return total
 
         total_muni = budgeted(st.session_state.sections["municipal"])
         total_exp = budgeted(st.session_state.sections["expenditure"])
