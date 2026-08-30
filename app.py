@@ -66,31 +66,44 @@ def get_detail_section(text: str) -> str:
 
 
 LABEL_MAP = [
-    (r"Ordinary\s+levies|Levies\s+received", "ordinary_levies"),
-    (r"Levy\s*[-–]?\s*Csos|Csos\s+levies|CSOS\s+levies", "csos_income"),
-    (r"Reserve\s+fund\s+levies", "reserve_levies"),
+    (r"Ordinary\s+levies|Levies\s+received|Levy\s+income", "ordinary_levies"),
+    (r"Levy\s*[-–]?\s*Csos|Csos\s+levies|CSOS\s+levies|Csos\s+Levy", "csos_income"),
+    (r"Reserve\s+fund\s+levies|Levy\s*[-–]?\s*Reserve", "reserve_levies"),
     (r"Accounting\s+fees", "accounting_fees"),
-    (r"Auditors?\s*[\'’]?s?\s*remuneration|Audit\s+fees", "audit_fees"),
+    (r"Auditors?\s*[\'’]?s?\s*remuneration|Audit\s+fees|Auditors?\s+remuneration", "audit_fees"),
     (r"Bank\s+charges", "bank_charges"),
-    (r"Insurance(?!\s+(Premium|claims|recovered|recover))", "insurance"),
+    (r"Insurance(?!\s+(Premium|claims|recovered|recover|Claims))", "insurance"),
     (r"Management\s+fees?", "management_fee"),
-    (r"Repairs\s+and\s+maintenance", "repairs_total"),
-    (r"Salaries", "salaries"),
-    (r"Security(?:\s*:\s*Guarding\s+service)?", "security"),
+    (r"Repairs\s+and\s+maintenance|Repair\s+and\s+Maintenance", "repairs_total"),
+    (r"Salaries\s*&?\s*Wages|Salaries", "salaries"),
+    (r"Security(?:\s*:\s*Guarding\s+service)?|Guarding\s+Service", "security"),
     (r"Legal\s+(?:expense|fees?)", "legal"),
     (r"Insurance\s+Premium\s+Recovered", "ins_premium_recovered"),
-    (r"Insurance\s+claims\s+received", "ins_claims_received"),
+    (r"Insurance\s+claims\s+received|Insurance\s+Claims", "ins_claims_received"),
     (r"Garden\s+(?:service|expenses)", "garden"),
-    (r"Electricity\s+\d|Electricity$", "electricity_gross"),
-    (r"Water\s+\d|Water$", "water_gross"),
-    (r"Sewerage", "sewerage_gross"),
+    (r"Electricity\s+(?:recovered|Recovered)", "electricity_recovered"),
+    (r"Water\s+(?:recovered|Recovered)", "water_recovered"),
+    (r"Sewerage\s+(?:recovered|Recovered)", "sewerage_recovered"),
+    (r"Refuse\s+(?:recovered|Recovered)", "refuse_recovered"),
+    (r"Electricity(?!\s+[Rr]ecover)", "electricity_gross"),
+    (r"Water(?!\s+[Rr]ecover)", "water_gross"),
+    (r"Sewerage(?!\s+[Rr]ecover)", "sewerage_gross"),
+    (r"Refuse(?!\s+[Rr]ecover)", "refuse_gross"),
     (r"Utilities", "utilities"),
     (r"Property\s+valuation", "property_valuation"),
-    (r"Venue\s+hire", "venue_hire"),
-    (r"Telephone", "telephone"),
-    (r"Office\s+expenses", "office_expenses"),
+    (r"Venue\s+hire|Meeting\s+(?:expenses|refreshments)", "venue_hire"),
+    (r"Telephone|Communication", "telephone"),
+    (r"Office\s+expenses|General\s+[Oo]ffice", "office_expenses"),
     (r"Interest\s+on\s+arrears|Interest\s+received", "interest_arrears"),
     (r"Investment\s+[Ii]ncome|Interest\s+earned", "investment_income"),
+    (r"Casual\s*/?\s*Relief\s+Wages|Casual\s+Wages", "casual_wages"),
+    (r"Bonuss?es?\s*&?\s*Overtime|Bonuses", "bonuses"),
+    (r"PAYE|UIF", "paye_uif"),
+    (r"Cleaning\s*&?\s*Materials", "cleaning"),
+    (r"Fire\s+[Ee]quipment", "fire_equipment"),
+    (r"Plumbing", "plumbing"),
+    (r"Gate\s*&?\s*Intercom", "gate_intercom"),
+    (r"Electrical(?:\s+[Rr]epair)?", "electrical"),
 ]
 
 
@@ -231,7 +244,18 @@ def apply_actuals(sections: dict, actuals: dict) -> dict:
         if "Investment" in item["desc"] and actuals.get("investment_income"):
             item["actual"] = actuals["investment_income"]
 
-    # Municipal
+    # Municipal recoveries
+    for item in sections["muni_recoveries"]:
+        if "Electricity" in item["desc"] and actuals.get("electricity_recovered"):
+            item["actual"] = actuals["electricity_recovered"]
+        if "Water" in item["desc"] and actuals.get("water_recovered"):
+            item["actual"] = actuals["water_recovered"]
+        if "Sewerage" in item["desc"] and actuals.get("sewerage_recovered"):
+            item["actual"] = actuals["sewerage_recovered"]
+        if "Refuse" in item["desc"] and actuals.get("refuse_recovered"):
+            item["actual"] = actuals["refuse_recovered"]
+
+    # Municipal expenses (gross)
     for item in sections["municipal"]:
         if "Water" in item["desc"] and actuals.get("water_gross"):
             item["actual"] = actuals["water_gross"]
@@ -239,6 +263,8 @@ def apply_actuals(sections: dict, actuals: dict) -> dict:
             item["actual"] = actuals["electricity_gross"]
         if "Sewerage" in item["desc"] and actuals.get("sewerage_gross"):
             item["actual"] = actuals["sewerage_gross"]
+        if "Refuse" in item["desc"] and actuals.get("refuse_gross"):
+            item["actual"] = actuals["refuse_gross"]
 
     # Expenditure
     op_map = {
@@ -255,6 +281,7 @@ def apply_actuals(sections: dict, actuals: dict) -> dict:
         "Property Valuation": "property_valuation",
         "Security / Guarding": "security",
         "Garden Service (contract)": "garden",
+        "Cleaning & Materials": "cleaning",
     }
     for item in sections["expenditure"]:
         k = op_map.get(item["desc"])
@@ -265,11 +292,28 @@ def apply_actuals(sections: dict, actuals: dict) -> dict:
     for item in sections["personnel"]:
         if item["desc"].startswith("Salaries") and actuals.get("salaries"):
             item["actual"] = actuals["salaries"]
+        if "Casual" in item["desc"] and actuals.get("casual_wages"):
+            item["actual"] = actuals["casual_wages"]
+        if "Bonuses" in item["desc"] and actuals.get("bonuses"):
+            item["actual"] = actuals["bonuses"]
+        if "PAYE" in item["desc"] and actuals.get("paye_uif"):
+            item["actual"] = actuals["paye_uif"]
 
-    # R&M total into General if no breakdown
+    # R&M – prefer specific lines, otherwise total into General
+    rm_map = {
+        "Electrical": "electrical",
+        "Fire Equipment": "fire_equipment",
+        "Plumbing": "plumbing",
+        "Gate & Intercom": "gate_intercom",
+        "Garden Expenses": "garden",
+    }
+    for item in sections["rm"]:
+        k = rm_map.get(item["desc"])
+        if k and actuals.get(k):
+            item["actual"] = actuals[k]
     if actuals.get("repairs_total"):
         for item in sections["rm"]:
-            if "General" in item["desc"]:
+            if "General" in item["desc"] and not item.get("actual"):
                 item["actual"] = actuals["repairs_total"]
                 break
 
@@ -480,6 +524,11 @@ def main():
                 if rec:
                     st.session_state.insurance_recoveries = abs(rec)
 
+                # Clear cached dataframes so the editor shows the newly extracted values
+                for k in list(st.session_state.keys()):
+                    if k.startswith("df_"):
+                        del st.session_state[k]
+
                 st.success("Extraction complete. Review the numbers in the tabs.")
                 st.rerun()
 
@@ -516,9 +565,14 @@ def main():
         st.subheader(title)
         if help_text:
             st.caption(help_text)
-        df = pd.DataFrame(st.session_state.sections[key])
+
+        # Keep a stable DataFrame in session_state so the editor does not reset
+        df_key = f"df_{key}"
+        if df_key not in st.session_state:
+            st.session_state[df_key] = pd.DataFrame(st.session_state.sections[key])
+
         edited = st.data_editor(
-            df,
+            st.session_state[df_key],
             num_rows="dynamic",
             use_container_width=True,
             column_config={
@@ -530,7 +584,18 @@ def main():
             },
             key=f"ed_{key}",
         )
-        st.session_state.sections[key] = edited.to_dict("records")
+
+        # Persist the edited dataframe and sync back to sections
+        st.session_state[df_key] = edited
+        # Clean NaNs that data_editor sometimes introduces
+        records = edited.fillna({"desc": "", "gl": "", "actual": 0.0, "pct": 0.0, "note": ""}).to_dict("records")
+        for r in records:
+            r["actual"] = float(r.get("actual") or 0)
+            r["pct"] = float(r.get("pct") or 0)
+            r["desc"] = str(r.get("desc") or "")
+            r["gl"] = str(r.get("gl") or "")
+            r["note"] = str(r.get("note") or "")
+        st.session_state.sections[key] = records
 
     # ---- Tab 0: Income ----
     with tabs[0]:
@@ -584,34 +649,61 @@ def main():
                     df = pd.read_csv(pq_file)
                 else:
                     df = pd.read_excel(pq_file)
-                # Normalise column names
-                col_map = {}
+
+                # Flatten multi-index columns if present
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = [" ".join(str(x) for x in col if str(x) != "nan").strip() for col in df.columns]
+
+                # Make column names unique and clean
+                df.columns = [str(c).strip() for c in df.columns]
+                # Deduplicate column names
+                seen = {}
+                new_cols = []
+                for c in df.columns:
+                    if c in seen:
+                        seen[c] += 1
+                        new_cols.append(f"{c}_{seen[c]}")
+                    else:
+                        seen[c] = 0
+                        new_cols.append(c)
+                df.columns = new_cols
+
+                # Map to standard names (take first match only)
+                unit_col = None
+                pq_col = None
+                notes_col = None
                 for c in df.columns:
                     cl = str(c).lower().strip()
-                    if "unit" in cl or "owner" in cl or "code" in cl:
-                        col_map[c] = "Unit"
-                    elif cl in ("pq", "participation quota", "ratio", "share"):
-                        col_map[c] = "PQ"
-                    elif "note" in cl:
-                        col_map[c] = "Notes"
-                df = df.rename(columns=col_map)
-                if "Unit" not in df.columns or "PQ" not in df.columns:
-                    st.error("File must contain columns for Unit and PQ (or Ratio).")
+                    if unit_col is None and ("unit" in cl or "owner" in cl or "code" in cl):
+                        unit_col = c
+                    elif pq_col is None and (cl in ("pq", "participation quota", "ratio", "share") or "quota" in cl or cl == "pq"):
+                        pq_col = c
+                    elif notes_col is None and "note" in cl:
+                        notes_col = c
+
+                if unit_col is None or pq_col is None:
+                    st.error("File must contain columns for Unit (or Owner/Code) and PQ (or Ratio). Found columns: " + ", ".join(df.columns.astype(str)))
                 else:
-                    df["PQ"] = pd.to_numeric(df["PQ"], errors="coerce").fillna(0)
-                    st.session_state.pq_df = df[["Unit", "PQ"] + (["Notes"] if "Notes" in df.columns else [])]
-                    st.success(f"Loaded {len(df)} units. PQ total = {df['PQ'].sum():.6f}")
-                    st.dataframe(st.session_state.pq_df, use_container_width=True)
+                    clean = pd.DataFrame({
+                        "Unit": df[unit_col].astype(str).str.strip(),
+                        "PQ": pd.to_numeric(df[pq_col], errors="coerce").fillna(0.0),
+                    })
+                    if notes_col is not None:
+                        clean["Notes"] = df[notes_col].astype(str)
+                    # Drop empty unit rows
+                    clean = clean[clean["Unit"].str.len() > 0].reset_index(drop=True)
+                    st.session_state.pq_df = clean
+                    st.success(f"Loaded {len(clean)} units. PQ total = {clean['PQ'].sum():.6f}")
+                    st.dataframe(clean, use_container_width=True)
             except Exception as e:
                 st.error(f"Could not read file: {e}")
 
-        if st.session_state.pq_df is not None:
+        if st.session_state.pq_df is not None and not st.session_state.pq_df.empty:
             st.markdown("#### Preview of calculated monthly levies (approximate)")
-            # Quick preview using current budgeted figures (simplified)
+
             def budgeted(items):
                 return sum((i.get("actual") or 0) * (1 + (i.get("pct") or 0) / 100) for i in items)
 
-            # Rough estimate of ordinary monthly for preview
             total_exp = (
                 budgeted(st.session_state.sections["municipal"])
                 + budgeted(st.session_state.sections["expenditure"])
@@ -630,21 +722,24 @@ def main():
             csos = next((i.get("actual") or 0 for i in st.session_state.sections["levy_income"] if "CSOS" in i["desc"]), 0)
             monthly_csos = csos / 12
 
-            preview = st.session_state.pq_df.copy()
-            preview["Ordinary Levy"] = preview["PQ"] * monthly_ord
-            preview["Reserve Fund"] = preview["PQ"] * monthly_res
-            preview["CSOS"] = preview["PQ"] * monthly_csos
+            base = st.session_state.pq_df[["Unit", "PQ"]].copy()
+            preview = pd.DataFrame({
+                "Unit": base["Unit"].values,
+                "PQ": base["PQ"].values,
+                "Ordinary Levy": (base["PQ"] * monthly_ord).values,
+                "Reserve Fund": (base["PQ"] * monthly_res).values,
+                "CSOS": (base["PQ"] * monthly_csos).values,
+            })
             preview["Total Monthly"] = preview["Ordinary Levy"] + preview["Reserve Fund"] + preview["CSOS"]
-            st.dataframe(
-                preview.style.format({
-                    "PQ": "{:.6f}",
-                    "Ordinary Levy": "R {:,.2f}",
-                    "Reserve Fund": "R {:,.2f}",
-                    "CSOS": "R {:,.2f}",
-                    "Total Monthly": "R {:,.2f}",
-                }),
-                use_container_width=True,
-            )
+
+            # Format as strings to avoid styler / arrow issues
+            display = preview.copy()
+            display["PQ"] = display["PQ"].map(lambda x: f"{x:.6f}")
+            display["Ordinary Levy"] = display["Ordinary Levy"].map(lambda x: f"R {x:,.2f}")
+            display["Reserve Fund"] = display["Reserve Fund"].map(lambda x: f"R {x:,.2f}")
+            display["CSOS"] = display["CSOS"].map(lambda x: f"R {x:,.2f}")
+            display["Total Monthly"] = display["Total Monthly"].map(lambda x: f"R {x:,.2f}")
+            st.dataframe(display, use_container_width=True)
             st.info("Exact figures will be calculated with live Excel formulas when you download the file.")
 
     # ---- Tab 8: 10-Year Plan ----
