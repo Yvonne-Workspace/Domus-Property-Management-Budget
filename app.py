@@ -269,11 +269,9 @@ def compute_totals(state: dict) -> dict:
     csos_item = next((i for i in sec["levy_income"] if "csos" in i["desc"].lower()), None)
     reserve = yearly(reserve_item) if reserve_item else 0
     csos = yearly(csos_item) if csos_item else 0
-    expenses = municipal + expenditure + rm_net + personnel + tax + special
-    csos_exp = sum(yearly(i) for i in sec["expenditure"] if "csos" in i["desc"].lower())
-    to_collect = expenses - csos_exp - other - recoveries
-    rate = float(state.get("collection_rate") or 0) / 100
-    gross = to_collect / rate if rate else 0
+    expenses_for_levy = municipal + expenditure + rm_net + personnel + tax
+    expenses = expenses_for_levy + special
+    gross = expenses_for_levy
     return {
         "municipal": municipal,
         "expenditure": expenditure,
@@ -286,7 +284,7 @@ def compute_totals(state: dict) -> dict:
         "reserve": reserve,
         "csos": csos,
         "expenses": expenses,
-        "to_collect": to_collect,
+        "to_collect": expenses_for_levy,
         "gross_ordinary": gross,
         "monthly_ordinary": gross / 12,
         "monthly_reserve": reserve / 12,
@@ -391,6 +389,14 @@ def match_rows(extracted: list, sections: dict) -> tuple[dict, float, int]:
             item_fam = family(it["desc"])
             if fam and item_fam and fam != item_fam:
                 continue
+            if "reserve" in norm(row["desc"]) and "eskom" in norm(it["desc"]):
+                continue
+            if "eskom" in norm(row["desc"]) and "reserve" in norm(it["desc"]):
+                continue
+            if fam == "reserve" and "eskom" in norm(it["desc"]):
+                continue
+            if fam == "eskom" and "reserve" in norm(it["desc"]):
+                continue
             n_desc, n_item = norm(row["desc"]), norm(it["desc"])
             score = 0.0
             if fam and item_fam and fam == item_fam:
@@ -491,13 +497,16 @@ def generate_excel(state: dict, pq_df: pd.DataFrame | None, ymp: list) -> BytesI
         cell.font = Font(name="Calibri", color=BLUE, size=10)
         cell.border = THIN
         if fmt:
-            cell.num_fmt = fmt
+            if hasattr(cell, "number_format"):
+                cell.number_format = fmt
+            else:
+                cell.num_fmt = fmt
 
     def formula(cell, f, bg=None):
         cell.value = f"={f}"
         cell.font = Font(name="Calibri", size=10)
         cell.border = THIN
-        cell.num_fmt = MONEY
+        cell.number_format = MONEY
         if bg:
             fill(cell, bg)
 
@@ -778,9 +787,9 @@ def init_state():
 
 
 def records_from_editor(edited: pd.DataFrame, previous: list) -> list:
-    prev_by_desc = {p["desc"]: p for p in previous}
+    prev_list = list(previous)
     out = []
-    for _, row in edited.iterrows():
+    for idx, row in edited.iterrows():
         desc = str(row.get("Description") or "").strip()
         if not desc:
             continue
@@ -788,26 +797,66 @@ def records_from_editor(edited: pd.DataFrame, previous: list) -> list:
         pct = float(row.get("% Increase") or 0)
         budgeted = float(row.get("Budgeted yearly") or 0)
         note = str(row.get("Notes") or "")
-        prev = prev_by_desc.get(desc, {})
-        formula_bud = actual * (1 + pct / 100)
-        mode = prev.get("mode", "pct")
-        if abs(budgeted - formula_bud) > 0.05:
-            mode = "amount"
-        elif abs(pct - float(prev.get("pct") or 0)) > 0.05:
+        prev = prev_list[idx] if isinstance(idx, int) and idx < len(prev_list) else next((p for p in prev_list if p["desc"] == desc), {})
+        if prev.get("computed"):
+            out.append({
+                **prev,
+                "desc": desc,
+                "actual": actual,
+                "note": note,
+                "computed": True,
+                "mode": "amount",
+            })
+            continue
+        prev_pct = float(prev.get("pct") or 0)
+        prev_bud = yearly(prev) if prev else 0.0
+        pct_changed = abs(pct - prev_pct) > 0.05
+        bud_changed = abs(budgeted - prev_bud) > 0.05
+        if pct_changed and not bud_changed:
             mode = "pct"
-            budgeted = formula_bud
-        rec = {
+            budgeted = actual * (1 + pct / 100)
+        elif bud_changed:
+            mode = "amount"
+            pct = 0.0 if actual == 0 else (budgeted / actual - 1) * 100
+        else:
+            mode = prev.get("mode") or "pct"
+            if mode == "pct":
+                budgeted = actual * (1 + pct / 100)
+                pct = 0.0 if actual == 0 else (budgeted / actual - 1) * 100
+        out.append({
             "id": prev.get("id") or uid(),
             "desc": desc,
             "actual": actual,
-            "pct": pct if mode != "amount" else (0 if actual == 0 else (budgeted / actual - 1) * 100),
+            "pct": pct,
             "budgeted": budgeted,
             "mode": mode,
             "note": note,
-            "computed": bool(prev.get("computed")),
-        }
-        out.append(rec)
+            "computed": False,
+        })
     return out
+
+
+def sync_opening_to_reserve(state: dict) -> None:
+    opening = float(state.get("reserve_opening") or 0)
+    last = float(state.get("_last_opening") or 0)
+    if abs(opening - last) < 0.005:
+        return
+    state["_last_opening"] = opening
+    if "ed_levy_income" in st.session_state:
+        del st.session_state["ed_levy_income"]
+    for it in state["sections"]["levy_income"]:
+        if "reserve" in it["desc"].lower():
+            it["mode"] = "amount"
+            it["budgeted"] = opening
+            act = float(it.get("actual") or 0)
+            it["pct"] = 0.0 if act == 0 else (opening / act - 1) * 100
+            it["note"] = it.get("note") or "From opening reserve balance"
+
+
+def clear_editors() -> None:
+    for k in list(st.session_state.keys()):
+        if str(k).startswith("ed_") or str(k) in ("ymp_ed",):
+            del st.session_state[k]
 
 
 def edit_section(key: str, title: str, help_text: str = ""):
@@ -885,6 +934,7 @@ def main():
                     st.error("No lines found. In WeConnectU export Options → Budget and Actuals.")
                 else:
                     sections, ins, added = match_rows(rows, default_sections())
+                    clear_editors()
                     st.session_state.sections = sections
                     if ins:
                         st.session_state.insurance_recoveries = ins
@@ -912,10 +962,17 @@ def main():
             "Expected collection rate %", 50.0, 100.0, float(st.session_state.collection_rate), 0.5,
             help="95% means you expect 5% of billed ordinary levies not to be paid.",
         )
-        st.session_state.reserve_opening = st.number_input("Opening reserve balance", value=float(st.session_state.reserve_opening), step=1000.0)
+        st.session_state.reserve_opening = st.number_input(
+            "Reserve fund contribution (yearly)",
+            value=float(st.session_state.reserve_opening),
+            step=1000.0,
+            help="This is the amount owners must pay into the reserve this year. It fills the Reserve Fund Contribution line.",
+        )
+        sync_opening_to_reserve(st.session_state)
         st.session_state.insurance_recoveries = st.number_input("Insurance recoveries (taken off R&M)", value=float(st.session_state.insurance_recoveries), step=100.0)
 
         if st.button("Start over"):
+            clear_editors()
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
@@ -942,19 +999,20 @@ def main():
         st.markdown(
             """
 1. **Actual** — last year’s figure (from the Excel).
-2. **% Increase** — type this if you want “last year plus 10%”. Yearly then fills in.
-3. **Budgeted yearly** — type this if you already know the rand amount (quote, Eskom, contract). The % then fills in.
+2. **% Increase** — type this and Budgeted yearly becomes Actual × (1 + %).
+3. **Budgeted yearly** — type a rand amount and the % becomes (Budgeted yearly ÷ Actual) × 100 − 100.
 4. **Monthly** — always yearly ÷ 12.
 
-Ordinary levies are calculated so that after unpaid levies you still cover running costs.  
-**Reserve** and **CSOS** are billed on their own columns so owners can see them.
+**Ordinary levies (Budgeted yearly)** = Municipal + Expenditure + Repair & Maintenance (net) + Personnel + Income tax.
 
-**95% / 100%:** not a tax. 95% means you expect 5% of ordinary levies not to be paid, so you bill a little more.
+**Reserve Fund Contribution** is filled from the sidebar **Opening reserve balance**.
+
+**95% / 100%:** not a tax. 95% means you expect 5% of billed ordinary levies not to be paid.
             """
         )
 
     with tabs[1]:
-        edit_section("levy_income", "Levy Income", "Type the reserve as a yearly rand amount. Ordinary is calculated.")
+        edit_section("levy_income", "Levy Income", "Ordinary = Municipal + Expenditure + R&M + Personnel + Income tax. Reserve is filled from the sidebar yearly reserve amount.")
         st.divider()
         edit_section("other_income", "Other Income")
         st.divider()
@@ -1070,14 +1128,18 @@ Ordinary levies are calculated so that after unpaid levies you still cover runni
         if not st.session_state.complex_name:
             st.warning("Enter the complex name in the sidebar first.")
         else:
-            xls = generate_excel(st.session_state, st.session_state.pq_df, st.session_state.ymp)
-            name = re.sub(r"\s+", "_", st.session_state.complex_name)
-            st.download_button(
-                "Download budget Excel",
-                data=xls,
-                file_name=f"Budget_{name}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            xlsx_bytes = None
+            if st.button("Build Excel file", type="primary"):
+                xlsx_bytes = generate_excel(st.session_state, st.session_state.pq_df, st.session_state.ymp)
+                st.session_state["excel_bytes"] = xlsx_bytes.getvalue()
+            if st.session_state.get("excel_bytes"):
+                name = re.sub(r"\s+", "_", st.session_state.complex_name)
+                st.download_button(
+                    "Download budget Excel",
+                    data=st.session_state["excel_bytes"],
+                    file_name=f"Budget_{name}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
 
 
 if __name__ == "__main__":
