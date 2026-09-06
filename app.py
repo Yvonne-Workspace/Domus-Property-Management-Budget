@@ -389,12 +389,13 @@ def items_to_df(items: list, rm: bool) -> pd.DataFrame:
             "Actual": float(it.get("actual") or 0),
             "% Increase": float(it.get("pct") or 0),
             "Budgeted yearly": float(it.get("yearly") or 0),
+            "Monthly": net_of(it) / 12,
             "Insurance payout": float(it.get("insurance") or 0),
             "Notes": it.get("note") or "",
         })
-    cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Notes"]
+    cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Notes"]
     if rm:
-        cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Insurance payout", "Notes"]
+        cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Insurance payout", "Notes"]
     return pd.DataFrame(recs)[cols]
 
 
@@ -659,9 +660,11 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
                 "Actual": st.column_config.NumberColumn("Actual", format="%.2f"),
                 "% Increase": st.column_config.NumberColumn("% Increase", format="%.1f", help="Type % then click Save"),
                 "Budgeted yearly": st.column_config.NumberColumn("Budgeted yearly", format="%.2f", help="Or type the rand amount then Save"),
+                "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="Yearly ÷ 12. Updates when you Save."),
                 "Insurance payout": st.column_config.NumberColumn("Insurance payout", format="%.2f"),
                 "Notes": st.column_config.TextColumn("Notes"),
             },
+            disabled=["Monthly"],
         )
         saved = st.form_submit_button("Save this section", type="primary")
     if saved:
@@ -669,14 +672,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
         apply_levy_lines(st.session_state)
         st.success("Saved. Monthly = yearly ÷ 12. % = (yearly ÷ actual) × 100 − 100.")
         st.rerun()
-    show = st.session_state.sections[key]
-    preview = pd.DataFrame([{
-        "Description": it["desc"],
-        "Monthly": net_of(it) / 12,
-        "Net yearly": net_of(it),
-    } for it in show])
-    st.dataframe(preview, use_container_width=True, hide_index=True)
-    st.caption(f"Section net total: {money(sum_net(show))}")
+    st.caption(f"Section net total: {money(sum_net(st.session_state.sections[key]))}  ·  Monthly total: {money(sum_net(st.session_state.sections[key]) / 12)}")
 
 
 def main():
