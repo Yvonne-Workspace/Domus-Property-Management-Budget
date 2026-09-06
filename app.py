@@ -50,11 +50,13 @@ def row(desc: str, note: str = "") -> dict:
 def default_sections() -> dict:
     return {
         "levy": [
-            row("Ordinary Levies", "Calculated: net municipal + expenditure + R&M + personnel + tax (+ special if ticked)."),
+            row("Ordinary Levies", "Admin levy. Does not include estate/HOA pass-throughs or insurance billed on its own PQ column."),
             row("Reserve Fund Contribution", "Type the yearly amount, or use 15% of ordinary."),
-            row("CSOS Levy (Income)", "What owners are billed for CSOS. Usually matches CSOS expense."),
+            row("CSOS Levy (Income)", "This complex’s own CSOS. Not the master-estate CSOS."),
+            row("Insurance billed to owners", "Thornhill / Mount Kos style. Own PQ column. Leave 0 if insurance stays inside ordinary."),
             row("Levy - Boathouse"),
             row("Levy - Boatport"),
+            row("Special Levy"),
         ],
         "other": [
             row("Interest on Arrear Levies", "Usually not budgeted (do not rely on arrears)."),
@@ -67,8 +69,16 @@ def default_sections() -> dict:
             row("Gate Registration / Services"),
             row("Clubhouse Rental"),
         ],
+        "hoa_income": [
+            row("Estate / HOA Levies recovered", "e.g. Xanadu Levies. Billed to owners on the PQ. Not ordinary."),
+            row("Estate / HOA CSOS recovered", "e.g. Xanadu HOA CSOS. Own PQ column."),
+        ],
+        "hoa_expense": [
+            row("Estate / HOA Levies paid", "e.g. Xanadu Eco Park. Paid to the estate. Not in ordinary."),
+            row("Estate / HOA CSOS paid", "e.g. Xanadu CSOS paid. Not in ordinary."),
+        ],
         "recoveries_other": [
-            row("Insurance Recovered", "Claim payouts — do not budget as normal income. Deduct on the R&M line instead."),
+            row("Insurance claims recovered", "Claim payouts. Deduct on the R&M line. Do not budget as normal income."),
             row("Legal Fees Recovered"),
             row("Maintenance Recovered"),
         ],
@@ -130,15 +140,26 @@ def sum_net(items: list) -> float:
     return sum(net_of(r) for r in items)
 
 
+def insurance_on_pq(state: dict) -> bool:
+    for r in state["sections"].get("levy", []):
+        if "insurance" in r["desc"].lower() and float(r.get("yearly") or 0) > 0.5:
+            return True
+    return False
+
+
+def skip_from_ordinary(r: dict, state: dict) -> bool:
+    f = family(r.get("desc") or "")
+    if f in ("hoa_levy_exp", "hoa_csos_exp", "hoa_levy_inc", "hoa_csos_inc"):
+        return True
+    if f == "insurance" and insurance_on_pq(state):
+        return True
+    return False
+
+
 def ordinary_total(state: dict) -> float:
     s = state["sections"]
-    total = (
-        sum_net(s["municipal"])
-        + sum_net(s["expenditure"])
-        + sum_net(s["rm"])
-        + sum_net(s["personnel"])
-        + sum_net(s["tax"])
-    )
+    total = sum_net(s["municipal"]) + sum_net(s["rm"]) + sum_net(s["personnel"]) + sum_net(s["tax"])
+    total += sum(net_of(r) for r in s["expenditure"] if not skip_from_ordinary(r, state))
     if state.get("special_in_ordinary"):
         total += sum_net(s["special"])
     return total
@@ -161,14 +182,64 @@ def apply_levy_lines(state: dict) -> None:
             r["pct"] = 0.0 if a == 0 else (float(r["yearly"]) / a) * 100 - 100
 
 
+def pq_bill_lines(state: dict) -> list:
+    """Owner-invoice columns, same order as Thornhill PQ."""
+    s = state["sections"]
+    out = []
+
+    def add(name, yearly):
+        out.append((str(name), float(yearly or 0)))
+
+    for r in s.get("levy", []):
+        if "ordinary" in r["desc"].lower() or r["desc"].lower().strip() in ("levies", "levy"):
+            add("Levies", r.get("yearly"))
+            break
+    for r in s.get("hoa_income", []):
+        if float(r.get("yearly") or 0) or float(r.get("actual") or 0):
+            add(r["desc"], r.get("yearly"))
+    for r in s.get("levy", []):
+        if "insurance" in r["desc"].lower() and (float(r.get("yearly") or 0) or float(r.get("actual") or 0)):
+            add("Insurance", r.get("yearly"))
+    for r in s.get("levy", []):
+        if "reserve" in r["desc"].lower():
+            add("Reserve Fund", r.get("yearly"))
+            break
+    for r in s.get("levy", []):
+        if "csos" in r["desc"].lower():
+            add("CSOS", r.get("yearly"))
+            break
+    for r in s.get("levy", []):
+        d = r["desc"].lower()
+        if any(x in d for x in ("boathouse", "boatport", "special levy")) and (
+            float(r.get("yearly") or 0) or float(r.get("actual") or 0)
+        ):
+            add(r["desc"], r.get("yearly"))
+    return out
+
+
 def family(desc: str) -> str | None:
     d = norm(desc)
-    if re.search(r"insurance\s*(claim|payout|recovered)", d):
+    master = bool(re.search(r"xanadu|eco park|master scheme|master hoa|\bhoa\b|estate levy|estate levies", d))
+    if master:
+        if "csos" in d:
+            if re.search(r"hoa csos|csos recovered|csos income", d):
+                return "hoa_csos_inc"
+            if re.search(r"xanadu csos|csos paid|csos expense", d) and "hoa" not in d:
+                return "hoa_csos_exp"
+            return "hoa_csos_inc"
+        if "eco park" in d or re.search(r"paid|expense", d):
+            return "hoa_levy_exp"
+        return "hoa_levy_inc"
+    if re.search(r"insurance\s*(claim|payout)", d):
         return "ins_claim"
+    if re.search(r"insurance\s*(recovered|billed|additional)", d):
+        return "ins_bill"
     if "eskom" in d or ("fixed" in d and "electr" in d) or "meters recovered" in d:
         return "eskom"
     if "reserve" in d:
         return "reserve"
+    if "special levy" in d:
+        return "special_levy"
     if "csos" in d:
         if "collect" in d:
             return "csos_col"
@@ -223,8 +294,12 @@ def family(desc: str) -> str | None:
 def section_for(desc: str) -> str:
     f = family(desc)
     d = norm(desc)
-    if f in ("ordinary", "reserve", "csos_inc", "boathouse", "boatport"):
+    if f in ("ordinary", "reserve", "csos_inc", "boathouse", "boatport", "ins_bill", "special_levy"):
         return "levy"
+    if f in ("hoa_levy_inc", "hoa_csos_inc"):
+        return "hoa_income"
+    if f in ("hoa_levy_exp", "hoa_csos_exp"):
+        return "hoa_expense"
     if f == "csos_exp":
         return "expenditure"
     if f == "csos_col":
@@ -356,6 +431,8 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
             key, it = best
             used.add(f"{key}:{it['id']}")
             it["actual"] = src["actual"]
+            if fam in ("hoa_levy_inc", "hoa_csos_inc", "hoa_levy_exp", "hoa_csos_exp", "ins_bill"):
+                it["desc"] = src["desc"]
             if it.get("is_recovery"):
                 it["yearly"] = src["actual"]
             else:
@@ -541,7 +618,14 @@ def generate_excel(state: dict) -> BytesIO:
     hdr()
     a, b = write(s["recoveries_other"])
     tot("TOTAL OTHER RECOVERIES", a, b)
-    bar("MUNICIPAL CHARGES (gross, then less recoveries)")
+    bar("HOA / ESTATE RECOVERED FROM OWNERS (optional — Thornhill / Xanadu)")
+    hdr()
+    a, b = write(s.get("hoa_income") or [])
+    tot("TOTAL HOA RECOVERED", a, b)
+    bar("HOA / ESTATE PAID TO THE ESTATE (optional)")
+    hdr()
+    a, b = write(s.get("hoa_expense") or [])
+    tot("TOTAL HOA PAID", a, b)
     hdr()
     a, b = write(s["municipal"])
     muni_tot = r
@@ -582,28 +666,33 @@ def generate_excel(state: dict) -> BytesIO:
     pq = wb.create_sheet("PQ")
     pq["A1"] = "PQ / LEVY SCHEDULE"
     pq["A1"].font = Font(bold=True, size=14, color=NAVY)
-    pq["B4"] = "Ordinary monthly"
-    pq["C4"] = f"=BUDGET!E{levy_ord}/12"
-    pq["B5"] = "Reserve monthly"
-    pq["C5"] = f"=BUDGET!E{levy_ord+1}/12"
-    pq["B6"] = "CSOS monthly"
-    pq["C6"] = f"=BUDGET!E{levy_ord+2}/12"
-    for c in ("C4", "C5", "C6"):
-        pq[c].number_format = MONEY
-    for i, h in enumerate(["#", "Unit", "PQ", "Ordinary", "Reserve", "CSOS", "Total"], 1):
+    bills = pq_bill_lines(state)
+    pq["A3"] = "Monthly totals billed to all owners"
+    for i, (name, yearly) in enumerate(bills):
+        pq.cell(4, i + 1, name)
+        fill(pq.cell(4, i + 1), NAVY)
+        pq.cell(4, i + 1).font = Font(bold=True, color="FFFFFF")
+        pq.cell(5, i + 1, yearly / 12).number_format = MONEY
+        fill(pq.cell(5, i + 1), YELLOW)
+    headers = ["#", "Unit", "PQ"] + [n for n, _ in bills] + ["Total"]
+    for i, h in enumerate(headers, 1):
         cell = pq.cell(8, i, h)
         fill(cell, NAVY)
         cell.font = Font(bold=True, color="FFFFFF")
     units = state.get("pq") or [{"Unit": "UNIT-1", "PQ": 1.0}]
+    first_amt = 4
+    last_amt = 3 + len(bills)
     for i, u in enumerate(units):
         rr = 9 + i
         pq.cell(rr, 1, i + 1)
         pq.cell(rr, 2, str(u.get("Unit", "")))
         pq.cell(rr, 3, float(u.get("PQ") or 0)).number_format = "0.000000"
-        pq.cell(rr, 4, f"=$C$4*C{rr}").number_format = MONEY
-        pq.cell(rr, 5, f"=$C$5*C{rr}").number_format = MONEY
-        pq.cell(rr, 6, f"=$C$6*C{rr}").number_format = MONEY
-        pq.cell(rr, 7, f"=D{rr}+E{rr}+F{rr}").number_format = MONEY
+        for j in range(len(bills)):
+            col = 4 + j
+            letter = get_column_letter(j + 1)
+            pq.cell(rr, col, f"=$C{rr}*{letter}$5").number_format = MONEY
+        if bills:
+            pq.cell(rr, last_amt + 1, f"=SUM({get_column_letter(first_amt)}{rr}:{get_column_letter(last_amt)}{rr})").number_format = MONEY
 
     ymp = wb.create_sheet("10 YMP")
     ymp["A1"] = "10 YEAR MAINTENANCE PLAN"
@@ -641,6 +730,12 @@ def init():
     ss.setdefault("pq", None)
     ss.setdefault("ymp", [{"desc": "", "years": [0.0] * 10}])
     ss.setdefault("msg", "")
+    ss.setdefault("current_monthly_levy", 0.0)
+    ss.setdefault("actual_months", 12)
+    ss.setdefault("estate_levy_yearly", 0.0)
+    ss.setdefault("estate_levy_name", "Estate / master HOA levy")
+    ss.setdefault("estate_levy_mode", "separate")
+    ss.setdefault("estate_split", "equal")
 
 
 def section_form(key: str, title: str, help_text: str, rm: bool = False):
@@ -690,11 +785,33 @@ def main():
     s = st.session_state.sections
     ord_amt = ordinary_total(st.session_state)
     reserve = next((r for r in s["levy"] if "reserve" in r["desc"].lower()), None)
+    ordinary_row = next((r for r in s["levy"] if "ordinary" in r["desc"].lower()), None)
+    actual_year = float(ordinary_row["actual"]) if ordinary_row else 0.0
+    months = max(1, int(st.session_state.get("actual_months") or 12))
+    if months < 12 and actual_year > 0:
+        actual_year_full = actual_year / months * 12
+    else:
+        actual_year_full = actual_year
+    current_m = float(st.session_state.get("current_monthly_levy") or 0)
+    if current_m <= 0 and actual_year_full > 0:
+        current_m = actual_year_full / 12
+    new_m = ord_amt / 12
+    levy_pct = 0.0 if current_m == 0 else (new_m / current_m) * 100 - 100
+
+    if actual_year > 0 and ord_amt > 0 and 8 <= (ord_amt / actual_year) <= 15:
+        st.error(
+            f"Ordinary **Actual** looks like one month ({money(actual_year)}), but "
+            f"**Budgeted yearly** is a full year ({money(ord_amt)}). "
+            f"Put the full-year levy in Actual (about {money(actual_year * 12)}), "
+            f"or type the current monthly total in the sidebar. "
+            f"Trustees should compare {money(actual_year)} / month with {money(new_m)} / month."
+        )
+
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Ordinary levies (yearly)", money(ord_amt))
-    m2.metric("Reserve (yearly)", money(float(reserve["yearly"]) if reserve else 0))
-    m3.metric("Net R&M", money(sum_net(s["rm"])))
-    m4.metric("Net municipal", money(sum_net(s["municipal"])))
+    m1.metric("What owners pay now (monthly)", money(current_m))
+    m2.metric("What owners will pay (monthly)", money(new_m), delta=f"{levy_pct:+.1f}%")
+    m3.metric("Ordinary levies for the year", money(ord_amt))
+    m4.metric("Reserve for the year", money(float(reserve["yearly"]) if reserve else 0))
 
     with st.sidebar:
         st.header("Complex")
@@ -717,6 +834,21 @@ def main():
             except Exception as e:
                 st.error(f"Could not read file: {e}")
 
+        st.header("What owners pay now")
+        st.session_state.current_monthly_levy = st.number_input(
+            "Current ordinary levy — all units, one month",
+            value=float(st.session_state.current_monthly_levy),
+            min_value=0.0,
+            step=100.0,
+            help="Example: R26 400 per month for the whole complex. Not the yearly total.",
+        )
+        st.session_state.actual_months = st.number_input(
+            "Months covered by the Actual column",
+            min_value=1,
+            max_value=12,
+            value=int(st.session_state.actual_months),
+            help="12 = a full year. If WeConnectU is only 6 months, put 6 and we scale up for the %.",
+        )
         st.header("Reserve fund")
         st.session_state.reserve_mode = st.radio(
             "How is reserve calculated?",
@@ -735,6 +867,34 @@ def main():
             "Add Special Projects into ordinary levies",
             value=st.session_state.special_in_ordinary,
             help="Tick only if special work is paid from levies, not from the reserve fund.",
+        )
+        st.header("Second levy (master estate)")
+        st.caption("Use this when owners also pay another estate / HOA.")
+        st.session_state.estate_levy_name = st.text_input(
+            "Name on the owner schedule",
+            st.session_state.estate_levy_name,
+        )
+        st.session_state.estate_levy_mode = st.radio(
+            "Who collects it?",
+            ["separate", "we_collect"],
+            format_func=lambda x: (
+                "Owners pay the estate themselves — do not put it in our ordinary levy"
+                if x == "separate"
+                else "We collect it and pay the estate"
+            ),
+            index=0 if st.session_state.estate_levy_mode == "separate" else 1,
+        )
+        st.session_state.estate_levy_yearly = st.number_input(
+            "Estate levy for the whole complex (yearly rands)",
+            value=float(st.session_state.estate_levy_yearly),
+            min_value=0.0,
+            step=1000.0,
+        )
+        st.session_state.estate_split = st.radio(
+            "How is it split per unit?",
+            ["equal", "pq"],
+            format_func=lambda x: "Same amount each unit" if x == "equal" else "By PQ",
+            index=0 if st.session_state.estate_split == "equal" else 1,
         )
         if st.button("Start over"):
             for k in list(st.session_state.keys()):
@@ -768,6 +928,18 @@ Net municipal means gross electricity/water/sewer/refuse minus recoveries from o
 
 Reserve and CSOS are billed on their own PQ columns. They are not folded into ordinary.
 
+### Second levy (inside another estate) — Thornhill / Xanadu
+Xanadu invoices **Thornhill BC**. Thornhill bills owners on the PQ as extra columns:
+
+- Levies (ordinary admin)
+- Xanadu Levies
+- Xanadu HOA CSOS
+- Insurance
+- Reserve Fund
+- CSOS (this complex)
+
+Those estate lines are **not** folded into ordinary. Leave them 0 on a standalone complex.
+
 ### Reserve
 Type the yearly rand amount, **or** choose 15% of ordinary (Matte Court style).
 
@@ -780,6 +952,18 @@ That line’s net = budgeted yearly − insurance payout.
     with tabs[1]:
         st.info("Ordinary and Reserve update when you save the cost sections / sidebar.")
         section_form("levy", "Levy Income", "Add boathouse / boatport / extra levy types with a new row, then Save.")
+        st.divider()
+        section_form(
+            "hoa_income",
+            "Estate / HOA recovered from owners",
+            "Only for complexes inside another estate (Thornhill / Xanadu). These become extra PQ columns. Leave 0 if not used.",
+        )
+        st.divider()
+        section_form(
+            "hoa_expense",
+            "Estate / HOA paid to the estate",
+            "What we pay Xanadu (or any master HOA). Not included in ordinary levies.",
+        )
         st.divider()
         section_form("other", "Other Income", "Fixed Eskom / rental / interest live here. Leave unused lines at 0.")
         st.divider()
@@ -812,7 +996,7 @@ That line’s net = budgeted yearly − insurance payout.
 
     with tabs[8]:
         st.subheader("PQ / levy schedule")
-        st.caption("Each owner: PQ × ordinary monthly + PQ × reserve monthly + PQ × CSOS monthly.")
+        st.caption("Same columns as Thornhill: Levies, estate/HOA lines, insurance (if billed), reserve, CSOS. Each unit = PQ × that column’s monthly total.")
         pq_file = st.file_uploader("PQ Excel or CSV", type=["csv", "xlsx", "xls"], key="pqfile")
         if pq_file:
             raw = pd.read_csv(pq_file) if pq_file.name.lower().endswith(".csv") else pd.read_excel(pq_file)
@@ -843,15 +1027,16 @@ That line’s net = budgeted yearly − insurance payout.
                 st.session_state.pq = clean.to_dict("records")
                 st.success(f"{len(clean)} units. PQ total {clean['PQ'].sum():.6f}")
         if st.session_state.pq:
-            res = float(reserve["yearly"]) if reserve else 0
-            csos = next((r for r in s["levy"] if "csos" in r["desc"].lower()), None)
-            csos_y = float(csos["yearly"]) if csos else 0
             prev = pd.DataFrame(st.session_state.pq)
-            prev["Ordinary"] = prev["PQ"] * (ord_amt / 12)
-            prev["Reserve"] = prev["PQ"] * (res / 12)
-            prev["CSOS"] = prev["PQ"] * (csos_y / 12)
-            prev["Total monthly"] = prev["Ordinary"] + prev["Reserve"] + prev["CSOS"]
+            bills = pq_bill_lines(st.session_state)
+            extra_cols = []
+            for name, yearly in bills:
+                prev[name] = prev["PQ"] * (yearly / 12)
+                extra_cols.append(name)
+            if extra_cols:
+                prev["Total monthly"] = prev[extra_cols].sum(axis=1)
             st.dataframe(prev, use_container_width=True, hide_index=True)
+            st.caption("Monthly column totals: " + " · ".join(f"{n} {money(y/12)}" for n, y in bills))
 
     with tabs[9]:
         st.subheader("10-year maintenance plan")
