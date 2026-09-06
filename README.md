@@ -1,25 +1,24 @@
-# Domus Property Management – Body Corporate Budget
+# Domus Property Management Budget
 
-Streamlit app for trustees: load last year’s figures, review the budget in plain sections, download Excel.
+Streamlit app. Upload WeConnectU Actual vs Budget, review each section, save once, download Excel.
 
-## Files for Streamlit Cloud (repo root)
+## GitHub → Streamlit Cloud
+
+Put these in the **repo root**:
 
 - `app.py`
 - `requirements.txt`
 - `domus_logo.jpeg`
 
-## Deploy
+## How to type numbers
 
-1. Unzip.
-2. Upload those three files to the **root** of your GitHub repo.
-3. Streamlit Cloud → app file `app.py` → Deploy.
+1. Change Actual, % or Budgeted yearly.
+2. Click **Save this section** once.
 
-## Use
+Monthly and % then update. Amounts do not jump back to 0.
 
-1. Sidebar: complex name + financial year.
-2. Upload WeConnectU **Actual vs Budget Excel** (preferred). PDF is a backup only.
-3. Review the tabs. Type either **% Increase** or **Budgeted yearly**.
-4. Type the reserve contribution as a yearly rand amount on Income.
-5. Paste the 10-year plan (copy from Excel).
-6. Upload PQ / ratios.
-7. Download Excel.
+## Levy formula (from Domus Excel packs)
+
+Ordinary levies = Net municipal + Expenditure + R&M after insurance + Personnel + Tax
+
+Reserve is typed, or 15% of ordinary. CSOS is its own column.
