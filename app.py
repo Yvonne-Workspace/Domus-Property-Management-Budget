@@ -169,12 +169,12 @@ def ordinary_total(state: dict) -> float:
 def apply_levy_lines(state: dict) -> None:
     ord_amt = ordinary_total(state)
     for r in state["sections"]["levy"]:
-        d = r["desc"].lower()
-        if "ordinary" in d:
+        f = family(r["desc"])
+        if f == "ordinary":
             r["yearly"] = ord_amt
             a = float(r.get("actual") or 0)
             r["pct"] = 0.0 if a == 0 else (ord_amt / a) * 100 - 100
-        if "reserve" in d:
+        if f == "reserve":
             if state.get("reserve_mode") == "15pct":
                 r["yearly"] = ord_amt * 0.15
             else:
@@ -192,9 +192,11 @@ def pq_bill_lines(state: dict) -> list:
         out.append((str(name), float(yearly or 0)))
 
     for r in s.get("levy", []):
-        if "ordinary" in r["desc"].lower() or r["desc"].lower().strip() in ("levies", "levy"):
+        if family(r["desc"]) == "ordinary":
             add("Levies", r.get("yearly"))
             break
+    if not out:
+        add("Levies", ordinary_total(state))
     for r in s.get("hoa_income", []):
         if float(r.get("yearly") or 0) or float(r.get("actual") or 0):
             add(r["desc"], r.get("yearly"))
@@ -202,11 +204,11 @@ def pq_bill_lines(state: dict) -> list:
         if "insurance" in r["desc"].lower() and (float(r.get("yearly") or 0) or float(r.get("actual") or 0)):
             add("Insurance", r.get("yearly"))
     for r in s.get("levy", []):
-        if "reserve" in r["desc"].lower():
+        if family(r["desc"]) == "reserve" and (float(r.get("yearly") or 0) or float(r.get("actual") or 0)):
             add("Reserve Fund", r.get("yearly"))
             break
     for r in s.get("levy", []):
-        if "csos" in r["desc"].lower():
+        if family(r["desc"]) == "csos_inc" and (float(r.get("yearly") or 0) or float(r.get("actual") or 0)):
             add("CSOS", r.get("yearly"))
             break
     for r in s.get("levy", []):
@@ -251,7 +253,7 @@ def family(desc: str) -> str | None:
         return "boathouse"
     if "boatport" in d:
         return "boatport"
-    if d in ("levies", "levy") or "ordinary" in d or re.search(r"^levies?\s*(unit|received)?$", d):
+    if d in ("levies", "levy") or "ordinary" in d or re.search(r"^levies?\b", d):
         return "ordinary"
     if "electricity" in d and "recover" in d and "commun" in d:
         return "elec_comm"
@@ -315,6 +317,8 @@ def section_for(desc: str) -> str:
         return "recoveries_other"
     if f == "salaries":
         return "personnel"
+    if re.search(r"garden(ing)? contract|site cleaning", d):
+        return "rm"
     if re.search(r"\b(repair|maintenance|plumb|paint|roof|gutter|pool|electrical|fire equipment|gate|paving)\b", d):
         return "rm"
     if re.search(r"\b(wages|salary|paye|uif|bonus|overtime|casual|relief|wca|coida|caretaker|staff)\b", d):
@@ -507,6 +511,8 @@ def sections_from_afs(rows: list) -> dict:
         fam = family(desc)
         if fam == "csos_col":
             continue
+        if re.match(r"^(repairs and maintenance|salaries(& ?wages)?)$", desc, re.I):
+            continue
         sec = section_for(desc)
         if fam == "csos_inc":
             if saw_csos_inc:
@@ -613,7 +619,7 @@ def parse_pq_upload(uploaded):
         "Unit": raw[unit_col].astype(str).str.strip(),
         "PQ": pd.to_numeric(raw[pq_col], errors="coerce").fillna(0),
     })
-    clean = clean[clean["Unit"].str.lower().ne("nan") & clean["Unit"].ne("") & (clean["PQ"] > 0)].reset_index(drop=True)
+    clean = clean[clean["Unit"].str.lower().ne("nan") & clean["Unit"].ne("")].reset_index(drop=True)
     total = float(clean["PQ"].sum())
     note = ""
     if 50 < total < 150:
@@ -660,7 +666,11 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
                 b = {w for w in ni.split() if len(w) > 3 and w not in stop}
                 if a and b:
                     sc = max(sc, len(a & b) / max(len(a), len(b)))
-            if sc > 0.55 and sc > score:
+            if sc > 0.72 and sc > score:
+                if src.get("actual") and it.get("actual"):
+                    a1, a2 = abs(float(src["actual"])), abs(float(it.get("actual") or 0))
+                    if a2 > 1 and max(a1, a2) / max(min(a1, a2), 1) > 15 and sc < 0.98:
+                        continue
                 score, best = sc, (key, it)
         if best:
             key, it = best
@@ -809,18 +819,39 @@ def generate_excel(state: dict) -> BytesIO:
             c.border = THIN
         r += 1
 
+    levy_rows = {}
+
     def write(items, rm=False):
         nonlocal r
+        if not items:
+            start = r
+            r += 1
+            return start, start
         start = r
         for it in items:
             inp(ws.cell(r, 2), it["desc"])
-            inp(ws.cell(r, 3), float(it.get("actual") or 0), MONEY)
-            inp(ws.cell(r, 4), float(it.get("pct") or 0) / 100, "0.0%")
+            act = float(it.get("actual") or 0)
+            pct = float(it.get("pct") or 0)
+            inp(ws.cell(r, 3), act, MONEY)
+            inp(ws.cell(r, 4), pct / 100.0, "0.0%")
             y = float(it.get("yearly") or 0)
+            fam = family(it["desc"])
+            if fam == "ordinary":
+                levy_rows["ordinary"] = r
+            if fam == "csos_inc":
+                levy_rows["csos"] = r
+            if fam == "reserve":
+                levy_rows["reserve"] = r
+            expected = act * (1 + pct / 100.0)
             if it.get("is_recovery"):
-                inp(ws.cell(r, 5), -abs(y), MONEY)
-            else:
+                fml(ws.cell(r, 5), f"-ABS(C{r}*(1+D{r}))")
+            elif fam == "ordinary":
+                # filled after totals
                 inp(ws.cell(r, 5), y, MONEY)
+            elif abs(y - expected) > 1:
+                inp(ws.cell(r, 5), y, MONEY)
+            else:
+                fml(ws.cell(r, 5), f"C{r}*(1+D{r})")
             if rm:
                 inp(ws.cell(r, 6), float(it.get("insurance") or 0), MONEY)
                 fml(ws.cell(r, 7), f"(E{r}-F{r})/12")
@@ -845,24 +876,27 @@ def generate_excel(state: dict) -> BytesIO:
     bar("INCOME — LEVY INCOME")
     hdr()
     a, b = write(s["levy"])
-    levy_ord = a
+    levy_ord = levy_rows.get("ordinary") or a
     tot("TOTAL LEVY INCOME", a, b)
     bar("OTHER INCOME")
     hdr()
     a, b = write(s["other"])
     tot("TOTAL OTHER INCOME", a, b)
-    bar("OTHER RECOVERIES (not municipal utilities)")
+    bar("RECOVERIES ON UTILITIES")
     hdr()
-    a, b = write(s["recoveries_other"])
+    rec_items = [x for x in (s.get("recoveries_other") or [])]
+    a, b = write(rec_items)
     tot("TOTAL OTHER RECOVERIES", a, b)
-    bar("HOA / ESTATE RECOVERED FROM OWNERS (optional — Thornhill / Xanadu)")
-    hdr()
-    a, b = write(s.get("hoa_income") or [])
-    tot("TOTAL HOA RECOVERED", a, b)
-    bar("HOA / ESTATE PAID TO THE ESTATE (optional)")
-    hdr()
-    a, b = write(s.get("hoa_expense") or [])
-    tot("TOTAL HOA PAID", a, b)
+    if state.get("has_master_hoa"):
+        bar("HOA / ESTATE RECOVERED FROM OWNERS")
+        hdr()
+        a, b = write(s.get("hoa_income") or [])
+        tot("TOTAL HOA RECOVERED", a, b)
+        bar("HOA / ESTATE PAID TO THE ESTATE")
+        hdr()
+        a, b = write(s.get("hoa_expense") or [])
+        tot("TOTAL HOA PAID", a, b)
+    bar("MUNICIPAL CHARGES")
     hdr()
     a, b = write(s["municipal"])
     muni_tot = r
@@ -890,11 +924,19 @@ def generate_excel(state: dict) -> BytesIO:
     bar("SPECIAL PROJECTS")
     hdr()
     a, b = write(s["special"])
+    sp_tot = r
     tot("TOTAL SPECIAL PROJECTS", a, b)
     bar("ORDINARY LEVY CHECK")
-    ws.cell(r, 2, "Ordinary levies (must equal net municipal + expenditure + net R&M + personnel + tax)")
-    fml(ws.cell(r, 5), f"E{muni_tot}+E{exp_tot}+E{rm_tot}+E{per_tot}+E{tax_tot}", RED)
+    ws.cell(r, 2, "Ordinary levies = net municipal + expenditure + net R&M + personnel + tax")
+    bits = f"E{muni_tot}+E{exp_tot}+E{rm_tot}+E{per_tot}+E{tax_tot}"
+    if state.get("special_in_ordinary"):
+        bits += f"+E{sp_tot}"
+        ws.cell(r, 2).value = "Ordinary levies = net municipal + expenditure + net R&M + personnel + tax + special"
+    fml(ws.cell(r, 5), bits, RED)
+    fml(ws.cell(r, 6), f"E{r}/12", RED)
     ws.cell(levy_ord, 5).value = f"=E{r}"
+    ws.cell(levy_ord, 5).font = Font(name="Calibri", size=10)
+    ws.cell(levy_ord, 5).number_format = MONEY
     r += 3
     bar("FIXED MONTHLY CHARGES ON THE OWNER INVOICE (optional)")
     hdr()
@@ -903,33 +945,57 @@ def generate_excel(state: dict) -> BytesIO:
     pq = wb.create_sheet("PQ")
     pq["A1"] = "PQ / LEVY SCHEDULE"
     pq["A1"].font = Font(bold=True, size=14, color=NAVY)
+    pq["A2"] = state.get("complex_name") or ""
     bills = pq_bill_lines(state)
-    pq["A3"] = "Monthly totals billed to all owners"
-    for i, (name, yearly) in enumerate(bills):
-        pq.cell(4, i + 1, name)
-        fill(pq.cell(4, i + 1), NAVY)
-        pq.cell(4, i + 1).font = Font(bold=True, color="FFFFFF")
-        pq.cell(5, i + 1, yearly / 12).number_format = MONEY
-        fill(pq.cell(5, i + 1), YELLOW)
+    # Last year’s layout: monthly totals sit above each levy column, each unit = PQ × that monthly total
+    pq["B3"] = "Monthly"
+    name_to_budget = {
+        "Levies": f"BUDGET!F{levy_rows['ordinary']}" if levy_rows.get("ordinary") else None,
+        "CSOS": f"BUDGET!F{levy_rows['csos']}" if levy_rows.get("csos") else None,
+        "Reserve Fund": f"BUDGET!F{levy_rows['reserve']}" if levy_rows.get("reserve") else None,
+    }
     headers = ["#", "Unit", "PQ"] + [n for n, _ in bills] + ["Total"]
     for i, h in enumerate(headers, 1):
-        cell = pq.cell(8, i, h)
+        cell = pq.cell(6, i, h)
         fill(cell, NAVY)
         cell.font = Font(bold=True, color="FFFFFF")
+    for j, (name, yearly) in enumerate(bills):
+        col = 4 + j
+        pq.cell(3, col, name)
+        fill(pq.cell(3, col), NAVY)
+        pq.cell(3, col).font = Font(bold=True, color="FFFFFF")
+        src = name_to_budget.get(name)
+        if src:
+            pq.cell(4, col, f"={src}")
+        else:
+            pq.cell(4, col, float(yearly or 0) / 12)
+        pq.cell(4, col).number_format = MONEY
+        fill(pq.cell(4, col), YELLOW)
     units = state.get("pq") or [{"Unit": "UNIT-1", "PQ": 1.0}]
-    first_amt = 4
-    last_amt = 3 + len(bills)
+    first_amt, last_amt = 4, 3 + len(bills)
     for i, u in enumerate(units):
-        rr = 9 + i
+        rr = 7 + i
         pq.cell(rr, 1, i + 1)
         pq.cell(rr, 2, str(u.get("Unit", "")))
         pq.cell(rr, 3, float(u.get("PQ") or 0)).number_format = "0.000000"
         for j in range(len(bills)):
             col = 4 + j
-            letter = get_column_letter(j + 1)
-            pq.cell(rr, col, f"=$C{rr}*{letter}$5").number_format = MONEY
+            letter = get_column_letter(col)
+            pq.cell(rr, col, f"=$C{rr}*{letter}$4").number_format = MONEY
         if bills:
             pq.cell(rr, last_amt + 1, f"=SUM({get_column_letter(first_amt)}{rr}:{get_column_letter(last_amt)}{rr})").number_format = MONEY
+    last_u = 6 + len(units)
+    tot_row = last_u + 1
+    pq.cell(tot_row, 2, "TOTAL")
+    pq.cell(tot_row, 3, f"=SUM(C7:C{last_u})")
+    pq.cell(tot_row, 3).number_format = "0.000000"
+    if bills:
+        for col in range(first_amt, last_amt + 2):
+            letter = get_column_letter(col)
+            pq.cell(tot_row, col, f"=SUM({letter}7:{letter}{last_u})").number_format = MONEY
+    pq.column_dimensions["A"].width = 6
+    pq.column_dimensions["B"].width = 22
+    pq.column_dimensions["C"].width = 14
 
     ymp = wb.create_sheet("10 YMP")
     ymp["A1"] = "10 YEAR MAINTENANCE PLAN"
@@ -1341,15 +1407,23 @@ That line’s net = budgeted yearly − insurance payout.
                 parts = [p.strip() for p in re.split(r"\t|;|,|\s{2,}", line) if p.strip()]
                 if not parts:
                     continue
-                years, yi = [0.0] * 10, 0
+                if re.match(r"^(total|planned maintenance)$", parts[0], re.I):
+                    continue
+                nums = []
                 for p in parts[1:]:
-                    if yi >= 10:
-                        break
                     n = num(p)
                     if n is None:
                         continue
-                    years[yi] = n
-                    yi += 1
+                    nums.append(n)
+                # First cycle year (2025) and frequency (7) are not Year-1 rands
+                if nums and 2020 <= nums[0] <= 2040:
+                    nums = nums[1:]
+                if nums and 1 <= nums[0] <= 15 and (len(nums) == 1 or nums[1] >= 50):
+                    nums = nums[1:]
+                # Current estimate (10× year 1) then year columns
+                if len(nums) >= 2 and nums[0] > 5000 and abs(nums[0] / 10 - nums[1]) < max(nums[1] * 0.25, 1):
+                    nums = nums[1:]
+                years = (nums + [0.0] * 10)[:10]
                 parsed.append({"desc": parts[0], "years": years})
             if parsed:
                 st.session_state.ymp = parsed
