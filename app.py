@@ -7,6 +7,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
+import pdfplumber
 import streamlit as st
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -390,6 +391,165 @@ def extract_wcu(uploaded) -> list:
     return out
 
 
+AFS_HEADING = re.compile(
+    r"^(gross revenue|other income|expenditure|levy income|recoveries|municipal charges|"
+    r"figures in r|detailed income|statement of|financial statements for|"
+    r"operating costs?|the supplementary|page \d+|index$|note\(s\)|unaudited|"
+    r"registration number|sectional scheme|figures in rand)$",
+    re.I,
+)
+AFS_TOTAL = re.compile(
+    r"\b(profit|surplus|deficit|total net|total income|total expenditure|for the year|"
+    r"balance at|gross surplus)\b",
+    re.I,
+)
+AFS_BS = re.compile(
+    r"property, plant|cash and cash|trade and other|levies in arrears|levies in advance|"
+    r"retained (income|earnings)|current tax liability|borrowings",
+    re.I,
+)
+NUM_TAIL = re.compile(
+    r"(\(?-?\d{1,3}(?:,\d{3})+(?:\.\d+)?\)?|\(?-?\d+\.\d+\)?|(?<![A-Za-z0-9])-|(?<![A-Za-z])\d{1,7})\s*$"
+)
+
+
+def _afs_num(tok: str):
+    tok = tok.strip()
+    if tok == "-":
+        return 0.0
+    neg = tok.startswith("(") and tok.endswith(")")
+    s = tok.replace("(", "").replace(")", "").replace(",", "")
+    try:
+        n = float(s)
+    except ValueError:
+        return None
+    return -n if neg else n
+
+
+def _peel_afs(line: str):
+    nums = []
+    rest = line.rstrip()
+    for _ in range(4):
+        m = NUM_TAIL.search(rest)
+        if not m:
+            break
+        n = _afs_num(m.group(1))
+        if n is None:
+            break
+        nums.append(n)
+        rest = rest[: m.start()].rstrip()
+    nums.reverse()
+    rest = re.sub(r"\s+\d{1,2}$", "", rest).strip()  # note number e.g. Insurance 9
+    rest = re.sub(r"\b20\d{2}\s*$", "", rest).strip()
+    return rest, nums
+
+
+def extract_afs_pdf(uploaded) -> tuple[list, str]:
+    """Read the Detailed Income Statement. Line names stay as on the AFS."""
+    parts = []
+    with pdfplumber.open(uploaded) as pdf:
+        pages = [
+            page.extract_text(x_tolerance=2, y_tolerance=3) or page.extract_text() or ""
+            for page in pdf.pages
+        ]
+    name = ""
+    for t in pages[:3]:
+        for line in t.splitlines():
+            line = re.sub(r"\s+", " ", line).strip()
+            if re.search(r"homeowners|body corporate|association npc", line, re.I) and len(line) > 8:
+                name = line
+                break
+        if name:
+            break
+    hits = [
+        i
+        for i, t in enumerate(pages)
+        if re.search(r"detailed income statement", t, re.I)
+        and re.search(r"figures in r", t, re.I)
+        and len(t) > 500
+    ]
+    if not hits:
+        return [], name
+    run = [hits[-1]]
+    for i in reversed(hits[:-1]):
+        if i == run[0] - 1:
+            run.insert(0, i)
+        else:
+            break
+    chunks = [pages[run[0]]]
+    for t in pages[run[0] + 1 :]:
+        chunks.append(t)
+        if re.search(r"supplementary information presented|notes to the financial statements", t, re.I):
+            break
+    rows = []
+    for raw in "\n".join(chunks).splitlines():
+        line = re.sub(r"\s+", " ", raw).strip()
+        if not line:
+            continue
+        desc, nums = _peel_afs(line)
+        if len(desc) < 3 or not nums:
+            continue
+        if AFS_HEADING.search(desc) or AFS_TOTAL.search(desc) or AFS_BS.search(desc):
+            continue
+        if re.match(r"^\d+$", desc):
+            continue
+        actual = abs(float(nums[0]))
+        rows.append({"desc": desc, "actual": actual})
+    return rows, name
+
+
+def sections_from_afs(rows: list) -> dict:
+    secs = {k: [] for k in default_sections()}
+    saw_csos_inc = False
+    for src in rows:
+        desc = src["desc"]
+        actual = float(src["actual"] or 0)
+        fam = family(desc)
+        if fam == "csos_col":
+            continue
+        sec = section_for(desc)
+        if fam == "csos_inc":
+            if saw_csos_inc:
+                sec = "expenditure"
+            else:
+                saw_csos_inc = True
+                sec = "levy"
+        non_cash = bool(re.search(r"depreciation|scrapping|fair value|impairment", desc, re.I))
+        item = row(
+            desc,
+            "Non-cash on the financial statements. Left at R0 so it does not inflate levies."
+            if non_cash
+            else "Line name from this complex’s financial statements.",
+        )
+        item["actual"] = actual
+        item["yearly"] = 0.0 if non_cash else actual
+        item["pct"] = 0.0
+        item["is_recovery"] = "recover" in norm(desc) and sec == "municipal"
+        if fam == "ins_claim":
+            item["note"] = "Insurance claim. Deduct on the matching R&M line. Do not budget as normal income."
+            item["yearly"] = 0.0
+            sec = "recoveries_other"
+        secs[sec].append(item)
+    if not any(family(i["desc"]) == "ordinary" for i in secs["levy"]):
+        ordinary = row(
+            "Ordinary Levies",
+            "Added so levies can be calculated. Name will follow the AFS if it had a levy line.",
+        )
+        ordinary["yearly"] = 0.0
+        secs["levy"].insert(0, ordinary)
+    if not any("reserve" in i["desc"].lower() for i in secs["levy"]):
+        insert_at = 1 if secs["levy"] else 0
+        secs["levy"].insert(
+            insert_at,
+            row("Reserve Fund Contribution", "Not always a separate AFS line. Type the yearly amount trustees want."),
+        )
+    if not secs["special"]:
+        secs["special"] = [row("Special Project 1"), row("Special Project 2")]
+    if not secs["tax"]:
+        secs["tax"] = [row("Taxation Payable", "Based on taxable investment income.")]
+    return secs
+
+
 def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
     nxt = {k: [dict(x) for x in v] for k, v in sections.items()}
     used = set()
@@ -727,6 +887,8 @@ def init():
     ss.setdefault("reserve_mode", "amount")
     ss.setdefault("reserve_amount", 0.0)
     ss.setdefault("special_in_ordinary", False)
+    ss.setdefault("afs_sections", None)
+    ss.setdefault("wcu_rows", None)
     ss.setdefault("pq", None)
     ss.setdefault("ymp", [{"desc": "", "years": [0.0] * 10}])
     ss.setdefault("msg", "")
@@ -779,7 +941,7 @@ def main():
             st.image(str(logo), width=110)
     with cols[1]:
         st.title("Domus Property Management Budget")
-        st.caption("Load WeConnectU → change a section → click Save once → download Excel")
+        st.caption("Load the financial statement PDF (line names) then WeConnectU Excel (rands). Either order is fine.")
 
     apply_levy_lines(st.session_state)
     s = st.session_state.sections
@@ -819,16 +981,52 @@ def main():
         st.session_state.fin_year = st.text_input("Financial year", st.session_state.fin_year)
 
         st.header("Load last year")
+        st.caption("1. This complex’s annual financial statement PDF — budget lines will match the FS. 2. WeConnectU Actual vs Budget Excel — fills the rands.")
+        pdf_up = st.file_uploader("Annual financial statement (PDF)", type=["pdf"], key="afs_pdf")
+        if pdf_up and st.button("Load financial statement", type="primary"):
+            try:
+                rows, name = extract_afs_pdf(pdf_up)
+                if not rows:
+                    st.error(
+                        "Could not find a Detailed Income Statement in that PDF. "
+                        "Use the WeConnectU Excel for numbers, or try another AFS PDF."
+                    )
+                else:
+                    secs = sections_from_afs(rows)
+                    st.session_state.afs_sections = secs
+                    if name and not st.session_state.complex_name:
+                        st.session_state.complex_name = name
+                    if st.session_state.get("wcu_rows"):
+                        secs, added = match_into(st.session_state.wcu_rows, secs)
+                        st.session_state.msg = (
+                            f"FS lines loaded ({len(rows)}). WeConnectU rands applied. Extra lines: {added}."
+                        )
+                    else:
+                        st.session_state.sections = secs
+                        st.session_state.msg = (
+                            f"Loaded {len(rows)} lines from the financial statements. "
+                            "Now load WeConnectU Excel to fill last year’s rands."
+                        )
+                    if st.session_state.get("wcu_rows"):
+                        st.session_state.sections = secs
+                    apply_levy_lines(st.session_state)
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Could not read PDF: {e}")
+
         up = st.file_uploader("WeConnectU Actual vs Budget (Excel)", type=["xlsx", "xls", "xlsm"])
-        if up and st.button("Load Excel", type="primary"):
+        if up and st.button("Load Excel"):
             try:
                 rows = extract_wcu(up)
                 if not rows:
                     st.error("No lines found. Export Options → Budget and Actuals.")
                 else:
-                    secs, added = match_into(rows, default_sections())
+                    st.session_state.wcu_rows = rows
+                    base = st.session_state.get("afs_sections") or default_sections()
+                    secs, added = match_into(rows, base)
                     st.session_state.sections = secs
-                    st.session_state.msg = f"Loaded {len(rows)} lines. Extra lines for this complex: {added}."
+                    source = "financial statement lines" if st.session_state.get("afs_sections") else "standard template"
+                    st.session_state.msg = f"Loaded {len(rows)} WeConnectU lines onto the {source}. Extra lines: {added}."
                     apply_levy_lines(st.session_state)
                     st.rerun()
             except Exception as e:
