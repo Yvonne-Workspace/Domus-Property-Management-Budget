@@ -1022,6 +1022,118 @@ def generate_excel(state: dict) -> BytesIO:
     return bio
 
 
+RESTORE_BARS = [
+    ("levy income", "levy"),
+    ("other income", "other"),
+    ("recoveries on utilities", "recoveries_other"),
+    ("other recoveries", "recoveries_other"),
+    ("hoa / estate recovered", "hoa_income"),
+    ("hoa / estate paid", "hoa_expense"),
+    ("municipal", "municipal"),
+    ("expenditure", "expenditure"),
+    ("repair", "rm"),
+    ("personnel", "personnel"),
+    ("income tax", "tax"),
+    ("special", "special"),
+    ("fixed monthly", "fixed"),
+]
+
+
+def restore_from_app_excel(uploaded) -> dict:
+    """Reload a file this app previously downloaded so work is not lost."""
+    xl = pd.ExcelFile(uploaded)
+    names = {n.lower(): n for n in xl.sheet_names}
+    out = {
+        "sections": {k: [] for k in default_sections()},
+        "complex_name": "",
+        "fin_year": "",
+        "pq": None,
+        "ymp": [{"desc": "", "years": [0.0] * 10}],
+    }
+    if "budget" in names:
+        df = pd.read_excel(xl, sheet_name=names["budget"], header=None)
+        for r in range(min(8, len(df))):
+            for c in range(min(8, df.shape[1])):
+                v = str(df.iat[r, c] or "").strip().lower()
+                if v.startswith("complex") and c + 1 < df.shape[1]:
+                    out["complex_name"] = str(df.iat[r, c + 1] or "").strip()
+                if v.startswith("year") and c + 1 < df.shape[1]:
+                    out["fin_year"] = str(df.iat[r, c + 1] or "").strip()
+        current = None
+        for r in range(len(df)):
+            desc = str(df.iat[r, 1] if df.shape[1] > 1 else "").strip()
+            if not desc:
+                continue
+            low = desc.lower()
+            mapped = next((k for title, k in RESTORE_BARS if title in low and "total" not in low and "check" not in low), None)
+            if mapped:
+                current = mapped
+                continue
+            if current is None:
+                continue
+            if re.match(r"^(description|total |net |ordinary levy)", desc, re.I):
+                continue
+            actual = abs(num(df.iat[r, 2] if df.shape[1] > 2 else None) or 0.0)
+            pct_raw = num(df.iat[r, 3] if df.shape[1] > 3 else None) or 0.0
+            pct = pct_raw * 100 if abs(pct_raw) <= 2 else pct_raw
+            yearly = abs(num(df.iat[r, 4] if df.shape[1] > 4 else None) or 0.0)
+            note = str(df.iat[r, 6] if df.shape[1] > 6 else "") or str(df.iat[r, 7] if df.shape[1] > 7 else "")
+            ins = 0.0
+            if current == "rm" and df.shape[1] > 5:
+                ins = abs(num(df.iat[r, 5]) or 0.0)
+            item = row(desc, "" if note in ("nan", "None") else note)
+            item["actual"] = actual
+            item["pct"] = pct
+            item["yearly"] = yearly if yearly else actual * (1 + pct / 100)
+            item["insurance"] = ins
+            item["is_recovery"] = "recover" in norm(desc) and current == "municipal"
+            out["sections"][current].append(item)
+    pq_name = names.get("pq")
+    if pq_name:
+        pq = pd.read_excel(xl, sheet_name=pq_name, header=None)
+        header = None
+        for i in range(min(12, len(pq))):
+            vals = [str(v).strip().lower() for v in pq.iloc[i].tolist()]
+            if "unit" in vals and any(v == "pq" for v in vals):
+                header = i
+                break
+        if header is not None:
+            cols = [str(c).strip() for c in pq.iloc[header].tolist()]
+            unit_i = next((i for i, c in enumerate(cols) if c.lower() == "unit"), 1)
+            pq_i = next((i for i, c in enumerate(cols) if c.lower() == "pq"), 2)
+            recs = []
+            for r in range(header + 1, len(pq)):
+                unit = str(pq.iat[r, unit_i] or "").strip()
+                if not unit or unit.lower() in ("nan", "total"):
+                    continue
+                recs.append({"Unit": unit, "PQ": float(num(pq.iat[r, pq_i]) or 0)})
+            if recs:
+                out["pq"] = recs
+    ymp_name = next((n for k, n in names.items() if "ymp" in k or "10" in k), None)
+    if ymp_name:
+        ymp = pd.read_excel(xl, sheet_name=ymp_name, header=None)
+        header = None
+        for i in range(min(8, len(ymp))):
+            vals = [str(v).strip().lower() for v in ymp.iloc[i].tolist()]
+            if any("year 1" in v or v == "y1" for v in vals) or (vals and "project" in vals[0]):
+                header = i
+                break
+        if header is not None:
+            projects = []
+            for r in range(header + 1, len(ymp)):
+                desc = str(ymp.iat[r, 0] or "").strip()
+                if not desc or desc.lower() in ("nan", "total"):
+                    continue
+                years = []
+                for c in range(1, min(11, ymp.shape[1])):
+                    years.append(float(num(ymp.iat[r, c]) or 0))
+                years = (years + [0.0] * 10)[:10]
+                projects.append({"desc": desc, "years": years})
+            if projects:
+                out["ymp"] = projects
+    return out
+
+
 def init():
     ss = st.session_state
     ss.setdefault("sections", default_sections())
@@ -1190,6 +1302,27 @@ def main():
             except Exception as e:
                 st.error(f"Could not read PQ file: {e}")
 
+        st.header("Keep your work")
+        st.caption("Do not click Start over. Download Excel, then you can restore it here.")
+        rest = st.file_uploader("Restore this app’s Excel", type=["xlsx"], key="restore_xlsx")
+        if rest and st.button("Restore my budget"):
+            try:
+                data = restore_from_app_excel(rest)
+                st.session_state.sections = data["sections"]
+                if data.get("complex_name"):
+                    st.session_state.complex_name = data["complex_name"]
+                if data.get("fin_year"):
+                    st.session_state.fin_year = data["fin_year"]
+                if data.get("pq"):
+                    st.session_state.pq = data["pq"]
+                if data.get("ymp"):
+                    st.session_state.ymp = data["ymp"]
+                apply_levy_lines(st.session_state)
+                st.session_state.msg = "Budget restored from Excel. Nothing was started over."
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not restore: {e}")
+
         st.header("What owners pay now")
         st.session_state.current_monthly_levy = st.number_input(
             "Current ordinary levy — all units, one month",
@@ -1252,7 +1385,8 @@ def main():
             format_func=lambda x: "Same amount each unit" if x == "equal" else "By PQ",
             index=0 if st.session_state.estate_split == "equal" else 1,
         )
-        if st.button("Start over"):
+        st.caption("This wipes the screen. Download Excel first if you still need the numbers.")
+        if st.button("Erase everything"):
             for k in list(st.session_state.keys()):
                 del st.session_state[k]
             st.rerun()
