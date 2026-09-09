@@ -708,6 +708,8 @@ def items_to_df(items: list, rm: bool) -> pd.DataFrame:
     cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Notes"]
     if rm:
         cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Insurance payout", "Notes"]
+    if not recs:
+        return pd.DataFrame(columns=cols)
     return pd.DataFrame(recs)[cols]
 
 
@@ -964,6 +966,7 @@ def init():
     ss.setdefault("special_in_ordinary", False)
     ss.setdefault("afs_sections", None)
     ss.setdefault("wcu_rows", None)
+    ss.setdefault("has_master_hoa", False)
     ss.setdefault("pq", None)
     ss.setdefault("ymp", [{"desc": "", "years": [0.0] * 10}])
     ss.setdefault("msg", "")
@@ -979,7 +982,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
     st.subheader(title)
     if help_text:
         st.caption(help_text)
-    items = st.session_state.sections[key]
+    items = st.session_state.sections.get(key) or []
     df = items_to_df(items, rm)
     with st.form(f"form_{key}"):
         edited = st.data_editor(
@@ -1239,18 +1242,26 @@ That line’s net = budgeted yearly − insurance payout.
     with tabs[1]:
         st.info("Ordinary and Reserve update when you save the cost sections / sidebar.")
         section_form("levy", "Levy Income", "Add boathouse / boatport / extra levy types with a new row, then Save.")
-        st.divider()
-        section_form(
-            "hoa_income",
-            "Estate / HOA recovered from owners",
-            "Only for complexes inside another estate (Thornhill / Xanadu). These become extra PQ columns. Leave 0 if not used.",
+        st.session_state.has_master_hoa = st.checkbox(
+            "This complex is inside another estate (e.g. Xanadu). We still bill that levy to owners.",
+            value=bool(st.session_state.get("has_master_hoa")),
+            help="Leave off for Falcon View and other standalone complexes. Owners pay the estate directly — nothing on our budget.",
         )
-        st.divider()
-        section_form(
-            "hoa_expense",
-            "Estate / HOA paid to the estate",
-            "What we pay Xanadu (or any master HOA). Not included in ordinary levies.",
-        )
+        if st.session_state.has_master_hoa:
+            st.divider()
+            section_form(
+                "hoa_income",
+                "Estate / HOA recovered from owners",
+                "Billed to owners on the PQ as extra columns (Thornhill / Xanadu style).",
+            )
+            st.divider()
+            section_form(
+                "hoa_expense",
+                "Estate / HOA paid to the estate",
+                "What we pay the master HOA. Not included in ordinary levies.",
+            )
+        else:
+            st.caption("Estate / Xanadu lines are hidden. Owners pay that estate directly — it does not go through this budget.")
         st.divider()
         section_form("other", "Other Income", "Fixed Eskom / rental / interest live here. Leave unused lines at 0.")
         st.divider()
