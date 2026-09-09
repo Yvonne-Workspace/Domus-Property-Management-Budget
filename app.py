@@ -1010,22 +1010,54 @@ That line’s net = budgeted yearly − insurance payout.
                     seen[c] = 0
                     cols.append(c)
             raw.columns = cols
-            unit_col = next((c for c in raw.columns if re.search(r"unit|owner|code", str(c), re.I)), None)
-            pq_col = next((c for c in raw.columns if re.search(r"pq|quota|ratio|^share$", str(c), re.I)), None)
+            unit_candidates = [c for c in raw.columns if re.search(r"customer code|owner code|account code|unit|owner|code|section", str(c), re.I) and "size" not in str(c).lower()]
+            unit_col = None
+            for c in unit_candidates:
+                sample = raw[c].astype(str).head(20)
+                if sample.str.contains(r"[A-Za-z]", regex=True).any() and "customer" in str(c).lower():
+                    unit_col = c
+                    break
+            if unit_col is None:
+                for c in unit_candidates:
+                    sample = raw[c].astype(str).head(20)
+                    if sample.str.contains(r"[A-Za-z]", regex=True).any():
+                        unit_col = c
+                        break
+            if unit_col is None and unit_candidates:
+                unit_col = unit_candidates[0]
+
+            # WeConnectU "unit pqs" often has PQ = 0 and the real share in Ratio 1
+            pq_candidates = [c for c in raw.columns if re.search(r"pq|quota|ratio|^share$", str(c), re.I)]
+            pq_col, best = None, -1
+            for c in pq_candidates:
+                nums = pd.to_numeric(raw[c], errors="coerce").fillna(0.0)
+                pos = nums[nums > 0]
+                if len(pos) < 2:
+                    continue
+                s = float(pos.sum())
+                score = len(pos)
+                if abs(s - 1) < 0.2:
+                    score += 80
+                if abs(s - 100) < 20:
+                    score += 60
+                if score > best:
+                    best, pq_col = score, c
+            if pq_col is None and pq_candidates:
+                pq_col = pq_candidates[0]
             if not unit_col or not pq_col:
-                st.error("Need a Unit column and a PQ column. Found: " + ", ".join(map(str, raw.columns)))
+                st.error("Need a Unit column and a PQ / Ratio column. Found: " + ", ".join(map(str, raw.columns)))
             else:
                 clean = pd.DataFrame({
                     "Unit": raw[unit_col].astype(str).str.strip(),
                     "PQ": pd.to_numeric(raw[pq_col], errors="coerce").fillna(0),
                 })
-                clean = clean[clean["Unit"].str.lower().ne("nan") & clean["Unit"].ne("")].reset_index(drop=True)
+                clean = clean[clean["Unit"].str.lower().ne("nan") & clean["Unit"].ne("") & (clean["PQ"] > 0)].reset_index(drop=True)
                 total = clean["PQ"].sum()
                 if 50 < total < 150:
                     clean["PQ"] = clean["PQ"] / 100
                     st.info(f"PQ looked like percentages (total {total:.2f}). Divided by 100.")
                 st.session_state.pq = clean.to_dict("records")
-                st.success(f"{len(clean)} units. PQ total {clean['PQ'].sum():.6f}")
+                st.success(f"{len(clean)} units. Used column **{pq_col}** for PQ (total {clean['PQ'].sum():.6f}).")
         if st.session_state.pq:
             prev = pd.DataFrame(st.session_state.pq)
             bills = pq_bill_lines(st.session_state)
