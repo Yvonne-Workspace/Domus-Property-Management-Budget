@@ -550,6 +550,81 @@ def sections_from_afs(rows: list) -> dict:
     return secs
 
 
+def parse_pq_upload(uploaded):
+    """WeConnectU unit-pqs: PQ column is often 0, real share is Ratio 1."""
+    if uploaded.name.lower().endswith(".csv"):
+        raw = pd.read_csv(uploaded)
+    else:
+        raw = pd.read_excel(uploaded)
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = [" ".join(str(x) for x in col if str(x) != "nan").strip() for col in raw.columns]
+    raw.columns = [str(c).strip() for c in raw.columns]
+    seen, cols = {}, []
+    for c in raw.columns:
+        if c in seen:
+            seen[c] += 1
+            cols.append(f"{c}_{seen[c]}")
+        else:
+            seen[c] = 0
+            cols.append(c)
+    raw.columns = cols
+
+    unit_candidates = [
+        c for c in raw.columns
+        if re.search(r"customer code|owner code|account code|unit|owner|code|section", str(c), re.I)
+        and "size" not in str(c).lower()
+    ]
+    unit_col = None
+    for c in unit_candidates:
+        sample = raw[c].astype(str).head(20)
+        if sample.str.contains(r"[A-Za-z]", regex=True).any() and "customer" in str(c).lower():
+            unit_col = c
+            break
+    if unit_col is None:
+        for c in unit_candidates:
+            sample = raw[c].astype(str).head(20)
+            if sample.str.contains(r"[A-Za-z]", regex=True).any():
+                unit_col = c
+                break
+    if unit_col is None and unit_candidates:
+        unit_col = unit_candidates[0]
+
+    pq_candidates = [c for c in raw.columns if re.search(r"pq|quota|ratio|^share$", str(c), re.I)]
+    pq_col, best = None, -1
+    for c in pq_candidates:
+        nums = pd.to_numeric(raw[c], errors="coerce").fillna(0.0)
+        pos = nums[nums > 0]
+        if len(pos) < 2:
+            continue
+        s = float(pos.sum())
+        score = len(pos)
+        if abs(s - 1) < 0.2:
+            score += 80
+        if abs(s - 100) < 20:
+            score += 60
+        if score > best:
+            best, pq_col = score, c
+    if pq_col is None and pq_candidates:
+        pq_col = pq_candidates[0]
+    if not unit_col or not pq_col:
+        raise ValueError("Need a Unit / Customer Code column and a PQ or Ratio column. Found: " + ", ".join(map(str, raw.columns)))
+
+    clean = pd.DataFrame({
+        "Unit": raw[unit_col].astype(str).str.strip(),
+        "PQ": pd.to_numeric(raw[pq_col], errors="coerce").fillna(0),
+    })
+    clean = clean[clean["Unit"].str.lower().ne("nan") & clean["Unit"].ne("") & (clean["PQ"] > 0)].reset_index(drop=True)
+    total = float(clean["PQ"].sum())
+    note = ""
+    if 50 < total < 150:
+        clean["PQ"] = clean["PQ"] / 100
+        note = f" Values looked like percentages (total {total:.2f}) so they were divided by 100."
+    if clean.empty:
+        raise ValueError(f"No units with a PQ greater than 0. Tried column {pq_col}.")
+    msg = f"Loaded {len(clean)} units from column {pq_col} (PQ total {clean['PQ'].sum():.6f}).{note} Open the PQ / Levies tab to see each owner."
+    return clean.to_dict("records"), msg
+
+
 def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
     nxt = {k: [dict(x) for x in v] for k, v in sections.items()}
     used = set()
@@ -981,7 +1056,11 @@ def main():
         st.session_state.fin_year = st.text_input("Financial year", st.session_state.fin_year)
 
         st.header("Load last year")
-        st.caption("1. This complex’s annual financial statement PDF — budget lines will match the FS. 2. WeConnectU Actual vs Budget Excel — fills the rands.")
+        st.caption(
+            "1. Financial statement PDF — line names. "
+            "2. WeConnectU Excel — last year’s rands. "
+            "3. PQ Excel — each unit’s share."
+        )
         pdf_up = st.file_uploader("Annual financial statement (PDF)", type=["pdf"], key="afs_pdf")
         if pdf_up and st.button("Load financial statement", type="primary"):
             try:
@@ -1031,6 +1110,16 @@ def main():
                     st.rerun()
             except Exception as e:
                 st.error(f"Could not read file: {e}")
+
+        pq_up = st.file_uploader("PQ / unit ratios (Excel or CSV)", type=["csv", "xlsx", "xls"], key="pq_sidebar")
+        if pq_up and st.button("Load PQs"):
+            try:
+                records, msg = parse_pq_upload(pq_up)
+                st.session_state.pq = records
+                st.session_state.msg = msg
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not read PQ file: {e}")
 
         st.header("What owners pay now")
         st.session_state.current_monthly_levy = st.number_input(
@@ -1194,79 +1283,39 @@ That line’s net = budgeted yearly − insurance payout.
 
     with tabs[8]:
         st.subheader("PQ / levy schedule")
-        st.caption("Same columns as Thornhill: Levies, estate/HOA lines, insurance (if billed), reserve, CSOS. Each unit = PQ × that column’s monthly total.")
-        pq_file = st.file_uploader("PQ Excel or CSV", type=["csv", "xlsx", "xls"], key="pqfile")
-        if pq_file:
-            raw = pd.read_csv(pq_file) if pq_file.name.lower().endswith(".csv") else pd.read_excel(pq_file)
-            raw.columns = [str(c).strip() for c in raw.columns]
-            seen, cols = {}, []
-            for c in raw.columns:
-                if c in seen:
-                    seen[c] += 1
-                    cols.append(f"{c}_{seen[c]}")
-                else:
-                    seen[c] = 0
-                    cols.append(c)
-            raw.columns = cols
-            unit_candidates = [c for c in raw.columns if re.search(r"customer code|owner code|account code|unit|owner|code|section", str(c), re.I) and "size" not in str(c).lower()]
-            unit_col = None
-            for c in unit_candidates:
-                sample = raw[c].astype(str).head(20)
-                if sample.str.contains(r"[A-Za-z]", regex=True).any() and "customer" in str(c).lower():
-                    unit_col = c
-                    break
-            if unit_col is None:
-                for c in unit_candidates:
-                    sample = raw[c].astype(str).head(20)
-                    if sample.str.contains(r"[A-Za-z]", regex=True).any():
-                        unit_col = c
-                        break
-            if unit_col is None and unit_candidates:
-                unit_col = unit_candidates[0]
-
-            # WeConnectU "unit pqs" often has PQ = 0 and the real share in Ratio 1
-            pq_candidates = [c for c in raw.columns if re.search(r"pq|quota|ratio|^share$", str(c), re.I)]
-            pq_col, best = None, -1
-            for c in pq_candidates:
-                nums = pd.to_numeric(raw[c], errors="coerce").fillna(0.0)
-                pos = nums[nums > 0]
-                if len(pos) < 2:
-                    continue
-                s = float(pos.sum())
-                score = len(pos)
-                if abs(s - 1) < 0.2:
-                    score += 80
-                if abs(s - 100) < 20:
-                    score += 60
-                if score > best:
-                    best, pq_col = score, c
-            if pq_col is None and pq_candidates:
-                pq_col = pq_candidates[0]
-            if not unit_col or not pq_col:
-                st.error("Need a Unit column and a PQ / Ratio column. Found: " + ", ".join(map(str, raw.columns)))
-            else:
-                clean = pd.DataFrame({
-                    "Unit": raw[unit_col].astype(str).str.strip(),
-                    "PQ": pd.to_numeric(raw[pq_col], errors="coerce").fillna(0),
-                })
-                clean = clean[clean["Unit"].str.lower().ne("nan") & clean["Unit"].ne("") & (clean["PQ"] > 0)].reset_index(drop=True)
-                total = clean["PQ"].sum()
-                if 50 < total < 150:
-                    clean["PQ"] = clean["PQ"] / 100
-                    st.info(f"PQ looked like percentages (total {total:.2f}). Divided by 100.")
-                st.session_state.pq = clean.to_dict("records")
-                st.success(f"{len(clean)} units. Used column **{pq_col}** for PQ (total {clean['PQ'].sum():.6f}).")
-        if st.session_state.pq:
+        st.caption("Upload the WeConnectU unit PQs on the left. Each owner = their PQ × that column’s monthly total.")
+        if not st.session_state.pq:
+            st.info("No PQs loaded yet. On the left, choose the unit PQs Excel and click Load PQs.")
+        else:
             prev = pd.DataFrame(st.session_state.pq)
+            if "Unit" not in prev.columns:
+                prev = prev.rename(columns={prev.columns[0]: "Unit"})
             bills = pq_bill_lines(st.session_state)
             extra_cols = []
             for name, yearly in bills:
-                prev[name] = prev["PQ"] * (yearly / 12)
-                extra_cols.append(name)
+                col = str(name)
+                if col in ("Unit", "PQ"):
+                    col = f"{name} levy"
+                prev[col] = prev["PQ"].astype(float) * (float(yearly or 0) / 12)
+                extra_cols.append(col)
             if extra_cols:
                 prev["Total monthly"] = prev[extra_cols].sum(axis=1)
-            st.dataframe(prev, use_container_width=True, hide_index=True)
-            st.caption("Monthly column totals: " + " · ".join(f"{n} {money(y/12)}" for n, y in bills))
+            show = prev.copy()
+            if "PQ" in show.columns:
+                show["PQ"] = show["PQ"].astype(float).round(6)
+            for c in extra_cols + (["Total monthly"] if extra_cols else []):
+                show[c] = show[c].astype(float).round(2)
+            st.dataframe(show, use_container_width=True, hide_index=True)
+            levy_sum = sum(float(y or 0) for _, y in bills)
+            if levy_sum < 1:
+                st.warning(
+                    "PQ shares are loaded, but levy rands are still 0. "
+                    "Load the financial statement and WeConnectU Excel on the left, "
+                    "then Save the cost tabs so ordinary / reserve / CSOS fill in."
+                )
+            else:
+                st.caption("Monthly column totals: " + " · ".join(f"{n} {money(y/12)}" for n, y in bills))
+            st.caption(f"{len(prev)} units. PQ total {float(prev['PQ'].sum()):.6f} (should be about 1.000).")
 
     with tabs[9]:
         st.subheader("10-year maintenance plan")
