@@ -92,6 +92,7 @@ def default_sections() -> dict:
             {**row("Less: Sewerage recovered from owners"), "is_recovery": True},
             row("Refuse Removal"),
             {**row("Less: Refuse recovered from owners"), "is_recovery": True},
+            {**row("Less: Sewer plant electricity recovered"), "is_recovery": True},
             row("Rates / Property Tax"),
         ],
         "expenditure": [
@@ -129,10 +130,23 @@ def default_sections() -> dict:
     }
 
 
+def is_muni_recovery(desc: str, flag: bool = False) -> bool:
+    d = (desc or "").lower()
+    if flag:
+        return True
+    if d.startswith("less:"):
+        return True
+    if "recover" in d:
+        return True
+    if "sewer" in d and "plant" in d and "electric" in d:
+        return True
+    return False
+
+
 def net_of(r: dict) -> float:
     y = float(r.get("yearly") or 0)
     ins = float(r.get("insurance") or 0)
-    if r.get("is_recovery"):
+    if is_muni_recovery(r.get("desc") or "", r.get("is_recovery")):
         return -abs(y)
     return y - ins
 
@@ -307,9 +321,11 @@ def family(desc: str) -> str | None:
         return "invest"
     if "penalty" in d:
         return "penalty"
+    if re.search(r"sewer(age)?\s*plant", d) and re.search(r"electric|usage", d):
+        return "elec_rec"
     if "rental" in d and "garage" in d:
         return "garage"
-    if "rental" in d or "rent received" in d:
+    if ("rental" in d or "rent received" in d) and "electric" not in d:
         return "rental"
     if "electricity" in d and "recover" not in d:
         return "elec_g"
@@ -759,7 +775,7 @@ def items_to_df(items: list, rm: bool) -> pd.DataFrame:
     return pd.DataFrame(recs)[cols]
 
 
-def save_editor(edited: pd.DataFrame, previous: list, rm: bool) -> list:
+def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool = False) -> list:
     out = []
     records = edited.to_dict("records")
     for i, rec in enumerate(records):
@@ -767,18 +783,19 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool) -> list:
         if not desc:
             continue
         prev = previous[i] if i < len(previous) else {}
-        actual = float(rec.get("Actual") or 0)
+        actual = abs(float(rec.get("Actual") or 0))
         pct = float(rec.get("% Increase") or 0)
-        yearly = float(rec.get("Budgeted yearly") or 0)
+        yearly = abs(float(rec.get("Budgeted yearly") or 0))
         ins = float(rec.get("Insurance payout") or 0) if rm else float(prev.get("insurance") or 0)
         old_pct = float(prev.get("pct") or 0)
-        old_y = float(prev.get("yearly") or 0)
+        old_y = abs(float(prev.get("yearly") or 0))
         pct_changed = abs(pct - old_pct) > 0.05
         y_changed = abs(yearly - old_y) > 0.02
         if pct_changed and not y_changed:
             yearly = actual * (1 + pct / 100)
         elif y_changed:
             pct = 0.0 if actual == 0 else (yearly / actual) * 100 - 100
+        recovery = municipal and is_muni_recovery(desc, prev.get("is_recovery"))
         out.append({
             "id": prev.get("id") or uid(),
             "desc": desc,
@@ -787,7 +804,7 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool) -> list:
             "yearly": yearly,
             "insurance": ins,
             "note": str(rec.get("Notes") or ""),
-            "is_recovery": bool(prev.get("is_recovery")) or desc.lower().startswith("less:"),
+            "is_recovery": recovery,
         })
     return out
 
@@ -878,7 +895,7 @@ def generate_excel(state: dict) -> BytesIO:
                 levy_rows["csos"] = r
             if fam == "reserve":
                 levy_rows["reserve"] = r
-            if it.get("is_recovery"):
+            if is_muni_recovery(it.get("desc") or "", it.get("is_recovery")):
                 inp(ws.cell(r, 5), -abs(y if y else act * (1 + pct / 100.0)), MONEY)
             else:
                 inp(ws.cell(r, 5), y if y else act * (1 + pct / 100.0), MONEY)
@@ -1211,7 +1228,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
         )
         saved = st.form_submit_button("Save this section", type="primary")
     if saved:
-        st.session_state.sections[key] = save_editor(edited, items, rm)
+        st.session_state.sections[key] = save_editor(edited, items, rm, municipal=(key == "municipal"))
         apply_levy_lines(st.session_state)
         st.success("Saved. Monthly = yearly ÷ 12. % = (yearly ÷ actual) × 100 − 100.")
         st.rerun()
@@ -1516,7 +1533,11 @@ That line’s net = budgeted yearly − insurance payout.
         section_form("fixed", "Fixed monthly charges on the owner invoice", "Optional. Mount Kos: insurance + prepaid + Eskom fixed.")
 
     with tabs[2]:
-        section_form("municipal", "Municipal charges", "Gross amount on its own line. Recovery on the ‘Less:’ line.")
+        section_form(
+            "municipal",
+            "Municipal charges",
+            "Gross on its own line. Recoveries: add a new row, name it ‘… recovered’, type a POSITIVE rand (no minus). Save. We subtract it. Example: Less: Sewer plant electricity recovered  335079.",
+        )
 
     with tabs[3]:
         section_form("expenditure", "Expenditure", "Operating costs except R&M, personnel and tax. Add or delete rows as needed.")
