@@ -166,6 +166,42 @@ def ordinary_total(state: dict) -> float:
     return total
 
 
+def levy_pieces(state: dict) -> list:
+    s = state["sections"]
+    return [
+        ("Net municipal (gross minus recoveries)", sum_net(s["municipal"])),
+        ("Expenditure", sum(net_of(r) for r in s["expenditure"] if not skip_from_ordinary(r, state))),
+        ("R&M after insurance", sum_net(s["rm"])),
+        ("Personnel", sum_net(s["personnel"])),
+        ("Tax", sum_net(s["tax"])),
+        ("Special (only if ticked)", sum_net(s["special"]) if state.get("special_in_ordinary") else 0.0),
+    ]
+
+
+def odd_budget_lines(state: dict) -> list:
+    """Lines that usually explain a huge levy %."""
+    flags = []
+    for key, items in state["sections"].items():
+        for it in items:
+            desc = it.get("desc") or ""
+            act = float(it.get("actual") or 0)
+            y = float(it.get("yearly") or 0)
+            pct = float(it.get("pct") or 0)
+            if pct > 80:
+                flags.append(f"{desc}: % is {pct:.0f} (actual {money(act)} → yearly {money(y)})")
+            elif act > 1 and y > act * 8:
+                flags.append(f"{desc}: yearly {money(y)} is far above actual {money(act)}")
+            if re.search(r"airtime|gate", desc, re.I) and y > 20000:
+                flags.append(f"{desc}: looks like another line’s amount landed here")
+    rec = sum(net_of(r) for r in state["sections"].get("municipal") or [] if r.get("is_recovery") or "recover" in (r.get("desc") or "").lower())
+    gross = sum(net_of(r) for r in state["sections"].get("municipal") or [] if not (r.get("is_recovery") or "recover" in (r.get("desc") or "").lower()))
+    if gross > 500000 and rec < gross * 0.4:
+        flags.append(
+            f"Municipal recoveries {money(abs(rec))} vs electricity/water {money(gross)} — last year Falcon View recovered most of this, so net municipal was ~R116,000 not {money(sum_net(state['sections']['municipal']))}."
+        )
+    return flags
+
+
 def apply_levy_lines(state: dict) -> None:
     ord_amt = ordinary_total(state)
     for r in state["sections"]["levy"]:
@@ -842,16 +878,10 @@ def generate_excel(state: dict) -> BytesIO:
                 levy_rows["csos"] = r
             if fam == "reserve":
                 levy_rows["reserve"] = r
-            expected = act * (1 + pct / 100.0)
             if it.get("is_recovery"):
-                fml(ws.cell(r, 5), f"-ABS(C{r}*(1+D{r}))")
-            elif fam == "ordinary":
-                # filled after totals
-                inp(ws.cell(r, 5), y, MONEY)
-            elif abs(y - expected) > 1:
-                inp(ws.cell(r, 5), y, MONEY)
+                inp(ws.cell(r, 5), -abs(y if y else act * (1 + pct / 100.0)), MONEY)
             else:
-                fml(ws.cell(r, 5), f"C{r}*(1+D{r})")
+                inp(ws.cell(r, 5), y if y else act * (1 + pct / 100.0), MONEY)
             if rm:
                 inp(ws.cell(r, 6), float(it.get("insurance") or 0), MONEY)
                 fml(ws.cell(r, 7), f"(E{r}-F{r})/12")
@@ -1230,6 +1260,22 @@ def main():
     m2.metric("What owners will pay (monthly)", money(new_m), delta=f"{levy_pct:+.1f}%")
     m3.metric("Ordinary levies for the year", money(ord_amt))
     m4.metric("Reserve for the year", money(float(reserve["yearly"]) if reserve else 0))
+
+    with st.expander("Why is the levy this amount? (plain English)", expanded=abs(levy_pct) > 25):
+        st.write(
+            "Ordinary levy is **not** last year’s levy plus a %. "
+            "It is the **cost the owners must cover**: municipal after recoveries + running costs + repairs + staff + tax."
+        )
+        for label, amt in levy_pieces(st.session_state):
+            if amt or "Special" not in label:
+                st.write(f"- {label}: **{money(amt)}**")
+        st.write(f"- **Ordinary levies for the year: {money(ord_amt)}**")
+        flags = odd_budget_lines(st.session_state)
+        if flags:
+            st.warning("These lines are making the levy jump. Fix them on the tabs, then Save — you do not need to start over.")
+            for f in flags:
+                st.write(f"- {f}")
+        st.caption("Last year Falcon View ordinary levies were about R1.36 million (about R1,113 per full PQ unit per month).")
 
     with st.sidebar:
         st.header("Complex")
