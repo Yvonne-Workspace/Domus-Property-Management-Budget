@@ -275,12 +275,16 @@ def family(desc: str) -> str | None:
     master = bool(re.search(r"xanadu|eco park|master scheme|master hoa|\bhoa\b|estate levy|estate levies", d))
     if master:
         if "csos" in d:
-            if re.search(r"hoa csos|csos recovered|csos income", d):
+            if re.search(r"hoa csos|csos recovered|csos income|levy\s*[-–].*csos", d):
                 return "hoa_csos_inc"
-            if re.search(r"xanadu csos|csos paid|csos expense", d) and "hoa" not in d:
+            if re.search(r"csos paid|csos expense", d):
                 return "hoa_csos_exp"
+            if d.startswith("levy"):
+                return "hoa_csos_inc"
             return "hoa_csos_inc"
-        if "eco park" in d or re.search(r"paid|expense", d):
+        if d.startswith("levy") or "recovered" in d or "from owners" in d:
+            return "hoa_levy_inc"
+        if re.search(r"paid|expense", d) or re.match(r"^xanadu(\s+hoa|\s+eco\s*park)?$", d):
             return "hoa_levy_exp"
         return "hoa_levy_inc"
     if re.search(r"insurance\s*(claim|payout)", d):
@@ -500,14 +504,48 @@ def _peel_afs(line: str):
     return rest, nums
 
 
+def _ocr_image(pil) -> str:
+    try:
+        import pytesseract
+        return pytesseract.image_to_string(pil) or ""
+    except Exception:
+        return ""
+
+
+def _pdf_page_texts(uploaded) -> list:
+    uploaded.seek(0)
+    with pdfplumber.open(uploaded) as pdf:
+        pages = []
+        for page in pdf.pages:
+            t = page.extract_text(x_tolerance=2, y_tolerance=3) or page.extract_text() or ""
+            pages.append(t)
+        if sum(len(t) for t in pages) >= 400:
+            return pages
+        # Scanned PDF (Thornhill / Depotel Kruger packs): OCR the last pages — Detailed Income Statement is at the back.
+        n = len(pdf.pages)
+        start = max(0, n - 6)
+        for i in range(start, n):
+            try:
+                im = pdf.pages[i].to_image(resolution=140)
+                pil = im.original.convert("RGB")
+                text = _ocr_image(pil)
+                if len(text) > len(pages[i]):
+                    pages[i] = text
+            except Exception:
+                continue
+        # Name is on page 1
+        if n and len(pages[0]) < 40:
+            try:
+                im = pdf.pages[0].to_image(resolution=110)
+                pages[0] = _ocr_image(im.original.convert("RGB")) or pages[0]
+            except Exception:
+                pass
+        return pages
+
+
 def extract_afs_pdf(uploaded) -> tuple[list, str]:
     """Read the Detailed Income Statement. Line names stay as on the AFS."""
-    parts = []
-    with pdfplumber.open(uploaded) as pdf:
-        pages = [
-            page.extract_text(x_tolerance=2, y_tolerance=3) or page.extract_text() or ""
-            for page in pdf.pages
-        ]
+    pages = _pdf_page_texts(uploaded)
     name = ""
     for t in pages[:3]:
         for line in t.splitlines():
@@ -520,10 +558,14 @@ def extract_afs_pdf(uploaded) -> tuple[list, str]:
     hits = [
         i
         for i, t in enumerate(pages)
-        if re.search(r"detailed income statement", t, re.I)
-        and re.search(r"figures in r", t, re.I)
-        and len(t) > 500
+        if re.search(r"detailed\s*income\s*statement", t, re.I) and len(t) > 200
     ]
+    if not hits:
+        hits = [
+            i
+            for i, t in enumerate(pages)
+            if re.search(r"statement of comprehensive income", t, re.I) and len(t) > 200
+        ]
     if not hits:
         return [], name
     run = [hits[-1]]
@@ -1311,14 +1353,17 @@ def main():
                 rows, name = extract_afs_pdf(pdf_up)
                 if not rows:
                     st.error(
-                        "Could not find a Detailed Income Statement in that PDF. "
-                        "Use the WeConnectU Excel for numbers, or try another AFS PDF."
+                        "This PDF has no selectable text (it is a scan / picture). "
+                        "Wait for the app to reboot with OCR, or load the WeConnectU Excel — that has the same lines. "
+                        "Ask the auditor for a PDF you can highlight text in if OCR still fails."
                     )
                 else:
                     secs = sections_from_afs(rows)
                     st.session_state.afs_sections = secs
                     if name and not st.session_state.complex_name:
                         st.session_state.complex_name = name
+                    if any(secs.get("hoa_income") or []) or any(secs.get("hoa_expense") or []):
+                        st.session_state.has_master_hoa = True
                     if st.session_state.get("wcu_rows"):
                         secs, added = match_into(st.session_state.wcu_rows, secs)
                         st.session_state.msg = (
