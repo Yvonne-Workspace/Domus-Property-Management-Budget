@@ -247,12 +247,14 @@ def pq_bill_lines(state: dict) -> list:
             break
     if not out:
         add("Levies", ordinary_total(state))
-    for r in s.get("hoa_income", []):
-        if float(r.get("yearly") or 0) or float(r.get("actual") or 0):
-            add(r["desc"], r.get("yearly"))
-    for r in s.get("levy", []):
-        if "insurance" in r["desc"].lower() and (float(r.get("yearly") or 0) or float(r.get("actual") or 0)):
-            add("Insurance", r.get("yearly"))
+    # Extra PQ columns (Xanadu / estate / insurance billed separately) only if we still collect them.
+    if state.get("has_master_hoa"):
+        for r in s.get("hoa_income", []):
+            if float(r.get("yearly") or 0) or float(r.get("actual") or 0):
+                add(r["desc"], r.get("yearly"))
+        for r in s.get("levy", []):
+            if "insurance" in r["desc"].lower() and (float(r.get("yearly") or 0) or float(r.get("actual") or 0)):
+                add("Insurance", r.get("yearly"))
     for r in s.get("levy", []):
         if family(r["desc"]) == "reserve" and (float(r.get("yearly") or 0) or float(r.get("actual") or 0)):
             add("Reserve Fund", r.get("yearly"))
@@ -1362,8 +1364,6 @@ def main():
                     st.session_state.afs_sections = secs
                     if name and not st.session_state.complex_name:
                         st.session_state.complex_name = name
-                    if any(secs.get("hoa_income") or []) or any(secs.get("hoa_expense") or []):
-                        st.session_state.has_master_hoa = True
                     if st.session_state.get("wcu_rows"):
                         secs, added = match_into(st.session_state.wcu_rows, secs)
                         st.session_state.msg = (
@@ -1551,9 +1551,9 @@ That line’s net = budgeted yearly − insurance payout.
         st.info("Ordinary and Reserve update when you save the cost sections / sidebar.")
         section_form("levy", "Levy Income", "Add boathouse / boatport / extra levy types with a new row, then Save.")
         st.session_state.has_master_hoa = st.checkbox(
-            "This complex is inside another estate (e.g. Xanadu). We still bill that levy to owners.",
+            "We still bill an estate / Xanadu levy to owners (they pay it through us).",
             value=bool(st.session_state.get("has_master_hoa")),
-            help="Leave off for Falcon View and other standalone complexes. Owners pay the estate directly — nothing on our budget.",
+            help="OFF = Xanadu (or the estate) bills owners themselves. PQ will only show our levies, reserve and CSOS. ON = Thornhill-style extra PQ columns.",
         )
         if st.session_state.has_master_hoa:
             st.divider()
