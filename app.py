@@ -15,7 +15,7 @@ from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="Domus Budget", layout="wide", initial_sidebar_state="expanded")
 
-YELLOW, NAVY, BLUE, RED, TOTAL, SECTION = "FFFF99", "1F4E79", "0000FF", "FFC7CE", "D9E2F3", "2E75B6"
+NOW_YEAR = 2026
 THIN = Border(
     left=Side(style="thin", color="B0B0B0"),
     right=Side(style="thin", color="B0B0B0"),
@@ -865,25 +865,29 @@ def ymp_years_from_nums(nums: list) -> list:
     return (n + [0.0] * 10)[:10]
 
 
-def parse_ymp_sheet(df) -> list:
-    """Read a 10 YMP sheet (Thornhill / last-year budget / this app’s Excel)."""
+def parse_ymp_sheet(df, start_year: int | None = None) -> list:
+    """Read a 10 YMP sheet. Calendar headers (2025, 2026, …) are aligned so Year 1 = this budget year (2026)."""
+    start_year = int(start_year or NOW_YEAR)
     header_row = None
-    year_cols = []
+    year_cols = []  # column indexes in Year1..Year10 order (already aligned)
+    cal_pairs = []  # (col, calendar_year)
     for i in range(min(12, len(df))):
         raw = [df.iat[i, j] for j in range(df.shape[1])]
         labels = [str(v).strip().lower() for v in raw]
-        ylabels = [j for j, v in enumerate(labels) if re.match(r"^(year\s*)?\d{1,2}$", v) or re.match(r"^y\d+$", v) or "year 1" in v or v.startswith("year ")]
         ylabels = [j for j, v in enumerate(labels) if re.match(r"^year\s*\d+", v) or re.match(r"^y\d+$", v)]
         cals = []
         for j, v in enumerate(raw):
             s = str(v).strip().replace(".0", "")
             if re.fullmatch(r"20[2-4]\d", s):
-                cals.append(j)
+                cals.append((j, int(s)))
+        if len(cals) >= 8:
+            header_row = i
+            cal_pairs = cals
+            by_year = {yr: col for col, yr in cals}
+            year_cols = [by_year.get(start_year + k) for k in range(10)]
+            break
         if len(ylabels) >= 8:
             header_row, year_cols = i, ylabels[:10]
-            break
-        if len(cals) >= 8:
-            header_row, year_cols = i, cals[:10]
             break
     projects = []
     start = (header_row + 1) if header_row is not None else 0
@@ -901,11 +905,17 @@ def parse_ymp_sheet(df) -> list:
         if not desc or re.match(r"^(total|planned maintenance|project|projects|first|cycle|frequency|current|estimate)$", desc, re.I):
             continue
         if year_cols:
-            years = [float(num(cells[c]) or 0) for c in year_cols]
+            years = []
+            for c in year_cols:
+                if c is None or c >= len(cells):
+                    years.append(0.0)
+                else:
+                    years.append(float(num(cells[c]) or 0))
             years = (years + [0.0] * 10)[:10]
+            skip = {c for c in year_cols if c is not None}
             meta = []
             for j, v in enumerate(cells):
-                if j in year_cols:
+                if j in skip:
                     continue
                 n = num(v)
                 if n is not None:
@@ -932,7 +942,8 @@ def parse_ymp_sheet(df) -> list:
 
 def plan_start_year(state: dict) -> int:
     m = re.search(r"20\d{2}", str(state.get("fin_year") or ""))
-    return int(m.group()) if m else 2026
+    y = int(m.group()) if m else NOW_YEAR
+    return max(y, NOW_YEAR)
 def generate_excel(state: dict) -> BytesIO:
     apply_levy_lines(state)
     s = state["sections"]
@@ -1312,7 +1323,7 @@ def restore_from_app_excel(uploaded) -> dict:
     ymp_name = next((n for k, n in names.items() if "ymp" in k or "10" in k or "maintenance" in k), None)
     if ymp_name:
         ymp = pd.read_excel(xl, sheet_name=ymp_name, header=None)
-        projects = parse_ymp_sheet(ymp)
+        projects = parse_ymp_sheet(ymp, NOW_YEAR)
         if projects:
             out["ymp"] = projects
     return out
@@ -1736,18 +1747,19 @@ That line’s net = budgeted yearly − insurance payout.
     with tabs[9]:
         st.subheader("10-year maintenance plan")
         st.caption(
-            "Same layout as the Excel pack: First cycle, Frequency, Current estimate, then Year 1–10 rands. "
-            "Upload last year’s budget (the 10 YMP sheet) or paste. Year 1 is the rand amount, not 2025."
+            f"We are in {NOW_YEAR}. Year 1 of this budget is {NOW_YEAR}, Year 2 is {NOW_YEAR+1}, … Year 10 is {NOW_YEAR+9}. "
+            "If you upload last year’s plan (2025–2034), we roll it: last year’s 2026 column becomes this Year 1."
         )
         ymp_up = st.file_uploader("Upload 10-year plan Excel (or last year’s budget workbook)", type=["xlsx", "xls"], key="ymp_xlsx")
         if ymp_up and st.button("Load 10-year plan"):
             try:
                 xl = pd.ExcelFile(ymp_up)
                 sheet = next((n for n in xl.sheet_names if re.search(r"ymp|10|maintenance", n, re.I)), xl.sheet_names[-1])
-                parsed = parse_ymp_sheet(pd.read_excel(xl, sheet_name=sheet, header=None))
+                parsed = parse_ymp_sheet(pd.read_excel(xl, sheet_name=sheet, header=None), plan_start_year(st.session_state))
                 if parsed:
                     st.session_state.ymp = parsed
-                    st.success(f"Loaded {len(parsed)} projects from “{sheet}”. Year 1 is the first rand column, not the calendar year.")
+                    y0 = plan_start_year(st.session_state)
+                    st.success(f"Loaded {len(parsed)} projects. Year 1 is {y0} (this budget year), not last year’s 2025 column.")
                 else:
                     st.error("Could not find Year 1–10 amounts on that sheet.")
             except Exception as e:
