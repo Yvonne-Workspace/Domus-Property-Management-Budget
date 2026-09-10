@@ -291,6 +291,8 @@ def family(desc: str) -> str | None:
         return "hoa_levy_inc"
     if re.search(r"insurance\s*(claim|payout)", d):
         return "ins_claim"
+    if re.search(r"levy\s*[-–]\s*insurance|insurance recovered", d):
+        return "ins_bill"
     if re.search(r"insurance\s*(recovered|billed|additional)", d):
         return "ins_bill"
     if "eskom" in d or ("fixed" in d and "electr" in d) or "meters recovered" in d:
@@ -944,13 +946,16 @@ def plan_start_year(state: dict) -> int:
     m = re.search(r"20\d{2}", str(state.get("fin_year") or ""))
     y = int(m.group()) if m else NOW_YEAR
     return max(y, NOW_YEAR)
+
+
 def generate_excel(state: dict) -> BytesIO:
     apply_levy_lines(state)
     s = state["sections"]
     wb = Workbook()
     ws = wb.active
     ws.title = "BUDGET"
-    for i, w in enumerate([3, 44, 16, 12, 16, 14, 14, 40], 1):
+    # Old pack: Description | GL Code | Actual | % | Budgeted Yearly | Monthly | Comments
+    for i, w in enumerate([3, 42, 12, 14, 10, 16, 14, 36], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
     def fill(c, color):
@@ -973,33 +978,34 @@ def generate_excel(state: dict) -> BytesIO:
             fill(c, bg)
 
     ws.merge_cells("B2:G2")
-    ws["B2"] = "BODY CORPORATE / HOA BUDGET"
+    ws["B2"] = state.get("complex_name") or "BODY CORPORATE / HOA BUDGET"
     ws["B2"].font = Font(name="Calibri", bold=True, size=16, color=NAVY)
-    ws["B3"] = "Complex:"
-    inp(ws["C3"], state.get("complex_name") or "")
-    ws["E3"] = "Year:"
-    inp(ws["F3"], state.get("fin_year") or "")
-    ws["B5"] = "Ordinary levies = net municipal + expenditure + R&M (after insurance) + personnel + tax"
-    ws["B6"] = "Reserve method:"
-    inp(ws["C6"], "15% of ordinary" if state.get("reserve_mode") == "15pct" else "Typed amount")
+    ws["B3"] = state.get("fin_year") or ""
+    ws["B3"].font = Font(bold=True, size=12)
+    ws["B5"] = "Current reserve fund (already in the bank)"
+    inp(ws["D5"], float(state.get("reserve_balance") or 0), MONEY)
+    ws["B6"] = "This year’s reserve contribution"
+    # filled after we know reserve row
+    ws["B7"] = "Projected reserve at year-end"
+    fml(ws["D7"], "D5+D6")
+    ws["B8"] = "Yellow cells = type here. Budgeted Yearly = Actual × (1 + %). Monthly = Yearly ÷ 12. Change % or overwrite Yearly in the meeting."
+    ws["B8"].font = Font(italic=True, size=9, color="666666")
 
-    r = 8
+    r = 10
 
     def bar(title):
         nonlocal r
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=7)
-        for col in range(2, 8):
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=8)
+        for col in range(2, 9):
             fill(ws.cell(r, col), SECTION)
             ws.cell(r, col).border = THIN
         ws.cell(r, 2).value = title
         ws.cell(r, 2).font = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
         r += 1
 
-    def hdr(rm=False):
+    def hdr():
         nonlocal r
-        labs = ["Description", "Actual", "% Increase", "Budgeted Yearly", "Monthly", "Notes"]
-        if rm:
-            labs = ["Description", "Actual", "% Increase", "Budgeted Yearly", "Insurance payout", "Monthly", "Notes"]
+        labs = ["Description", "GL Code", "Actual", "%", "Budgeted Yearly", "Monthly", "Comments / Notes"]
         for i, lab in enumerate(labs, 2):
             c = ws.cell(r, i, lab)
             fill(c, NAVY)
@@ -1008,8 +1014,10 @@ def generate_excel(state: dict) -> BytesIO:
         r += 1
 
     levy_rows = {}
+    named_rows = {}
 
-    def write(items, rm=False):
+    def write(items, recovery_as_income=False):
+        """Old pack formulas: F = D*(1+E), G = F/12. Recoveries shown as positive income when asked."""
         nonlocal r
         if not items:
             start = r
@@ -1017,125 +1025,162 @@ def generate_excel(state: dict) -> BytesIO:
             return start, start
         start = r
         for it in items:
-            inp(ws.cell(r, 2), it["desc"])
-            act = float(it.get("actual") or 0)
+            desc = it.get("desc") or ""
+            inp(ws.cell(r, 2), desc)
+            inp(ws.cell(r, 3), it.get("gl") or "")
+            act = abs(float(it.get("actual") or 0))
             pct = float(it.get("pct") or 0)
-            inp(ws.cell(r, 3), act, MONEY)
-            inp(ws.cell(r, 4), pct / 100.0, "0.0%")
             y = float(it.get("yearly") or 0)
-            fam = family(it["desc"])
+            fam = family(desc)
             if fam == "ordinary":
                 levy_rows["ordinary"] = r
             if fam == "csos_inc":
                 levy_rows["csos"] = r
             if fam == "reserve":
                 levy_rows["reserve"] = r
-            if is_muni_recovery(it.get("desc") or "", it.get("is_recovery")):
-                inp(ws.cell(r, 5), -abs(y if y else act * (1 + pct / 100.0)), MONEY)
+            if fam == "ins_bill" or re.search(r"insurance recovered|levy\s*[-–]\s*insurance", desc, re.I):
+                levy_rows["insurance"] = r
+            named_rows[desc] = r
+            rec = is_muni_recovery(desc, it.get("is_recovery"))
+            inp(ws.cell(r, 4), act, MONEY)
+            if fam == "ordinary":
+                # % follows the levy formula so a meeting change to costs updates the %
+                fml(ws.cell(r, 5), f'IF(D{r}=0,0,F{r}/D{r}-1)')
+                ws.cell(r, 5).number_format = "0.0%"
             else:
-                inp(ws.cell(r, 5), y if y else act * (1 + pct / 100.0), MONEY)
-            if rm:
-                inp(ws.cell(r, 6), float(it.get("insurance") or 0), MONEY)
-                fml(ws.cell(r, 7), f"(E{r}-F{r})/12")
-                inp(ws.cell(r, 8), it.get("note") or "")
+                inp(ws.cell(r, 5), pct / 100.0, "0.0%")
+            expected = act * (1 + pct / 100.0)
+            if fam == "ordinary":
+                pass  # F filled after totals
+            elif fam == "reserve" and state.get("reserve_mode") == "15pct" and levy_rows.get("ordinary"):
+                fml(ws.cell(r, 6), f"0.15*F{levy_rows['ordinary']}")
+            elif rec and not recovery_as_income:
+                fml(ws.cell(r, 6), f"-ABS(D{r}*(1+E{r}))")
+            elif act < 0.5 and abs(y) > 0.5:
+                inp(ws.cell(r, 6), y if not (rec and not recovery_as_income) else -abs(y), MONEY)
+            elif abs(y - expected) > 1 and y > 0:
+                inp(ws.cell(r, 6), abs(y) if recovery_as_income or not rec else -abs(y), MONEY)
             else:
-                fml(ws.cell(r, 6), f"E{r}/12")
-                inp(ws.cell(r, 7), it.get("note") or "")
+                fml(ws.cell(r, 6), f"D{r}*(1+E{r})")
+            fml(ws.cell(r, 7), f"F{r}/12")
+            note = it.get("note") or ""
+            ins = float(it.get("insurance") or 0)
+            if ins:
+                note = (note + " | Insurance payout " + f"{ins:,.2f}").strip(" |")
+            inp(ws.cell(r, 8), note)
             r += 1
         return start, r - 1
 
-    def tot(label, start, end, rm=False):
+    def tot(label, start, end):
         nonlocal r
         ws.cell(r, 2, label).font = Font(bold=True)
-        if rm:
-            fml(ws.cell(r, 5), f"SUM(E{start}:E{end})-SUM(F{start}:F{end})", TOTAL)
-            fml(ws.cell(r, 7), f"E{r}/12", TOTAL)
-        else:
-            fml(ws.cell(r, 5), f"SUM(E{start}:E{end})", TOTAL)
-            fml(ws.cell(r, 6), f"E{r}/12", TOTAL)
+        fml(ws.cell(r, 6), f"SUM(F{start}:F{end})", TOTAL)
+        fml(ws.cell(r, 7), f"F{r}/12", TOTAL)
+        row_n = r
         r += 2
+        return row_n
 
-    bar("INCOME — LEVY INCOME")
+    bar("INCOME")
     hdr()
     a, b = write(s["levy"])
-    levy_ord = levy_rows.get("ordinary") or a
-    tot("TOTAL LEVY INCOME", a, b)
+    inc_tot = tot("TOTAL INCOME", a, b)
     bar("OTHER INCOME")
     hdr()
-    a, b = write(s["other"])
+    a, b = write(s.get("other") or [])
     tot("TOTAL OTHER INCOME", a, b)
-    bar("RECOVERIES ON UTILITIES")
-    hdr()
-    rec_items = [x for x in (s.get("recoveries_other") or [])]
-    a, b = write(rec_items)
-    tot("TOTAL OTHER RECOVERIES", a, b)
+    hoa_tot = None
     if state.get("has_master_hoa"):
-        bar("HOA / ESTATE RECOVERED FROM OWNERS")
+        bar("Recoveries on HOA Costs")
         hdr()
         a, b = write(s.get("hoa_income") or [])
-        tot("TOTAL HOA RECOVERED", a, b)
-        bar("HOA / ESTATE PAID TO THE ESTATE")
-        hdr()
-        a, b = write(s.get("hoa_expense") or [])
-        tot("TOTAL HOA PAID", a, b)
-    bar("MUNICIPAL CHARGES")
+        hoa_tot = tot("TOTAL OTHER RECOVERIES", a, b)
+        for it in s.get("hoa_income") or []:
+            named_rows[it.get("desc") or ""] = named_rows.get(it.get("desc") or "")
+    muni_gross = [x for x in (s.get("municipal") or []) if not is_muni_recovery(x.get("desc") or "", x.get("is_recovery"))]
+    muni_rec = [x for x in (s.get("municipal") or []) if is_muni_recovery(x.get("desc") or "", x.get("is_recovery"))]
+    util = list(s.get("recoveries_other") or []) + muni_rec
+    bar("Recoveries on Utilities")
     hdr()
-    a, b = write(s["municipal"])
-    muni_tot = r
-    tot("NET MUNICIPAL CHARGES", a, b)
+    a, b = write(util, recovery_as_income=True)
+    util_tot = tot("TOTAL UTILITY RECOVERIES", a, b)
+    bar("Municipal Charges")
+    hdr()
+    a, b = write(muni_gross)
+    muni_g_tot = tot("TOTAL", a, b)
+    ws.cell(r, 2, "TOTAL NET MUNICIPAL CHARGES").font = Font(bold=True)
+    fml(ws.cell(r, 6), f"F{muni_g_tot}-F{util_tot}", RED)
+    fml(ws.cell(r, 7), f"F{r}/12", RED)
+    net_muni = r
+    r += 2
     bar("EXPENDITURE")
     hdr()
-    a, b = write(s["expenditure"])
-    exp_tot = r
-    tot("TOTAL EXPENDITURE", a, b)
+    exp_items = list(s.get("expenditure") or [])
+    if state.get("has_master_hoa"):
+        exp_items = exp_items + list(s.get("hoa_expense") or [])
+    a, b = write(exp_items)
+    exp_tot = tot("TOTAL EXPENDITURE", a, b)
     bar("REPAIR AND MAINTENANCE")
-    hdr(rm=True)
-    a, b = write(s["rm"], rm=True)
-    rm_tot = r
-    tot("NET R&M (after insurance payouts)", a, b, rm=True)
+    hdr()
+    a, b = write(s.get("rm") or [])
+    rm_tot = tot("Total Repair and Maintenance", a, b)
     bar("PERSONNEL")
     hdr()
-    a, b = write(s["personnel"])
-    per_tot = r
-    tot("TOTAL PERSONNEL", a, b)
+    a, b = write(s.get("personnel") or [])
+    per_tot = tot("Total Personnel Expenses", a, b)
     bar("INCOME TAX")
     hdr()
-    a, b = write(s["tax"])
-    tax_tot = r
-    tot("TOTAL TAX", a, b)
+    a, b = write(s.get("tax") or [])
+    tax_tot = tot("TOTAL TAX", a, b)
     bar("SPECIAL PROJECTS")
     hdr()
-    a, b = write(s["special"])
-    sp_tot = r
-    tot("TOTAL SPECIAL PROJECTS", a, b)
-    bar("ORDINARY LEVY CHECK")
-    ws.cell(r, 2, "Ordinary levies = net municipal + expenditure + net R&M + personnel + tax")
-    bits = f"E{muni_tot}+E{exp_tot}+E{rm_tot}+E{per_tot}+E{tax_tot}"
+    a, b = write(s.get("special") or [])
+    sp_tot = tot("Total Special Projects Expenses", a, b)
+
+    # Ordinary levies = costs owners must cover (not Xanadu pass-through, not utility recoveries)
+    bits = f"F{net_muni}+F{exp_tot}+F{rm_tot}+F{per_tot}+F{tax_tot}"
+    # Subtract Xanadu expense if it sits inside expenditure totals
+    hoa_exp_items = s.get("hoa_expense") or []
+    hoa_exp_sum = ""
+    if state.get("has_master_hoa") and hoa_exp_items:
+        # expenditure total includes Xanadu; take it out of ordinary
+        names = [it.get("desc") for it in hoa_exp_items if it.get("desc")]
+        refs = [f"F{named_rows[n]}" for n in names if n in named_rows]
+        if refs:
+            bits += "-" + "-".join(refs)
     if state.get("special_in_ordinary"):
-        bits += f"+E{sp_tot}"
-        ws.cell(r, 2).value = "Ordinary levies = net municipal + expenditure + net R&M + personnel + tax + special"
-    fml(ws.cell(r, 5), bits, RED)
-    fml(ws.cell(r, 6), f"E{r}/12", RED)
-    ws.cell(levy_ord, 5).value = f"=E{r}"
-    ws.cell(levy_ord, 5).font = Font(name="Calibri", size=10)
-    ws.cell(levy_ord, 5).number_format = MONEY
-    r += 3
-    bar("FIXED MONTHLY CHARGES ON THE OWNER INVOICE (optional)")
-    hdr()
-    write(s["fixed"])
+        bits += f"+F{sp_tot}"
+    bar("ORDINARY LEVY (what we charge)")
+    ws.cell(r, 2, "Ordinary levies = net municipal + expenditure (not estate pass-through) + R&M + personnel + tax")
+    fml(ws.cell(r, 6), bits, RED)
+    fml(ws.cell(r, 7), f"F{r}/12", RED)
+    ord_check = r
+    if levy_rows.get("ordinary"):
+        ws.cell(levy_rows["ordinary"], 6).value = f"=F{ord_check}"
+        ws.cell(levy_rows["ordinary"], 6).font = Font(name="Calibri", size=10)
+        ws.cell(levy_rows["ordinary"], 6).number_format = MONEY
+        fill(ws.cell(levy_rows["ordinary"], 6), RED)
+    r += 2
+    if levy_rows.get("reserve"):
+        fml(ws["D6"], f"F{levy_rows['reserve']}")
+    else:
+        ws["D6"] = 0
 
     pq = wb.create_sheet("PQ")
     pq["A1"] = "PQ / LEVY SCHEDULE"
     pq["A1"].font = Font(bold=True, size=14, color=NAVY)
     pq["A2"] = state.get("complex_name") or ""
     bills = pq_bill_lines(state)
-    # Last year’s layout: monthly totals sit above each levy column, each unit = PQ × that monthly total
     pq["B3"] = "Monthly"
     name_to_budget = {
-        "Levies": f"BUDGET!F{levy_rows['ordinary']}" if levy_rows.get("ordinary") else None,
-        "CSOS": f"BUDGET!F{levy_rows['csos']}" if levy_rows.get("csos") else None,
-        "Reserve Fund": f"BUDGET!F{levy_rows['reserve']}" if levy_rows.get("reserve") else None,
+        "Levies": f"BUDGET!G{levy_rows['ordinary']}" if levy_rows.get("ordinary") else None,
+        "CSOS": f"BUDGET!G{levy_rows['csos']}" if levy_rows.get("csos") else None,
+        "Reserve Fund": f"BUDGET!G{levy_rows['reserve']}" if levy_rows.get("reserve") else None,
+        "Insurance": f"BUDGET!G{levy_rows['insurance']}" if levy_rows.get("insurance") else None,
     }
+    for it in (s.get("hoa_income") or []):
+        nm = it.get("desc") or ""
+        if nm in named_rows:
+            name_to_budget[nm] = f"BUDGET!G{named_rows[nm]}"
     headers = ["#", "Unit", "PQ"] + [n for n, _ in bills] + ["Total"]
     for i, h in enumerate(headers, 1):
         cell = pq.cell(6, i, h)
@@ -1234,12 +1279,12 @@ def generate_excel(state: dict) -> BytesIO:
 
 
 RESTORE_BARS = [
-    ("levy income", "levy"),
     ("other income", "other"),
-    ("recoveries on utilities", "recoveries_other"),
-    ("other recoveries", "recoveries_other"),
+    ("recoveries on hoa", "hoa_income"),
     ("hoa / estate recovered", "hoa_income"),
     ("hoa / estate paid", "hoa_expense"),
+    ("recoveries on utilities", "recoveries_other"),
+    ("other recoveries", "recoveries_other"),
     ("municipal", "municipal"),
     ("expenditure", "expenditure"),
     ("repair", "rm"),
@@ -1247,6 +1292,8 @@ RESTORE_BARS = [
     ("income tax", "tax"),
     ("special", "special"),
     ("fixed monthly", "fixed"),
+    ("levy income", "levy"),
+    ("income", "levy"),
 ]
 
 
@@ -1271,11 +1318,20 @@ def restore_from_app_excel(uploaded) -> dict:
                 if v.startswith("year") and c + 1 < df.shape[1]:
                     out["fin_year"] = str(df.iat[r, c + 1] or "").strip()
         current = None
+        # New pack: B desc, C GL, D actual, E %, F yearly. Old pack: B desc, C actual, D %, E yearly.
+        i_act, i_pct, i_year, i_note = 2, 3, 4, 6
         for r in range(len(df)):
             desc = str(df.iat[r, 1] if df.shape[1] > 1 else "").strip()
             if not desc:
                 continue
             low = desc.lower()
+            if low == "description":
+                headers = [str(df.iat[r, c] or "").strip().lower() for c in range(df.shape[1])]
+                if any("gl" in h for h in headers):
+                    i_act, i_pct, i_year, i_note = 3, 4, 5, 7
+                else:
+                    i_act, i_pct, i_year, i_note = 2, 3, 4, 6
+                continue
             mapped = next((k for title, k in RESTORE_BARS if title in low and "total" not in low and "check" not in low), None)
             if mapped:
                 current = mapped
@@ -1284,19 +1340,15 @@ def restore_from_app_excel(uploaded) -> dict:
                 continue
             if re.match(r"^(description|total |net |ordinary levy)", desc, re.I):
                 continue
-            actual = abs(num(df.iat[r, 2] if df.shape[1] > 2 else None) or 0.0)
-            pct_raw = num(df.iat[r, 3] if df.shape[1] > 3 else None) or 0.0
+            actual = abs(num(df.iat[r, i_act] if df.shape[1] > i_act else None) or 0.0)
+            pct_raw = num(df.iat[r, i_pct] if df.shape[1] > i_pct else None) or 0.0
             pct = pct_raw * 100 if abs(pct_raw) <= 2 else pct_raw
-            yearly = abs(num(df.iat[r, 4] if df.shape[1] > 4 else None) or 0.0)
-            note = str(df.iat[r, 6] if df.shape[1] > 6 else "") or str(df.iat[r, 7] if df.shape[1] > 7 else "")
-            ins = 0.0
-            if current == "rm" and df.shape[1] > 5:
-                ins = abs(num(df.iat[r, 5]) or 0.0)
+            yearly = abs(num(df.iat[r, i_year] if df.shape[1] > i_year else None) or 0.0)
+            note = str(df.iat[r, i_note] if df.shape[1] > i_note else "") or ""
             item = row(desc, "" if note in ("nan", "None") else note)
             item["actual"] = actual
             item["pct"] = pct
             item["yearly"] = yearly if yearly else actual * (1 + pct / 100)
-            item["insurance"] = ins
             item["is_recovery"] = "recover" in norm(desc) and current == "municipal"
             out["sections"][current].append(item)
     pq_name = names.get("pq")
@@ -1336,6 +1388,7 @@ def init():
     ss.setdefault("fin_year", "01-03-2026 / 28-02-2027")
     ss.setdefault("reserve_mode", "amount")
     ss.setdefault("reserve_amount", 0.0)
+    ss.setdefault("reserve_balance", 0.0)
     ss.setdefault("special_in_ordinary", False)
     ss.setdefault("afs_sections", None)
     ss.setdefault("wcu_rows", None)
@@ -1551,8 +1604,15 @@ def main():
             help="12 = a full year. If WeConnectU is only 6 months, put 6 and we scale up for the %.",
         )
         st.header("Reserve fund")
+        st.session_state.reserve_balance = st.number_input(
+            "How much is already in the reserve fund (bank / 15% account)?",
+            value=float(st.session_state.get("reserve_balance") or 0),
+            min_value=0.0,
+            step=1000.0,
+            help="The money sitting there now. Not this year’s contribution.",
+        )
         st.session_state.reserve_mode = st.radio(
-            "How is reserve calculated?",
+            "How is this year’s contribution calculated?",
             ["amount", "15pct"],
             format_func=lambda x: "I will type the yearly amount" if x == "amount" else "15% of ordinary levies",
             index=0 if st.session_state.reserve_mode == "amount" else 1,
@@ -1564,6 +1624,15 @@ def main():
                 step=1000.0,
                 min_value=0.0,
             )
+        contrib = (
+            ordinary_total(st.session_state) * 0.15
+            if st.session_state.reserve_mode == "15pct"
+            else float(st.session_state.reserve_amount or 0)
+        )
+        st.caption(
+            f"Already in reserve {money(st.session_state.reserve_balance)} + this year {money(contrib)} "
+            f"= projected {money(float(st.session_state.reserve_balance or 0) + contrib)}."
+        )
         st.session_state.special_in_ordinary = st.checkbox(
             "Add Special Projects into ordinary levies",
             value=st.session_state.special_in_ordinary,
