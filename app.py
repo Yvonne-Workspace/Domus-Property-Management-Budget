@@ -156,10 +156,23 @@ def sum_net(items: list) -> float:
 
 
 def insurance_on_pq(state: dict) -> bool:
-    for r in state["sections"].get("levy", []):
-        if "insurance" in r["desc"].lower() and float(r.get("yearly") or 0) > 0.5:
-            return True
-    return False
+    return state.get("insurance_mode") == "pq"
+
+
+def insurance_expense_amount(state: dict) -> float:
+    total = 0.0
+    for r in state["sections"].get("expenditure") or []:
+        if family(r.get("desc") or "") == "insurance":
+            total += net_of(r)
+    return total
+
+
+def insurance_bill_amount(state: dict) -> float:
+    """What we put on the owner invoice when insurance is extra."""
+    typed = float(state.get("insurance_bill_yearly") or 0)
+    if typed > 0.5:
+        return typed
+    return insurance_expense_amount(state)
 
 
 def skip_from_ordinary(r: dict, state: dict) -> bool:
@@ -189,6 +202,7 @@ def levy_pieces(state: dict) -> list:
         ("Personnel", sum_net(s["personnel"])),
         ("Tax", sum_net(s["tax"])),
         ("Special (only if ticked)", sum_net(s["special"]) if state.get("special_in_ordinary") else 0.0),
+        ("Insurance premium (billed on PQ, not in levy)", insurance_expense_amount(state) if insurance_on_pq(state) else 0.0),
     ]
 
 
@@ -231,6 +245,20 @@ def apply_levy_lines(state: dict) -> None:
                 r["yearly"] = float(state.get("reserve_amount") or r.get("yearly") or 0)
             a = float(r.get("actual") or 0)
             r["pct"] = 0.0 if a == 0 else (float(r["yearly"]) / a) * 100 - 100
+    if insurance_on_pq(state):
+        bill = insurance_bill_amount(state)
+        found = False
+        for r in state["sections"]["levy"]:
+            if family(r["desc"]) == "ins_bill" or re.search(r"insurance recovered|levy\s*[-–]\s*insurance", r["desc"], re.I):
+                r["yearly"] = bill
+                a = float(r.get("actual") or 0)
+                r["pct"] = 0.0 if a == 0 else (bill / a) * 100 - 100
+                found = True
+        if not found and bill:
+            rec = row("Insurance recovered", "Billed to owners on the PQ. Same amount as the insurance premium, not in ordinary levies.")
+            rec["yearly"] = bill
+            rec["actual"] = 0.0
+            state["sections"]["levy"].append(rec)
 
 
 def pq_bill_lines(state: dict) -> list:
@@ -247,14 +275,12 @@ def pq_bill_lines(state: dict) -> list:
             break
     if not out:
         add("Levies", ordinary_total(state))
-    # Extra PQ columns (Xanadu / estate / insurance billed separately) only if we still collect them.
     if state.get("has_master_hoa"):
         for r in s.get("hoa_income", []):
             if float(r.get("yearly") or 0) or float(r.get("actual") or 0):
                 add(r["desc"], r.get("yearly"))
-        for r in s.get("levy", []):
-            if "insurance" in r["desc"].lower() and (float(r.get("yearly") or 0) or float(r.get("actual") or 0)):
-                add("Insurance", r.get("yearly"))
+    if insurance_on_pq(state):
+        add("Insurance", insurance_bill_amount(state))
     for r in s.get("levy", []):
         if family(r["desc"]) == "reserve" and (float(r.get("yearly") or 0) or float(r.get("actual") or 0)):
             add("Reserve Fund", r.get("yearly"))
@@ -1149,6 +1175,11 @@ def generate_excel(state: dict) -> BytesIO:
             bits += "-" + "-".join(refs)
     if state.get("special_in_ordinary"):
         bits += f"+F{sp_tot}"
+    if insurance_on_pq(state):
+        for it in s.get("expenditure") or []:
+            d = it.get("desc") or ""
+            if family(d) == "insurance" and d in named_rows:
+                bits += f"-F{named_rows[d]}"
     bar("ORDINARY LEVY (what we charge)")
     ws.cell(r, 2, "Ordinary levies = net municipal + expenditure (not estate pass-through) + R&M + personnel + tax")
     fml(ws.cell(r, 6), bits, RED)
@@ -1393,6 +1424,8 @@ def init():
     ss.setdefault("afs_sections", None)
     ss.setdefault("wcu_rows", None)
     ss.setdefault("has_master_hoa", False)
+    ss.setdefault("insurance_mode", "levy")
+    ss.setdefault("insurance_bill_yearly", 0.0)
     ss.setdefault("pq", None)
     ss.setdefault("ymp", [{"desc": "", "years": [0.0] * 10}])
     ss.setdefault("msg", "")
@@ -1722,6 +1755,42 @@ That line’s net = budgeted yearly − insurance payout.
 
     with tabs[1]:
         st.info("Ordinary and Reserve update when you save the cost sections / sidebar.")
+        st.session_state.insurance_mode = st.radio(
+            "Insurance — how do owners pay it?",
+            ["levy", "pq"],
+            format_func=lambda x: (
+                "Part of the ordinary levy (no extra PQ column)"
+                if x == "levy"
+                else "Extra on the owner invoice (own PQ column — Thornhill style)"
+            ),
+            index=0 if st.session_state.get("insurance_mode") != "pq" else 1,
+            help="Extra = we recover the premium from owners. It is NOT in ordinary levies. Part of levy = insurance expense stays in the admin levy.",
+        )
+        if st.session_state.insurance_mode == "pq":
+            prem = insurance_expense_amount(st.session_state)
+            last_rec = 0.0
+            for r in st.session_state.sections.get("levy") or []:
+                if family(r["desc"]) == "ins_bill" or re.search(r"insurance recovered|levy\s*[-–]\s*insurance", r["desc"], re.I):
+                    last_rec = float(r.get("actual") or 0)
+                    break
+            st.session_state.insurance_bill_yearly = st.number_input(
+                "Insurance billed to owners this year (0 = use the Insurance expense line)",
+                value=float(st.session_state.get("insurance_bill_yearly") or 0),
+                min_value=0.0,
+                step=100.0,
+                help="Trustees should bill this year’s premium, not last year’s recovery.",
+            )
+            bill = insurance_bill_amount(st.session_state)
+            st.caption(
+                f"PQ Insurance column = {money(bill)} a year ({money(bill/12)} / month for the complex). "
+                f"Insurance expense {money(prem)} is left out of ordinary levies."
+            )
+            if last_rec and prem and last_rec + 1 < prem:
+                st.warning(
+                    f"Last year owners were billed {money(last_rec)} but the premium was {money(prem)}. "
+                    f"That is why recovery looks too small. This year we bill {money(bill)} on the PQ."
+                )
+        st.divider()
         section_form("levy", "Levy Income", "Add boathouse / boatport / extra levy types with a new row, then Save.")
         st.session_state.has_master_hoa = st.checkbox(
             "We still bill an estate / Xanadu levy to owners (they pay it through us).",
