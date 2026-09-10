@@ -853,6 +853,86 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
     return out
 
 
+def ymp_years_from_nums(nums: list) -> list:
+    """Thornhill layout: First cycle (2025) | Frequency (7) | Current estimate | Year 1 … Year 10."""
+    n = [float(x) for x in nums if x is not None]
+    if n and 2020 <= n[0] <= 2040:
+        n = n[1:]
+    if n and 1 <= n[0] <= 15 and (len(n) == 1 or n[1] >= 20):
+        n = n[1:]
+    if len(n) > 10:
+        n = n[-10:]
+    return (n + [0.0] * 10)[:10]
+
+
+def parse_ymp_sheet(df) -> list:
+    """Read a 10 YMP sheet (Thornhill / last-year budget / this app’s Excel)."""
+    header_row = None
+    year_cols = []
+    for i in range(min(12, len(df))):
+        raw = [df.iat[i, j] for j in range(df.shape[1])]
+        labels = [str(v).strip().lower() for v in raw]
+        ylabels = [j for j, v in enumerate(labels) if re.match(r"^(year\s*)?\d{1,2}$", v) or re.match(r"^y\d+$", v) or "year 1" in v or v.startswith("year ")]
+        ylabels = [j for j, v in enumerate(labels) if re.match(r"^year\s*\d+", v) or re.match(r"^y\d+$", v)]
+        cals = []
+        for j, v in enumerate(raw):
+            s = str(v).strip().replace(".0", "")
+            if re.fullmatch(r"20[2-4]\d", s):
+                cals.append(j)
+        if len(ylabels) >= 8:
+            header_row, year_cols = i, ylabels[:10]
+            break
+        if len(cals) >= 8:
+            header_row, year_cols = i, cals[:10]
+            break
+    projects = []
+    start = (header_row + 1) if header_row is not None else 0
+    for r in range(start, len(df)):
+        cells = [df.iat[r, j] if j < df.shape[1] else None for j in range(df.shape[1])]
+        desc = ""
+        for v in cells[:6]:
+            s = str(v or "").strip()
+            if not s or s.lower() in ("nan", "none"):
+                continue
+            if num(s) is not None and not re.search(r"[A-Za-z]", s):
+                continue
+            desc = s
+            break
+        if not desc or re.match(r"^(total|planned maintenance|project|projects|first|cycle|frequency|current|estimate)$", desc, re.I):
+            continue
+        if year_cols:
+            years = [float(num(cells[c]) or 0) for c in year_cols]
+            years = (years + [0.0] * 10)[:10]
+            meta = []
+            for j, v in enumerate(cells):
+                if j in year_cols:
+                    continue
+                n = num(v)
+                if n is not None:
+                    meta.append(n)
+            first = int(meta[0]) if meta and 2020 <= meta[0] <= 2040 else ""
+            freq = int(meta[1]) if len(meta) > 1 and 1 <= meta[1] <= 15 else ""
+            est = float(meta[2]) if len(meta) > 2 else (float(meta[0]) if meta and not first else 0.0)
+        else:
+            nums = [num(v) for v in cells]
+            nums = [x for x in nums if x is not None]
+            years = ymp_years_from_nums(nums)
+            first, freq, est = "", "", 0.0
+        if not desc or (not any(years) and not est):
+            continue
+        projects.append({
+            "desc": desc,
+            "years": years,
+            "first_cycle": first,
+            "freq": freq,
+            "estimate": est or (years[0] if years[0] else 0.0),
+        })
+    return projects
+
+
+def plan_start_year(state: dict) -> int:
+    m = re.search(r"20\d{2}", str(state.get("fin_year") or ""))
+    return int(m.group()) if m else 2026
 def generate_excel(state: dict) -> BytesIO:
     apply_levy_lines(state)
     s = state["sections"]
@@ -1089,23 +1169,52 @@ def generate_excel(state: dict) -> BytesIO:
     pq.column_dimensions["C"].width = 14
 
     ymp = wb.create_sheet("10 YMP")
-    ymp["A1"] = "10 YEAR MAINTENANCE PLAN"
+    start_y = plan_start_year(state)
+    ymp["A1"] = (state.get("complex_name") or "").upper()
     ymp["A1"].font = Font(bold=True, size=14, color=NAVY)
-    ymp.cell(3, 1, "Project")
-    fill(ymp.cell(3, 1), NAVY)
-    ymp.cell(3, 1).font = Font(bold=True, color="FFFFFF")
-    for y in range(10):
-        c = ymp.cell(3, 2 + y, f"Year {y+1}")
+    ymp["A2"] = "10 YEAR MAINTENANCE PLAN"
+    ymp["A2"].font = Font(bold=True, size=12, color=NAVY)
+    headers = ["PROJECTS", "First Cycle", "Frequency of Cycles", "Current Estimate"] + [str(start_y + i) for i in range(10)]
+    sub = ["", "", "", ""] + [f"Year {i+1}" for i in range(10)]
+    for i, h in enumerate(headers, 1):
+        c = ymp.cell(4, i, h)
         fill(c, NAVY)
-        c.font = Font(bold=True, color="FFFFFF")
-    ymp.column_dimensions["A"].width = 36
-    projects = state.get("ymp") or [{"desc": "Project 1", "years": [0] * 10}]
+        c.font = Font(bold=True, color="FFFFFF", size=9)
+        c.alignment = Alignment(wrap_text=True, horizontal="center")
+    for i, h in enumerate(sub, 1):
+        c = ymp.cell(5, i, h)
+        fill(c, NAVY)
+        c.font = Font(bold=True, color="FFFFFF", size=8)
+        c.alignment = Alignment(horizontal="center")
+    ymp.column_dimensions["A"].width = 38
+    ymp.column_dimensions["B"].width = 12
+    ymp.column_dimensions["C"].width = 14
+    ymp.column_dimensions["D"].width = 16
+    projects = [p for p in (state.get("ymp") or []) if (p.get("desc") or "").strip()]
+    if not projects:
+        projects = [{"desc": "", "years": [0] * 10}]
+    first_data = 6
     for i, p in enumerate(projects):
-        rr = 4 + i
-        inp(ymp.cell(rr, 1), p.get("desc") or "")
+        rr = first_data + i
         years = p.get("years") or [0] * 10
+        inp(ymp.cell(rr, 1), p.get("desc") or "")
+        fc = p.get("first_cycle") or ""
+        ymp.cell(rr, 2, fc if fc != "" else None)
+        fr = p.get("freq") or ""
+        ymp.cell(rr, 3, fr if fr != "" else None)
+        est = float(p.get("estimate") or 0) or float(years[0] or 0)
+        inp(ymp.cell(rr, 4), est, MONEY)
         for y in range(10):
-            inp(ymp.cell(rr, 2 + y), float(years[y] if y < len(years) else 0), MONEY)
+            val = float(years[y] if y < len(years) else 0)
+            inp(ymp.cell(rr, 5 + y), val, MONEY)
+            if val and y == 0:
+                ymp.cell(rr, 5 + y).font = Font(bold=True, color="9C0006")
+    last = first_data + len(projects) - 1
+    tot = last + 1
+    ymp.cell(tot, 1, "TOTAL").font = Font(bold=True)
+    for col in range(5, 15):
+        letter = get_column_letter(col)
+        fml(ymp.cell(tot, col), f"SUM({letter}{first_data}:{letter}{last})", TOTAL)
 
     bio = BytesIO()
     wb.save(bio)
@@ -1200,28 +1309,12 @@ def restore_from_app_excel(uploaded) -> dict:
                 recs.append({"Unit": unit, "PQ": float(num(pq.iat[r, pq_i]) or 0)})
             if recs:
                 out["pq"] = recs
-    ymp_name = next((n for k, n in names.items() if "ymp" in k or "10" in k), None)
+    ymp_name = next((n for k, n in names.items() if "ymp" in k or "10" in k or "maintenance" in k), None)
     if ymp_name:
         ymp = pd.read_excel(xl, sheet_name=ymp_name, header=None)
-        header = None
-        for i in range(min(8, len(ymp))):
-            vals = [str(v).strip().lower() for v in ymp.iloc[i].tolist()]
-            if any("year 1" in v or v == "y1" for v in vals) or (vals and "project" in vals[0]):
-                header = i
-                break
-        if header is not None:
-            projects = []
-            for r in range(header + 1, len(ymp)):
-                desc = str(ymp.iat[r, 0] or "").strip()
-                if not desc or desc.lower() in ("nan", "total"):
-                    continue
-                years = []
-                for c in range(1, min(11, ymp.shape[1])):
-                    years.append(float(num(ymp.iat[r, c]) or 0))
-                years = (years + [0.0] * 10)[:10]
-                projects.append({"desc": desc, "years": years})
-            if projects:
-                out["ymp"] = projects
+        projects = parse_ymp_sheet(ymp)
+        if projects:
+            out["ymp"] = projects
     return out
 
 
@@ -1642,51 +1735,80 @@ That line’s net = budgeted yearly − insurance payout.
 
     with tabs[9]:
         st.subheader("10-year maintenance plan")
-        st.caption("Paste from Excel (name + 10 year amounts) or type in the table and Save.")
-        paste = st.text_area("Paste from Excel", height=120)
+        st.caption(
+            "Same layout as the Excel pack: First cycle, Frequency, Current estimate, then Year 1–10 rands. "
+            "Upload last year’s budget (the 10 YMP sheet) or paste. Year 1 is the rand amount, not 2025."
+        )
+        ymp_up = st.file_uploader("Upload 10-year plan Excel (or last year’s budget workbook)", type=["xlsx", "xls"], key="ymp_xlsx")
+        if ymp_up and st.button("Load 10-year plan"):
+            try:
+                xl = pd.ExcelFile(ymp_up)
+                sheet = next((n for n in xl.sheet_names if re.search(r"ymp|10|maintenance", n, re.I)), xl.sheet_names[-1])
+                parsed = parse_ymp_sheet(pd.read_excel(xl, sheet_name=sheet, header=None))
+                if parsed:
+                    st.session_state.ymp = parsed
+                    st.success(f"Loaded {len(parsed)} projects from “{sheet}”. Year 1 is the first rand column, not the calendar year.")
+                else:
+                    st.error("Could not find Year 1–10 amounts on that sheet.")
+            except Exception as e:
+                st.error(f"Could not read 10-year plan: {e}")
+        paste = st.text_area("Or paste from Excel (keep the empty cells)", height=120)
         if st.button("Paste into plan") and paste.strip():
             parsed = []
             for line in paste.splitlines():
-                line = line.strip()
-                if not line or re.match(r"^(project|description)", line, re.I):
+                line = line.rstrip()
+                if not line.strip() or re.match(r"^(project|description|planned)", line, re.I):
                     continue
-                parts = [p.strip() for p in re.split(r"\t|;|,|\s{2,}", line) if p.strip()]
-                if not parts:
-                    continue
-                if re.match(r"^(total|planned maintenance)$", parts[0], re.I):
-                    continue
-                nums = []
-                for p in parts[1:]:
-                    n = num(p)
-                    if n is None:
+                if "\t" in line:
+                    bits = line.split("\t")
+                    desc = (bits[0] or "").strip()
+                    nums = []
+                    for p in bits[1:]:
+                        if not str(p).strip():
+                            nums.append(0.0)
+                        else:
+                            n = num(p)
+                            if n is not None:
+                                nums.append(n)
+                else:
+                    parts = [p.strip() for p in re.split(r";|,|\s{2,}", line) if p.strip()]
+                    if not parts:
                         continue
-                    nums.append(n)
-                # First cycle year (2025) and frequency (7) are not Year-1 rands
-                if nums and 2020 <= nums[0] <= 2040:
-                    nums = nums[1:]
-                if nums and 1 <= nums[0] <= 15 and (len(nums) == 1 or nums[1] >= 50):
-                    nums = nums[1:]
-                # Current estimate (10× year 1) then year columns
-                if len(nums) >= 2 and nums[0] > 5000 and abs(nums[0] / 10 - nums[1]) < max(nums[1] * 0.25, 1):
-                    nums = nums[1:]
-                years = (nums + [0.0] * 10)[:10]
-                parsed.append({"desc": parts[0], "years": years})
+                    desc = parts[0]
+                    nums = [num(p) for p in parts[1:]]
+                    nums = [n for n in nums if n is not None]
+                if not desc or re.match(r"^(total|first|cycle|frequency|current|estimate|projects)$", desc, re.I):
+                    continue
+                years = ymp_years_from_nums(nums)
+                first = int(nums[0]) if nums and 2020 <= nums[0] <= 2040 else ""
+                freq = ""
+                if nums and 2020 <= (nums[0] if nums else 0) <= 2040 and len(nums) > 1 and 1 <= nums[1] <= 15:
+                    freq = int(nums[1])
+                parsed.append({"desc": desc, "years": years, "first_cycle": first, "freq": freq, "estimate": 0.0})
             if parsed:
                 st.session_state.ymp = parsed
                 st.success(f"Loaded {len(parsed)} projects.")
         ymp_rows = []
         for p in st.session_state.ymp:
-            rec = {"Project": p.get("desc") or ""}
+            rec = {
+                "Project": p.get("desc") or "",
+                "First cycle": p.get("first_cycle") or "",
+                "Frequency": p.get("freq") or "",
+                "Current estimate": float(p.get("estimate") or 0),
+            }
             years = p.get("years") or [0] * 10
             for i in range(10):
-                rec[f"Y{i+1}"] = float(years[i] if i < len(years) else 0)
+                rec[f"Year {i+1}"] = float(years[i] if i < len(years) else 0)
             ymp_rows.append(rec)
         with st.form("ymp_form"):
             ed = st.data_editor(pd.DataFrame(ymp_rows), num_rows="dynamic", use_container_width=True, hide_index=True)
             if st.form_submit_button("Save 10-year plan"):
                 st.session_state.ymp = [{
                     "desc": str(r.get("Project") or ""),
-                    "years": [float(r.get(f"Y{i+1}") or 0) for i in range(10)],
+                    "first_cycle": r.get("First cycle") or "",
+                    "freq": r.get("Frequency") or "",
+                    "estimate": float(r.get("Current estimate") or 0),
+                    "years": [float(r.get(f"Year {i+1}") or 0) for i in range(10)],
                 } for _, r in ed.iterrows()]
                 st.success("Saved.")
         if st.button("Copy Year 1 into Special Projects"):
@@ -1699,7 +1821,7 @@ That line’s net = budgeted yearly − insurance payout.
                     spec.append(rec)
             if spec:
                 st.session_state.sections["special"] = spec
-                st.success(f"Copied {len(spec)} projects.")
+                st.success(f"Copied {len(spec)} projects (Year 1 rands only).")
 
     with tabs[10]:
         st.subheader("Download Excel")
