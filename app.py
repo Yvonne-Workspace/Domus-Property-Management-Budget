@@ -1850,7 +1850,12 @@ That line’s net = budgeted yearly − insurance payout.
         st.divider()
         section_form("recoveries_other", "Other recoveries", "Insurance / legal recoveries. Utility recoveries sit under Municipal.")
         st.divider()
-        section_form("fixed", "Fixed monthly charges on the owner invoice", "Optional. Mount Kos: insurance + prepaid + Eskom fixed.")
+        section_form(
+            "fixed",
+            "Fixed monthly charges on the owner invoice",
+            "Leave at R 0 for Thornhill. Insurance extra is already the PQ Insurance column above — do not type it here or owners are billed twice. "
+            "Only fill this for Mount Kos-style extras that are a flat monthly amount (prepaid estimate, Eskom fixed, communal), not split by PQ.",
+        )
 
     with tabs[2]:
         section_form(
