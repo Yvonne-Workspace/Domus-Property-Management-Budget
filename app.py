@@ -167,11 +167,21 @@ def insurance_expense_amount(state: dict) -> float:
     return total
 
 
+def is_ins_bill_line(desc: str) -> bool:
+    f = family(desc or "")
+    if f == "ins_bill":
+        return True
+    return bool(re.search(r"insurance recovered|levy\s*[-–]\s*insurance", desc or "", re.I))
+
+
 def insurance_bill_amount(state: dict) -> float:
     """What we put on the owner invoice when insurance is extra."""
     typed = float(state.get("insurance_bill_yearly") or 0)
     if typed > 0.5:
         return typed
+    for r in state["sections"].get("levy") or []:
+        if is_ins_bill_line(r.get("desc") or "") and float(r.get("yearly") or 0) > 0.5:
+            return float(r["yearly"])
     return insurance_expense_amount(state)
 
 
@@ -246,19 +256,32 @@ def apply_levy_lines(state: dict) -> None:
             a = float(r.get("actual") or 0)
             r["pct"] = 0.0 if a == 0 else (float(r["yearly"]) / a) * 100 - 100
     if insurance_on_pq(state):
-        bill = insurance_bill_amount(state)
+        typed = float(state.get("insurance_bill_yearly") or 0)
         found = False
         for r in state["sections"]["levy"]:
-            if family(r["desc"]) == "ins_bill" or re.search(r"insurance recovered|levy\s*[-–]\s*insurance", r["desc"], re.I):
-                r["yearly"] = bill
-                a = float(r.get("actual") or 0)
-                r["pct"] = 0.0 if a == 0 else (bill / a) * 100 - 100
-                found = True
-        if not found and bill:
-            rec = row("Insurance recovered", "Billed to owners on the PQ. Same amount as the insurance premium, not in ordinary levies.")
-            rec["yearly"] = bill
-            rec["actual"] = 0.0
-            state["sections"]["levy"].append(rec)
+            if not is_ins_bill_line(r.get("desc") or ""):
+                continue
+            found = True
+            current = float(r.get("yearly") or 0)
+            if typed > 0.5:
+                r["yearly"] = typed
+            elif current < 0.5:
+                r["yearly"] = insurance_expense_amount(state)
+            # else keep the amount the user typed on the line
+            a = float(r.get("actual") or 0)
+            y = float(r.get("yearly") or 0)
+            r["pct"] = 0.0 if a == 0 else (y / a) * 100 - 100
+            if typed < 0.5 and y > 0.5:
+                state["insurance_bill_yearly"] = y
+        if not found:
+            bill = typed if typed > 0.5 else insurance_expense_amount(state)
+            if bill:
+                rec = row("Insurance recovered", "Billed to owners on the PQ. Change this amount if the quote differs from last year’s premium.")
+                rec["yearly"] = bill
+                rec["actual"] = 0.0
+                state["sections"]["levy"].append(rec)
+                if typed < 0.5:
+                    state["insurance_bill_yearly"] = bill
 
 
 def pq_bill_lines(state: dict) -> list:
@@ -1463,6 +1486,11 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
         saved = st.form_submit_button("Save this section", type="primary")
     if saved:
         st.session_state.sections[key] = save_editor(edited, items, rm, municipal=(key == "municipal"))
+        if key == "levy":
+            for r in st.session_state.sections["levy"]:
+                if is_ins_bill_line(r.get("desc") or "") and float(r.get("yearly") or 0) > 0.5:
+                    st.session_state.insurance_bill_yearly = float(r["yearly"])
+                    break
         apply_levy_lines(st.session_state)
         st.success("Saved. Monthly = yearly ÷ 12. % = (yearly ÷ actual) × 100 − 100.")
         st.rerun()
@@ -1773,12 +1801,14 @@ That line’s net = budgeted yearly − insurance payout.
                 if family(r["desc"]) == "ins_bill" or re.search(r"insurance recovered|levy\s*[-–]\s*insurance", r["desc"], re.I):
                     last_rec = float(r.get("actual") or 0)
                     break
-            st.session_state.insurance_bill_yearly = st.number_input(
-                "Insurance billed to owners this year (0 = use the Insurance expense line)",
-                value=float(st.session_state.get("insurance_bill_yearly") or 0),
+            if "insurance_bill_yearly" not in st.session_state:
+                st.session_state.insurance_bill_yearly = 0.0
+            st.number_input(
+                "Insurance billed to owners this year (0 = use the Insurance recovered line, or the premium if that is 0)",
                 min_value=0.0,
                 step=100.0,
-                help="Trustees should bill this year’s premium, not last year’s recovery.",
+                key="insurance_bill_yearly",
+                help="Type the rand amount you want on the PQ. Save on Levy Income also keeps what you type on Insurance recovered.",
             )
             bill = insurance_bill_amount(st.session_state)
             st.caption(
