@@ -285,12 +285,12 @@ def apply_levy_lines(state: dict) -> None:
 
 
 def pq_bill_lines(state: dict) -> list:
-    """Owner-invoice columns, same order as Thornhill PQ."""
+    """Owner-invoice columns. split 'pq' = × participation quota; 'equal' = same rand each unit."""
     s = state["sections"]
     out = []
 
-    def add(name, yearly):
-        out.append((str(name), float(yearly or 0)))
+    def add(name, yearly, split="pq"):
+        out.append((str(name), float(yearly or 0), split))
 
     for r in s.get("levy", []):
         if family(r["desc"]) == "ordinary":
@@ -318,6 +318,14 @@ def pq_bill_lines(state: dict) -> list:
             float(r.get("yearly") or 0) or float(r.get("actual") or 0)
         ):
             add(r["desc"], r.get("yearly"))
+    for r in s.get("fixed") or []:
+        y = float(r.get("yearly") or 0)
+        if y < 0.5:
+            continue
+        d = (r.get("desc") or "").lower()
+        if "insurance" in d and insurance_on_pq(state):
+            continue
+        add(r.get("desc") or "Extra charge", y, "equal")
     return out
 
 
@@ -1184,6 +1192,12 @@ def generate_excel(state: dict) -> BytesIO:
     hdr()
     a, b = write(s.get("special") or [])
     sp_tot = tot("Total Special Projects Expenses", a, b)
+    charged = [x for x in (s.get("fixed") or []) if float(x.get("yearly") or 0) > 0.5]
+    if charged:
+        bar("EQUAL CHARGES BILLED TO OWNERS (same rand each unit)")
+        hdr()
+        a, b = write(charged)
+        tot("TOTAL EQUAL CHARGES", a, b)
 
     # Ordinary levies = costs owners must cover (not Xanadu pass-through, not utility recoveries)
     bits = f"F{net_muni}+F{exp_tot}+F{rm_tot}+F{per_tot}+F{tax_tot}"
@@ -1231,16 +1245,16 @@ def generate_excel(state: dict) -> BytesIO:
         "Reserve Fund": f"BUDGET!G{levy_rows['reserve']}" if levy_rows.get("reserve") else None,
         "Insurance": f"BUDGET!G{levy_rows['insurance']}" if levy_rows.get("insurance") else None,
     }
-    for it in (s.get("hoa_income") or []):
+    for it in (s.get("hoa_income") or []) + (s.get("fixed") or []):
         nm = it.get("desc") or ""
         if nm in named_rows:
             name_to_budget[nm] = f"BUDGET!G{named_rows[nm]}"
-    headers = ["#", "Unit", "PQ"] + [n for n, _ in bills] + ["Total"]
+    headers = ["#", "Unit", "PQ"] + [n for n, _, _s in bills] + ["Total"]
     for i, h in enumerate(headers, 1):
         cell = pq.cell(6, i, h)
         fill(cell, NAVY)
         cell.font = Font(bold=True, color="FFFFFF")
-    for j, (name, yearly) in enumerate(bills):
+    for j, (name, yearly, split) in enumerate(bills):
         col = 4 + j
         pq.cell(3, col, name)
         fill(pq.cell(3, col), NAVY)
@@ -1252,17 +1266,23 @@ def generate_excel(state: dict) -> BytesIO:
             pq.cell(4, col, float(yearly or 0) / 12)
         pq.cell(4, col).number_format = MONEY
         fill(pq.cell(4, col), YELLOW)
+        pq.cell(5, col, "equal / unit" if split == "equal" else "× PQ")
+        pq.cell(5, col).font = Font(italic=True, size=8, color="666666")
     units = state.get("pq") or [{"Unit": "UNIT-1", "PQ": 1.0}]
+    n_units = max(len(units), 1)
     first_amt, last_amt = 4, 3 + len(bills)
     for i, u in enumerate(units):
         rr = 7 + i
         pq.cell(rr, 1, i + 1)
         pq.cell(rr, 2, str(u.get("Unit", "")))
         pq.cell(rr, 3, float(u.get("PQ") or 0)).number_format = "0.000000"
-        for j in range(len(bills)):
+        for j, (_n, _y, split) in enumerate(bills):
             col = 4 + j
             letter = get_column_letter(col)
-            pq.cell(rr, col, f"=$C{rr}*{letter}$4").number_format = MONEY
+            if split == "equal":
+                pq.cell(rr, col, f"={letter}$4/{n_units}").number_format = MONEY
+            else:
+                pq.cell(rr, col, f"=$C{rr}*{letter}$4").number_format = MONEY
         if bills:
             pq.cell(rr, last_amt + 1, f"=SUM({get_column_letter(first_amt)}{rr}:{get_column_letter(last_amt)}{rr})").number_format = MONEY
     last_u = 6 + len(units)
@@ -1853,8 +1873,11 @@ That line’s net = budgeted yearly − insurance payout.
         section_form(
             "fixed",
             "Fixed monthly charges on the owner invoice",
-            "Leave at R 0 for Thornhill. Insurance extra is already the PQ Insurance column above — do not type it here or owners are billed twice. "
-            "Only fill this for Mount Kos-style extras that are a flat monthly amount (prepaid estimate, Eskom fixed, communal), not split by PQ.",
+            "Use this when EVERY owner pays the SAME extra rand (garden service, prepaid estimate, Eskom fixed, communal). "
+            "Type the YEARLY total for the whole complex, add a row if you need Garden services, then Save. "
+            "Each owner pays that total ÷ 12 ÷ number of units. It is NOT split by PQ. "
+            "Do NOT put Thornhill insurance here — that is the PQ Insurance column. "
+            "If garden is already in Expenditure / R&M and paid from the levy, leave this at 0 or you bill twice.",
         )
 
     with tabs[2]:
@@ -1895,11 +1918,16 @@ That line’s net = budgeted yearly − insurance payout.
                 prev = prev.rename(columns={prev.columns[0]: "Unit"})
             bills = pq_bill_lines(st.session_state)
             extra_cols = []
-            for name, yearly in bills:
+            n_units = max(len(prev), 1)
+            for name, yearly, split in bills:
                 col = str(name)
                 if col in ("Unit", "PQ"):
                     col = f"{name} levy"
-                prev[col] = prev["PQ"].astype(float) * (float(yearly or 0) / 12)
+                monthly = float(yearly or 0) / 12
+                if split == "equal":
+                    prev[col] = monthly / n_units
+                else:
+                    prev[col] = prev["PQ"].astype(float) * monthly
                 extra_cols.append(col)
             if extra_cols:
                 prev["Total monthly"] = prev[extra_cols].sum(axis=1)
@@ -1909,7 +1937,7 @@ That line’s net = budgeted yearly − insurance payout.
             for c in extra_cols + (["Total monthly"] if extra_cols else []):
                 show[c] = show[c].astype(float).round(2)
             st.dataframe(show, use_container_width=True, hide_index=True)
-            levy_sum = sum(float(y or 0) for _, y in bills)
+            levy_sum = sum(float(y or 0) for _, y, _s in bills)
             if levy_sum < 1:
                 st.warning(
                     "PQ shares are loaded, but levy rands are still 0. "
@@ -1917,7 +1945,7 @@ That line’s net = budgeted yearly − insurance payout.
                     "then Save the cost tabs so ordinary / reserve / CSOS fill in."
                 )
             else:
-                st.caption("Monthly column totals: " + " · ".join(f"{n} {money(y/12)}" for n, y in bills))
+                st.caption("Monthly column totals: " + " · ".join(f"{n} {money(y/12)}" for n, y, _s in bills))
             st.caption(f"{len(prev)} units. PQ total {float(prev['PQ'].sum()):.6f} (should be about 1.000).")
 
     with tabs[9]:
