@@ -1910,6 +1910,7 @@ That line’s net = budgeted yearly − insurance payout.
             own = scheme_csos_yearly(st.session_state, ordinary_total(st.session_state))
             st.caption(f"This scheme’s CSOS = {money(own)} a year ({money(own/12)} / month for the complex). It is a PQ column, not part of ordinary levies.")
         st.divider()
+        section_form("levy", "Levy Income", "Ordinary, Reserve and CSOS. Add boathouse / boatport / extra levy types with a new row, then Save.")
         st.session_state.has_master_hoa = st.checkbox(
             "We still bill an estate / Xanadu levy to owners (they pay it through us).",
             value=bool(st.session_state.get("has_master_hoa")),
