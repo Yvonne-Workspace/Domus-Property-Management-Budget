@@ -132,6 +132,9 @@ def default_sections() -> dict:
 
 def is_muni_recovery(desc: str, flag: bool = False) -> bool:
     d = (desc or "").lower()
+    # Insurance recovered / legal recovered are INCOME, not municipal credits.
+    if "insurance" in d or "legal recover" in d:
+        return False
     if flag:
         return True
     if d.startswith("less:"):
