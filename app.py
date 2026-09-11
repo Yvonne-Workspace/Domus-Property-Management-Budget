@@ -16,6 +16,7 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="Domus Budget", layout="wide", initial_sidebar_state="expanded")
 
 NOW_YEAR = 2026
+YELLOW, NAVY, BLUE, RED, TOTAL, SECTION = "FFFF99", "1F4E79", "0000FF", "FFC7CE", "D9E2F3", "2E75B6"
 THIN = Border(
     left=Side(style="thin", color="B0B0B0"),
     right=Side(style="thin", color="B0B0B0"),
