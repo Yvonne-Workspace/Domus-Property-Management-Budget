@@ -271,8 +271,6 @@ def apply_levy_lines(state: dict) -> None:
             a = float(r.get("actual") or 0)
             y = float(r.get("yearly") or 0)
             r["pct"] = 0.0 if a == 0 else (y / a) * 100 - 100
-            if typed < 0.5 and y > 0.5:
-                state["insurance_bill_yearly"] = y
         if not found:
             bill = typed if typed > 0.5 else insurance_expense_amount(state)
             if bill:
@@ -280,8 +278,6 @@ def apply_levy_lines(state: dict) -> None:
                 rec["yearly"] = bill
                 rec["actual"] = 0.0
                 state["sections"]["levy"].append(rec)
-                if typed < 0.5:
-                    state["insurance_bill_yearly"] = bill
 
 
 def pq_bill_lines(state: dict) -> list:
@@ -1489,7 +1485,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
         if key == "levy":
             for r in st.session_state.sections["levy"]:
                 if is_ins_bill_line(r.get("desc") or "") and float(r.get("yearly") or 0) > 0.5:
-                    st.session_state.insurance_bill_yearly = float(r["yearly"])
+                    st.session_state["_pending_insurance_bill"] = float(r["yearly"])
                     break
         apply_levy_lines(st.session_state)
         st.success("Saved. Monthly = yearly ÷ 12. % = (yearly ÷ actual) × 100 − 100.")
@@ -1499,6 +1495,9 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
 
 def main():
     init()
+    pending = st.session_state.pop("_pending_insurance_bill", None)
+    if pending is not None:
+        st.session_state.insurance_bill_yearly = float(pending)
     logo = Path(__file__).parent / "domus_logo.jpeg"
     cols = st.columns([1, 5])
     with cols[0]:
