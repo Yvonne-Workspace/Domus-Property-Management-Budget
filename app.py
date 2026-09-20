@@ -36,6 +36,15 @@ def money(n: float) -> str:
     return f"R {n:,.2f}"
 
 
+def pct_from_amounts(actual: float, yearly: float) -> float:
+    """% increase from last year’s actual to this year’s budgeted yearly."""
+    a = float(actual or 0)
+    y = float(yearly or 0)
+    if a < 0.5:
+        return 0.0
+    return (y / a) * 100.0 - 100.0
+
+
 def norm(s: str) -> str:
     s = str(s or "").lower()
     s = re.sub(r"[–—-]", " ", s)
@@ -977,11 +986,15 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
 def items_to_df(items: list, rm: bool) -> pd.DataFrame:
     recs = []
     for it in items:
+        actual = float(it.get("actual") or 0)
+        yearly = float(it.get("yearly") or 0)
+        stored = float(it.get("pct") or 0)
+        pct = pct_from_amounts(actual, yearly) if actual >= 0.5 else stored
         recs.append({
             "Description": it["desc"],
-            "Actual": float(it.get("actual") or 0),
-            "% Increase": float(it.get("pct") or 0),
-            "Budgeted yearly": float(it.get("yearly") or 0),
+            "Actual": actual,
+            "% Increase": round(pct, 2),
+            "Budgeted yearly": yearly,
             "Monthly": net_of(it) / 12,
             "Insurance payout": float(it.get("insurance") or 0),
             "Notes": it.get("note") or "",
@@ -1006,14 +1019,17 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
         pct = float(rec.get("% Increase") or 0)
         yearly = abs(float(rec.get("Budgeted yearly") or 0))
         ins = float(rec.get("Insurance payout") or 0) if rm else float(prev.get("insurance") or 0)
-        old_pct = float(prev.get("pct") or 0)
+        old_actual = abs(float(prev.get("actual") or 0))
         old_y = abs(float(prev.get("yearly") or 0))
-        pct_changed = abs(pct - old_pct) > 0.05
-        y_changed = abs(yearly - old_y) > 0.02
+        shown_pct = pct_from_amounts(old_actual, old_y) if old_actual >= 0.5 else float(prev.get("pct") or 0)
+        pct_changed = abs(pct - shown_pct) > 0.2
+        y_changed = abs(yearly - old_y) > 0.5
         if pct_changed and not y_changed:
-            yearly = actual * (1 + pct / 100)
+            yearly = actual * (1 + pct / 100.0) if actual >= 0.5 else yearly
         elif y_changed:
-            pct = 0.0 if actual == 0 else (yearly / actual) * 100 - 100
+            pct = pct_from_amounts(actual, yearly)
+        else:
+            pct = pct_from_amounts(actual, yearly) if actual >= 0.5 else pct
         recovery = municipal and is_muni_recovery(desc, prev.get("is_recovery"))
         out.append({
             "id": prev.get("id") or uid(),
@@ -1220,9 +1236,10 @@ def generate_excel(state: dict) -> BytesIO:
             if fam == "ordinary":
                 # % follows the levy formula so a meeting change to costs updates the %
                 fml(ws.cell(r, 5), f'IF(D{r}=0,0,F{r}/D{r}-1)')
-                ws.cell(r, 5).number_format = "0.0%"
+                ws.cell(r, 5).number_format = "0.00%"
             else:
-                inp(ws.cell(r, 5), pct / 100.0, "0.0%")
+                show_pct = pct_from_amounts(act, y) if act >= 0.5 else pct
+                inp(ws.cell(r, 5), show_pct / 100.0, "0.00%")
             expected = act * (1 + pct / 100.0)
             if fam == "ordinary":
                 pass  # F filled after totals
@@ -1717,8 +1734,16 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
             column_config={
                 "Description": st.column_config.TextColumn("Description", width="medium"),
                 "Actual": st.column_config.NumberColumn("Actual", format="%.2f"),
-                "% Increase": st.column_config.NumberColumn("% Increase", format="%.1f", help="Type % then click Save"),
-                "Budgeted yearly": st.column_config.NumberColumn("Budgeted yearly", format="%.2f", help="Or type the rand amount then Save"),
+                "% Increase": st.column_config.NumberColumn(
+                    "% Increase",
+                    format="%.2f",
+                    help="Type 10 for +10%, then Save. We set Budgeted yearly = Actual × 1.10",
+                ),
+                "Budgeted yearly": st.column_config.NumberColumn(
+                    "Budgeted yearly",
+                    format="%.2f",
+                    help="Or type the rand amount then Save. We fill in the %.",
+                ),
                 "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="Yearly ÷ 12. Updates when you Save."),
                 "Insurance payout": st.column_config.NumberColumn("Insurance payout", format="%.2f"),
                 "Notes": st.column_config.TextColumn("Notes"),
@@ -1734,7 +1759,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
                     st.session_state["_pending_insurance_bill"] = float(r["yearly"])
                     break
         apply_levy_lines(st.session_state)
-        st.success("Saved. Monthly = yearly ÷ 12. % = (yearly ÷ actual) × 100 − 100.")
+        st.success("Saved. If you typed %, yearly = actual × (1 + %). If you typed the rand amount, % = (yearly ÷ actual) × 100 − 100.")
         st.rerun()
     st.caption(f"Section net total: {money(sum_net(st.session_state.sections[key]))}  ·  Monthly total: {money(sum_net(st.session_state.sections[key]) / 12)}")
 
