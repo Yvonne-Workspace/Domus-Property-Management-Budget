@@ -381,6 +381,18 @@ def odd_budget_lines(state: dict) -> list:
     return flags
 
 
+def is_own_scheme_csos(desc: str) -> bool:
+    """This complex’s CSOS (not estate/Xanadu, not a collection fee)."""
+    d = (desc or "").lower()
+    if "csos" not in d:
+        return False
+    if re.search(r"xanadu|eco park|master|\bhoa\b|estate", d):
+        return False
+    if "collect" in d:
+        return False
+    return True
+
+
 def apply_levy_lines(state: dict) -> None:
     ord_amt = ordinary_total(state)
     for r in state["sections"]["levy"]:
@@ -398,33 +410,46 @@ def apply_levy_lines(state: dict) -> None:
             r["pct"] = 0.0 if a == 0 else (float(r["yearly"]) / a) * 100 - 100
     if state.get("auto_csos", True):
         csos_y = scheme_csos_yearly(state, ord_amt)
+    else:
+        csos_y = 0.0
         for r in state["sections"]["levy"]:
-            if family(r["desc"]) == "csos_inc":
+            if is_own_scheme_csos(r.get("desc") or "") and family(r["desc"]) != "ordinary":
+                csos_y = float(r.get("yearly") or 0)
+                break
+    if csos_y or state.get("auto_csos", True):
+        found_exp = False
+        for r in state["sections"]["levy"]:
+            if is_own_scheme_csos(r.get("desc") or ""):
                 r["yearly"] = csos_y
                 a = float(r.get("actual") or 0)
                 r["pct"] = 0.0 if a == 0 else (csos_y / a) * 100 - 100
         for r in state["sections"].get("expenditure") or []:
-            if family(r.get("desc") or "") == "csos_exp":
+            if is_own_scheme_csos(r.get("desc") or ""):
                 r["yearly"] = csos_y
                 a = float(r.get("actual") or 0)
                 r["pct"] = 0.0 if a == 0 else (csos_y / a) * 100 - 100
-        if state.get("has_master_hoa"):
-            hoa_levy_y = sum(
-                float(r.get("yearly") or 0)
-                for r in (state["sections"].get("hoa_income") or [])
-                if family(r.get("desc") or "") != "hoa_csos_inc"
-            )
-            hoa_csos_y = scheme_csos_yearly(state, hoa_levy_y)
-            for r in state["sections"].get("hoa_income") or []:
-                if family(r.get("desc") or "") == "hoa_csos_inc":
-                    r["yearly"] = hoa_csos_y
-                    a = float(r.get("actual") or 0)
-                    r["pct"] = 0.0 if a == 0 else (hoa_csos_y / a) * 100 - 100
-            for r in state["sections"].get("hoa_expense") or []:
-                if family(r.get("desc") or "") == "hoa_csos_exp":
-                    r["yearly"] = hoa_csos_y
-                    a = float(r.get("actual") or 0)
-                    r["pct"] = 0.0 if a == 0 else (hoa_csos_y / a) * 100 - 100
+                found_exp = True
+        if csos_y > 0.5 and not found_exp:
+            rec = row("CSOS Levies (Expense)", "Same amount as CSOS income — we collect from owners and pay CSOS.")
+            rec["yearly"] = csos_y
+            state["sections"]["expenditure"].append(rec)
+    if state.get("has_master_hoa"):
+        hoa_levy_y = sum(
+            float(r.get("yearly") or 0)
+            for r in (state["sections"].get("hoa_income") or [])
+            if family(r.get("desc") or "") != "hoa_csos_inc"
+        )
+        hoa_csos_y = scheme_csos_yearly(state, hoa_levy_y)
+        for r in state["sections"].get("hoa_income") or []:
+            if family(r.get("desc") or "") == "hoa_csos_inc":
+                r["yearly"] = hoa_csos_y
+                a = float(r.get("actual") or 0)
+                r["pct"] = 0.0 if a == 0 else (hoa_csos_y / a) * 100 - 100
+        for r in state["sections"].get("hoa_expense") or []:
+            if family(r.get("desc") or "") == "hoa_csos_exp":
+                r["yearly"] = hoa_csos_y
+                a = float(r.get("actual") or 0)
+                r["pct"] = 0.0 if a == 0 else (hoa_csos_y / a) * 100 - 100
     if insurance_on_pq(state):
         typed = float(state.get("insurance_bill_yearly") or 0)
         found = False
@@ -529,7 +554,7 @@ def family(desc: str) -> str | None:
             return "csos_col"
         if re.search(r"income|recovered", d):
             return "csos_inc"
-        if re.search(r"paid|expense|^csos levy$", d):
+        if re.search(r"paid|expense|^csos levy$|^csos levies$", d):
             return "csos_exp"
         return "csos_inc"
     if "boathouse" in d:
@@ -1277,7 +1302,7 @@ def generate_excel(state: dict) -> BytesIO:
             fam = family(desc)
             if fam == "ordinary":
                 levy_rows["ordinary"] = r
-            if fam == "csos_inc":
+            if fam == "csos_inc" or (is_own_scheme_csos(desc) and fam != "csos_exp" and "expense" not in desc.lower()):
                 levy_rows["csos"] = r
             if fam == "reserve":
                 levy_rows["reserve"] = r
@@ -1301,6 +1326,8 @@ def generate_excel(state: dict) -> BytesIO:
                 pass  # F filled after totals
             elif fam == "reserve" and state.get("reserve_mode") == "15pct" and levy_rows.get("ordinary"):
                 fml(ws.cell(r, 6), f"0.15*F{levy_rows['ordinary']}")
+            elif is_own_scheme_csos(desc) and fam == "csos_exp" and levy_rows.get("csos"):
+                fml(ws.cell(r, 6), f"F{levy_rows['csos']}")
             elif rec and not recovery_as_income:
                 fml(ws.cell(r, 6), f"-ABS(D{r}*(1+E{r}))")
             elif ins > 0.5:
@@ -2187,7 +2214,7 @@ That line’s net = budgeted yearly − insurance payout.
             own = scheme_csos_yearly(st.session_state, ordinary_total(st.session_state))
             st.caption(f"This scheme’s CSOS = {money(own)} a year ({money(own/12)} / month for the complex). It is a PQ column, not part of ordinary levies.")
         st.divider()
-        section_form("levy", "Levy Income", "Ordinary, Reserve and CSOS. Add boathouse / boatport / extra levy types with a new row, then Save.")
+        section_form("levy", "Levy Income", "Ordinary, Reserve and CSOS. CSOS income = CSOS expense (we collect it and pay it on). Add boathouse / extra levy types with a new row, then Save.")
         st.session_state.has_master_hoa = st.checkbox(
             "We still bill an estate / Xanadu levy to owners (they pay it through us).",
             value=bool(st.session_state.get("has_master_hoa")),
@@ -2267,6 +2294,7 @@ That line’s net = budgeted yearly − insurance payout.
             "expenditure",
             "Expenditure",
             "Operating costs except R&M, personnel and tax. "
+            "CSOS Levies (Expense) is locked to CSOS income — same rand. Last year’s Actuals can differ (timing). "
             "If owners pay the gardener themselves, set Garden service to R0 (omit it from the budget). "
             "Garden Expenses on Repair & Maintenance is different — that stays in the levy.",
         )
