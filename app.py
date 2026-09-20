@@ -219,9 +219,30 @@ def scheme_csos_yearly(state: dict, levy_yearly: float) -> float:
     return csos_monthly_for_levy(levy_yearly / 12.0 / n) * n * 12.0
 
 
+def municipal_gross_and_rec(state: dict) -> tuple[float, float]:
+    """Gross municipal bills vs owner recoveries. Insurance/legal claims are not recoveries."""
+    gross = 0.0
+    rec = 0.0
+    for r in state["sections"].get("municipal") or []:
+        y = abs(float(r.get("yearly") or 0))
+        if is_muni_recovery(r.get("desc") or "", r.get("is_recovery")):
+            rec += y
+        else:
+            gross += y
+    for r in state["sections"].get("recoveries_other") or []:
+        if is_muni_recovery(r.get("desc") or "", False):
+            rec += abs(float(r.get("yearly") or 0))
+    return gross, rec
+
+
+def municipal_net(state: dict) -> float:
+    g, rec = municipal_gross_and_rec(state)
+    return g - rec
+
+
 def ordinary_total(state: dict) -> float:
     s = state["sections"]
-    total = sum_net(s["municipal"]) + sum_net(s["rm"]) + sum_net(s["personnel"]) + sum_net(s["tax"])
+    total = municipal_net(state) + sum_net(s["rm"]) + sum_net(s["personnel"]) + sum_net(s["tax"])
     total += sum(net_of(r) for r in s["expenditure"] if not skip_from_ordinary(r, state))
     if state.get("special_in_ordinary"):
         total += sum_net(s["special"])
@@ -231,7 +252,7 @@ def ordinary_total(state: dict) -> float:
 def levy_pieces(state: dict) -> list:
     s = state["sections"]
     return [
-        ("Net municipal (gross minus recoveries)", sum_net(s["municipal"])),
+        ("Net municipal (gross minus recoveries)", municipal_net(state)),
         ("Expenditure", sum(net_of(r) for r in s["expenditure"] if not skip_from_ordinary(r, state))),
         ("R&M after insurance", sum_net(s["rm"])),
         ("Personnel", sum_net(s["personnel"])),
@@ -1150,6 +1171,7 @@ def generate_excel(state: dict) -> BytesIO:
             if fam == "ins_bill" or re.search(r"insurance recovered|levy\s*[-–]\s*insurance", desc, re.I):
                 levy_rows["insurance"] = r
             named_rows[desc] = r
+            ins = float(it.get("insurance") or 0)
             rec = is_muni_recovery(desc, it.get("is_recovery"))
             inp(ws.cell(r, 4), act, MONEY)
             if fam == "ordinary":
@@ -1165,15 +1187,19 @@ def generate_excel(state: dict) -> BytesIO:
                 fml(ws.cell(r, 6), f"0.15*F{levy_rows['ordinary']}")
             elif rec and not recovery_as_income:
                 fml(ws.cell(r, 6), f"-ABS(D{r}*(1+E{r}))")
+            elif ins > 0.5:
+                if abs(y - expected) > 1 and abs(y) > 0.5:
+                    inp(ws.cell(r, 6), max(0.0, abs(y) - ins), MONEY)
+                else:
+                    fml(ws.cell(r, 6), f"MAX(0,D{r}*(1+E{r})-{ins})")
             elif act < 0.5 and abs(y) > 0.5:
-                inp(ws.cell(r, 6), y if not (rec and not recovery_as_income) else -abs(y), MONEY)
+                inp(ws.cell(r, 6), abs(y) if recovery_as_income or not rec else (y if y < 0 else abs(y)), MONEY)
             elif abs(y - expected) > 1 and y > 0:
-                inp(ws.cell(r, 6), abs(y) if recovery_as_income or not rec else -abs(y), MONEY)
+                inp(ws.cell(r, 6), abs(y), MONEY)
             else:
                 fml(ws.cell(r, 6), f"D{r}*(1+E{r})")
             fml(ws.cell(r, 7), f"F{r}/12")
             note = it.get("note") or ""
-            ins = float(it.get("insurance") or 0)
             if ins:
                 note = (note + " | Insurance payout " + f"{ins:,.2f}").strip(" |")
             inp(ws.cell(r, 8), note)
@@ -1195,7 +1221,10 @@ def generate_excel(state: dict) -> BytesIO:
     inc_tot = tot("TOTAL INCOME", a, b)
     bar("OTHER INCOME")
     hdr()
-    a, b = write(s.get("other") or [])
+    other_items = list(s.get("other") or []) + [
+        x for x in (s.get("recoveries_other") or []) if not is_muni_recovery(x.get("desc") or "", False)
+    ]
+    a, b = write(other_items)
     tot("TOTAL OTHER INCOME", a, b)
     hoa_tot = None
     if state.get("has_master_hoa"):
@@ -1207,10 +1236,10 @@ def generate_excel(state: dict) -> BytesIO:
             named_rows[it.get("desc") or ""] = named_rows.get(it.get("desc") or "")
     muni_gross = [x for x in (s.get("municipal") or []) if not is_muni_recovery(x.get("desc") or "", x.get("is_recovery"))]
     muni_rec = [x for x in (s.get("municipal") or []) if is_muni_recovery(x.get("desc") or "", x.get("is_recovery"))]
-    util = list(s.get("recoveries_other") or []) + muni_rec
+    muni_rec += [x for x in (s.get("recoveries_other") or []) if is_muni_recovery(x.get("desc") or "", False)]
     bar("Recoveries on Utilities")
     hdr()
-    a, b = write(util, recovery_as_income=True)
+    a, b = write(muni_rec, recovery_as_income=True)
     util_tot = tot("TOTAL UTILITY RECOVERIES", a, b)
     bar("Municipal Charges")
     hdr()
@@ -2040,10 +2069,20 @@ That line’s net = budgeted yearly − insurance payout.
         )
 
     with tabs[2]:
+        g, rec = municipal_gross_and_rec(st.session_state)
+        n1, n2, n3 = st.columns(3)
+        n1.metric("Gross municipal (what the city bills us)", money(g))
+        n2.metric("Recovered from owners", money(rec))
+        n3.metric("Net municipal (in the levy)", money(g - rec))
+        st.caption(
+            "Net = gross − recoveries. Same as last year’s pack. "
+            "Sewerage and Domestic Effluent is GROSS (add). "
+            "Sewerage recovered is a recovery (subtract). Type recoveries as a positive rand."
+        )
         section_form(
             "municipal",
             "Municipal charges",
-            "Gross on its own line. Recoveries: add a new row, name it ‘… recovered’, type a POSITIVE rand (no minus). Save. We subtract it. Example: Less: Sewer plant electricity recovered  335079.",
+            "Gross on its own line. Recoveries: add a new row, name it ‘… recovered’, type a POSITIVE rand (no minus). Save. We subtract it.",
         )
 
     with tabs[3]:
