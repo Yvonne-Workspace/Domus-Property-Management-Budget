@@ -176,7 +176,8 @@ def net_of(r: dict) -> float:
     ins = float(r.get("insurance") or 0)
     if is_muni_recovery(r.get("desc") or "", r.get("is_recovery")):
         return -abs(y)
-    return y - ins
+    # Payout reduces that line; it must not drive the levy negative.
+    return max(0.0, y - ins)
 
 
 def sum_net(items: list) -> float:
@@ -1255,8 +1256,9 @@ def generate_excel(state: dict) -> BytesIO:
 
     levy_rows = {}
     named_rows = {}
+    levy_comp_rows = []
 
-    def write(items, recovery_as_income=False):
+    def write(items, recovery_as_income=False, in_levy=False):
         """Old pack formulas: F = D*(1+E), G = F/12. Recoveries shown as positive income when asked."""
         nonlocal r
         if not items:
@@ -1281,6 +1283,8 @@ def generate_excel(state: dict) -> BytesIO:
             if fam == "ins_bill" or re.search(r"insurance recovered|levy\s*[-–]\s*insurance", desc, re.I):
                 levy_rows["insurance"] = r
             named_rows[desc] = r
+            if in_levy and not skip_from_ordinary(it, state):
+                levy_comp_rows.append(r)
             ins = float(it.get("insurance") or 0)
             rec = is_muni_recovery(desc, it.get("is_recovery"))
             inp(ws.cell(r, 4), act, MONEY)
@@ -1393,23 +1397,23 @@ def generate_excel(state: dict) -> BytesIO:
     exp_items = list(s.get("expenditure") or [])
     if state.get("has_master_hoa"):
         exp_items = exp_items + list(s.get("hoa_expense") or [])
-    a, b = write(exp_items)
+    a, b = write(exp_items, in_levy=True)
     exp_tot = tot("TOTAL EXPENDITURE", a, b)
     bar("REPAIR AND MAINTENANCE")
     hdr()
-    a, b = write(s.get("rm") or [])
+    a, b = write(s.get("rm") or [], in_levy=True)
     rm_tot = tot("Total Repair and Maintenance", a, b)
     bar("PERSONNEL")
     hdr()
-    a, b = write(s.get("personnel") or [])
+    a, b = write(s.get("personnel") or [], in_levy=True)
     per_tot = tot("Total Personnel Expenses", a, b)
     bar("INCOME TAX")
     hdr()
-    a, b = write(s.get("tax") or [])
+    a, b = write(s.get("tax") or [], in_levy=True)
     tax_tot = tot("TOTAL TAX", a, b)
     bar("SPECIAL PROJECTS")
     hdr()
-    a, b = write(s.get("special") or [])
+    a, b = write(s.get("special") or [], in_levy=bool(state.get("special_in_ordinary")))
     sp_tot = tot("Total Special Projects Expenses", a, b)
     charged = [x for x in (s.get("fixed") or []) if float(x.get("yearly") or 0) > 0.5]
     if charged:
@@ -1418,16 +1422,12 @@ def generate_excel(state: dict) -> BytesIO:
         a, b = write(charged)
         tot("TOTAL EQUAL CHARGES", a, b)
 
-    # Ordinary levies = costs owners must cover (not Xanadu pass-through, not utility recoveries)
-    bits = f"F{net_muni}+F{exp_tot}+F{rm_tot}+F{per_tot}+F{tax_tot}"
-    for it in (s.get("expenditure") or []) + (s.get("hoa_expense") or []) + (s.get("rm") or []):
-        d = it.get("desc") or ""
-        if d in named_rows and skip_from_ordinary(it, state):
-            bits += f"-F{named_rows[d]}"
-    if state.get("special_in_ordinary"):
-        bits += f"+F{sp_tot}"
+    # Ordinary = net municipal + each cost line that is not billed separately (estate / insurance / garden / CSOS)
+    bits = f"F{net_muni}"
+    if levy_comp_rows:
+        bits += "+" + "+".join(f"F{n}" for n in levy_comp_rows)
     bar("ORDINARY LEVY (what we charge)")
-    ws.cell(r, 2, "Ordinary levies = net municipal + expenditure (not estate pass-through) + R&M + personnel + tax")
+    ws.cell(r, 2, "Ordinary levies = net municipal + expenditure + R&M + personnel + tax (not estate, CSOS, extra insurance, or equal garden charges)")
     fml(ws.cell(r, 6), bits, RED)
     fml(ws.cell(r, 7), f"F{r}/12", RED)
     ord_check = r
@@ -2257,10 +2257,24 @@ That line’s net = budgeted yearly − insurance payout.
         section_form("expenditure", "Expenditure", "Operating costs except R&M, personnel and tax. Add or delete rows as needed.")
 
     with tabs[4]:
+        over_pay = [
+            it for it in (st.session_state.sections.get("rm") or [])
+            if float(it.get("insurance") or 0) > float(it.get("yearly") or 0) + 0.5
+            and float(it.get("insurance") or 0) > 0.5
+        ]
+        if over_pay:
+            st.error(
+                "Insurance payout is bigger than Budgeted yearly on: "
+                + ", ".join(it["desc"] for it in over_pay)
+                + ". That column is a **deduction**, not the new budget. "
+                "Put the fire / equipment amount in **Budgeted yearly**. Net in the levy is R0 on those lines."
+            )
         section_form(
             "rm",
             "Repair and Maintenance",
-            "Type an insurance payout on the line it belongs to, then Save. Net = yearly − payout.",
+            "Type an insurance payout on the line it belongs to, then Save. "
+            "Budgeted yearly = the job. Insurance payout = what the insurer pays (a deduction). "
+            "Net in the levy = yearly − payout, never below R0. Do not type the new fire budget in Insurance payout.",
             rm=True,
         )
 
