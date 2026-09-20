@@ -1122,16 +1122,39 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
     return out
 
 
-def ymp_years_from_nums(nums: list) -> list:
-    """Thornhill layout: First cycle (2025) | Frequency (7) | Current estimate | Year 1 … Year 10."""
+def ymp_years_from_nums(nums: list, start_year: int | None = None) -> list:
+    """Old pack: First cycle | Frequency | Current estimate | 2025 | 2026 | … then roll so Year 1 = this budget year."""
+    start_year = int(start_year or NOW_YEAR)
     n = [float(x) for x in nums if x is not None]
     if n and 2020 <= n[0] <= 2040:
         n = n[1:]
-    if n and 1 <= n[0] <= 15 and (len(n) == 1 or n[1] >= 20):
-        n = n[1:]
+        if n and 1 <= n[0] <= 20:
+            n = n[1:]
+        if n and (len(n) >= 11 or (n[0] >= 50 and len(n) >= 2 and n[0] > max([x for x in n[1:] if x] or [0]) * 1.2)):
+            n = n[1:]  # drop Current Estimate
+        offset = max(0, start_year - 2025)
+        if offset:
+            n = n[offset:] if len(n) > offset else [0.0] * 10
     if len(n) > 10:
-        n = n[-10:]
+        n = n[:10]
     return (n + [0.0] * 10)[:10]
+
+
+def parse_ymp_paste(text: str, start_year: int | None = None) -> list:
+    rows = []
+    for line in (text or "").splitlines():
+        line = line.replace("\xa0", " ").rstrip()
+        if not line.strip():
+            continue
+        if "\t" in line:
+            rows.append([c.strip() for c in line.split("\t")])
+        else:
+            rows.append([c.strip() for c in re.split(r"\s{2,}", line)])
+    if not rows:
+        return []
+    width = max(len(r) for r in rows)
+    padded = [r + [""] * (width - len(r)) for r in rows]
+    return parse_ymp_sheet(pd.DataFrame(padded), start_year)
 
 
 def parse_ymp_sheet(df, start_year: int | None = None) -> list:
@@ -1143,7 +1166,7 @@ def parse_ymp_sheet(df, start_year: int | None = None) -> list:
     for i in range(min(12, len(df))):
         raw = [df.iat[i, j] for j in range(df.shape[1])]
         labels = [str(v).strip().lower() for v in raw]
-        ylabels = [j for j, v in enumerate(labels) if re.match(r"^year\s*\d+", v) or re.match(r"^y\d+$", v)]
+        ylabels = [j for j, v in enumerate(labels) if re.match(r"^(year|tear)\s*\d+", v) or re.match(r"^y\d+$", v)]
         cals = []
         for j, v in enumerate(raw):
             s = str(v).strip().replace(".0", "")
@@ -1171,7 +1194,14 @@ def parse_ymp_sheet(df, start_year: int | None = None) -> list:
                 continue
             desc = s
             break
-        if not desc or re.match(r"^(total|planned maintenance|project|projects|first|cycle|frequency|current|estimate)$", desc, re.I):
+        if not desc or re.match(
+            r"^(total|planned maintenance|project|projects|first|cycle|frequency|current|estimate|"
+            r"year\s*\d+|tear\s*\d+|10 year|body corporate)$",
+            desc,
+            re.I,
+        ):
+            continue
+        if re.search(r"maintenance plan|body corporate", desc, re.I) and not re.search(r"paint|roof|door|window|valuation|lift|pool|fence", desc, re.I):
             continue
         if year_cols:
             years = []
@@ -1195,9 +1225,19 @@ def parse_ymp_sheet(df, start_year: int | None = None) -> list:
         else:
             nums = [num(v) for v in cells]
             nums = [x for x in nums if x is not None]
-            years = ymp_years_from_nums(nums)
+            years = ymp_years_from_nums(nums, start_year)
             first, freq, est = "", "", 0.0
-        if not desc or (not any(years) and not est):
+            if nums and 2020 <= nums[0] <= 2040:
+                first = int(nums[0])
+                if len(nums) > 1 and 1 <= nums[1] <= 20:
+                    freq = int(nums[1])
+                    if len(nums) > 2 and nums[2] >= 50:
+                        est = float(nums[2])
+            elif nums:
+                est = float(nums[0]) if nums[0] >= 50 else 0.0
+        if not desc:
+            continue
+        if not any(abs(y) > 0.5 for y in years) and not est and not first:
             continue
         projects.append({
             "desc": desc,
@@ -2391,42 +2431,18 @@ That line’s net = budgeted yearly − insurance payout.
                     st.error("Could not find Year 1–10 amounts on that sheet.")
             except Exception as e:
                 st.error(f"Could not read 10-year plan: {e}")
-        paste = st.text_area("Or paste from Excel (keep the empty cells)", height=120)
+        paste = st.text_area("Or paste from Excel (keep the empty cells / tabs)", height=160)
         if st.button("Paste into plan") and paste.strip():
-            parsed = []
-            for line in paste.splitlines():
-                line = line.rstrip()
-                if not line.strip() or re.match(r"^(project|description|planned)", line, re.I):
-                    continue
-                if "\t" in line:
-                    bits = line.split("\t")
-                    desc = (bits[0] or "").strip()
-                    nums = []
-                    for p in bits[1:]:
-                        if not str(p).strip():
-                            nums.append(0.0)
-                        else:
-                            n = num(p)
-                            if n is not None:
-                                nums.append(n)
-                else:
-                    parts = [p.strip() for p in re.split(r";|,|\s{2,}", line) if p.strip()]
-                    if not parts:
-                        continue
-                    desc = parts[0]
-                    nums = [num(p) for p in parts[1:]]
-                    nums = [n for n in nums if n is not None]
-                if not desc or re.match(r"^(total|first|cycle|frequency|current|estimate|projects)$", desc, re.I):
-                    continue
-                years = ymp_years_from_nums(nums)
-                first = int(nums[0]) if nums and 2020 <= nums[0] <= 2040 else ""
-                freq = ""
-                if nums and 2020 <= (nums[0] if nums else 0) <= 2040 and len(nums) > 1 and 1 <= nums[1] <= 15:
-                    freq = int(nums[1])
-                parsed.append({"desc": desc, "years": years, "first_cycle": first, "freq": freq, "estimate": 0.0})
+            parsed = parse_ymp_paste(paste, plan_start_year(st.session_state))
             if parsed:
                 st.session_state.ymp = parsed
-                st.success(f"Loaded {len(parsed)} projects.")
+                y0 = plan_start_year(st.session_state)
+                st.success(
+                    f"Loaded {len(parsed)} projects. Year 1 is {y0} (this budget). "
+                    f"Last year’s 2025 column is dropped. Painting / garage rands sit in {y0} onward."
+                )
+            else:
+                st.error("Could not read that paste. Copy the whole 10-year block from Excel, including the 2025–2034 year headings.")
         ymp_rows = []
         for p in st.session_state.ymp:
             rec = {
