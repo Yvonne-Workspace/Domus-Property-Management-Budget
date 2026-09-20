@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from io import BytesIO
 from pathlib import Path
@@ -9,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 import pdfplumber
 import streamlit as st
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -1387,6 +1388,35 @@ def generate_excel(state: dict) -> BytesIO:
         letter = get_column_letter(col)
         fml(ymp.cell(tot, col), f"SUM({letter}{first_data}:{letter}{last})", TOTAL)
 
+    # Hidden round-trip sheet so Restore uploads the same numbers we downloaded.
+    pack = wb.create_sheet("_DOMUS")
+    pack.sheet_state = "hidden"
+    pack["A1"] = "DOMUS_STATE_V1"
+    payload = {
+        "complex_name": state.get("complex_name") or "",
+        "fin_year": state.get("fin_year") or "",
+        "sections": state.get("sections") or {},
+        "pq": state.get("pq"),
+        "ymp": state.get("ymp") or [],
+        "has_master_hoa": bool(state.get("has_master_hoa")),
+        "insurance_mode": state.get("insurance_mode") or "levy",
+        "insurance_bill_yearly": float(state.get("insurance_bill_yearly") or 0),
+        "auto_csos": bool(state.get("auto_csos", True)),
+        "reserve_mode": state.get("reserve_mode") or "amount",
+        "reserve_amount": float(state.get("reserve_amount") or 0),
+        "reserve_balance": float(state.get("reserve_balance") or 0),
+        "special_in_ordinary": bool(state.get("special_in_ordinary")),
+        "current_monthly_levy": float(state.get("current_monthly_levy") or 0),
+        "actual_months": int(state.get("actual_months") or 12),
+    }
+    blob = json.dumps(payload, ensure_ascii=False)
+    # Excel cell cap is 32767; split across rows if needed.
+    chunk = 30000
+    pack["A2"] = "CHUNKS"
+    pack["B2"] = (len(blob) + chunk - 1) // chunk
+    for i in range(0, len(blob), chunk):
+        pack.cell(3 + i // chunk, 1, blob[i : i + chunk])
+
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
@@ -1398,6 +1428,7 @@ RESTORE_BARS = [
     ("recoveries on hoa", "hoa_income"),
     ("hoa / estate recovered", "hoa_income"),
     ("hoa / estate paid", "hoa_expense"),
+    ("equal charges", "fixed"),
     ("recoveries on utilities", "recoveries_other"),
     ("other recoveries", "recoveries_other"),
     ("municipal", "municipal"),
@@ -1412,9 +1443,45 @@ RESTORE_BARS = [
 ]
 
 
+def _restore_from_domus_sheet(wb) -> dict | None:
+    if "_DOMUS" not in wb.sheetnames:
+        return None
+    ws = wb["_DOMUS"]
+    if str(ws["A1"].value or "") != "DOMUS_STATE_V1":
+        return None
+    parts = []
+    for r in range(3, ws.max_row + 1):
+        v = ws.cell(r, 1).value
+        if v:
+            parts.append(str(v))
+    if not parts:
+        return None
+    data = json.loads("".join(parts))
+    secs = data.get("sections") or {}
+    # Keep default keys so missing sections don't crash the editors.
+    base = default_sections()
+    for k in base:
+        if k in secs and isinstance(secs[k], list) and secs[k]:
+            base[k] = secs[k]
+        elif k in secs and isinstance(secs[k], list):
+            base[k] = secs[k]
+    data["sections"] = base
+    return data
+
+
 def restore_from_app_excel(uploaded) -> dict:
     """Reload a file this app previously downloaded so work is not lost."""
-    xl = pd.ExcelFile(uploaded)
+    raw = uploaded.read() if hasattr(uploaded, "read") else uploaded
+    bio = BytesIO(raw)
+    try:
+        wb = load_workbook(bio, data_only=False, read_only=False)
+        packed = _restore_from_domus_sheet(wb)
+        if packed:
+            return packed
+    except Exception:
+        packed = None
+    bio = BytesIO(raw)
+    xl = pd.ExcelFile(bio)
     names = {n.lower(): n for n in xl.sheet_names}
     out = {
         "sections": {k: [] for k in default_sections()},
@@ -1432,12 +1499,16 @@ def restore_from_app_excel(uploaded) -> dict:
                     out["complex_name"] = str(df.iat[r, c + 1] or "").strip()
                 if v.startswith("year") and c + 1 < df.shape[1]:
                     out["fin_year"] = str(df.iat[r, c + 1] or "").strip()
+            b = str(df.iat[r, 1] if df.shape[1] > 1 else "").strip()
+            if r == 1 and b and not out["complex_name"]:
+                out["complex_name"] = b
+            if r == 2 and re.search(r"20\d{2}", b) and not out["fin_year"]:
+                out["fin_year"] = b
         current = None
-        # New pack: B desc, C GL, D actual, E %, F yearly. Old pack: B desc, C actual, D %, E yearly.
         i_act, i_pct, i_year, i_note = 2, 3, 4, 6
         for r in range(len(df)):
             desc = str(df.iat[r, 1] if df.shape[1] > 1 else "").strip()
-            if not desc:
+            if not desc or desc.lower() in ("nan", "none"):
                 continue
             low = desc.lower()
             if low == "description":
@@ -1453,19 +1524,33 @@ def restore_from_app_excel(uploaded) -> dict:
                 continue
             if current is None:
                 continue
-            if re.match(r"^(description|total |net |ordinary levy)", desc, re.I):
+            if re.match(r"^(description|total |net |ordinary levy|current reserve|this year’s|projected)", desc, re.I):
                 continue
-            actual = abs(num(df.iat[r, i_act] if df.shape[1] > i_act else None) or 0.0)
-            pct_raw = num(df.iat[r, i_pct] if df.shape[1] > i_pct else None) or 0.0
+            act_v = df.iat[r, i_act] if df.shape[1] > i_act else None
+            pct_v = df.iat[r, i_pct] if df.shape[1] > i_pct else None
+            year_v = df.iat[r, i_year] if df.shape[1] > i_year else None
+            actual = abs(num(act_v) or 0.0)
+            pct_raw = num(pct_v)
+            if pct_raw is None:
+                pct_raw = 0.0
             pct = pct_raw * 100 if abs(pct_raw) <= 2 else pct_raw
-            yearly = abs(num(df.iat[r, i_year] if df.shape[1] > i_year else None) or 0.0)
+            yearly = num(year_v)
+            if yearly is None:
+                yearly = actual * (1 + pct / 100)
+            else:
+                yearly = abs(yearly)
             note = str(df.iat[r, i_note] if df.shape[1] > i_note else "") or ""
+            dest = current
+            if current == "recoveries_other" and re.search(r"water|electric|sewer|refuse", norm(desc)):
+                dest = "municipal"
             item = row(desc, "" if note in ("nan", "None") else note)
             item["actual"] = actual
             item["pct"] = pct
             item["yearly"] = yearly if yearly else actual * (1 + pct / 100)
-            item["is_recovery"] = "recover" in norm(desc) and current == "municipal"
-            out["sections"][current].append(item)
+            item["is_recovery"] = dest == "municipal" and (
+                "recover" in norm(desc) or desc.lower().startswith("less:")
+            )
+            out["sections"][dest].append(item)
     pq_name = names.get("pq")
     if pq_name:
         pq = pd.read_excel(xl, sheet_name=pq_name, header=None)
@@ -1710,7 +1795,7 @@ def main():
                 st.error(f"Could not read PQ file: {e}")
 
         st.header("Keep your work")
-        st.caption("Do not click Start over. Download Excel, then you can restore it here.")
+        st.caption("Do not click Start over. Download Excel, then Restore it here. New downloads restore 100% (the file keeps a hidden copy of your numbers).")
         rest = st.file_uploader("Restore this app’s Excel", type=["xlsx"], key="restore_xlsx")
         if rest and st.button("Restore my budget"):
             try:
@@ -1724,8 +1809,16 @@ def main():
                     st.session_state.pq = data["pq"]
                 if data.get("ymp"):
                     st.session_state.ymp = data["ymp"]
+                for k in (
+                    "has_master_hoa", "insurance_mode", "insurance_bill_yearly", "auto_csos",
+                    "reserve_mode", "reserve_amount", "reserve_balance", "special_in_ordinary",
+                    "current_monthly_levy", "actual_months",
+                ):
+                    if k in data and data[k] is not None:
+                        st.session_state[k] = data[k]
                 apply_levy_lines(st.session_state)
-                st.session_state.msg = "Budget restored from Excel. Nothing was started over."
+                n_lines = sum(len(v) for v in st.session_state.sections.values())
+                st.session_state.msg = f"Budget restored ({n_lines} lines). Nothing was started over."
                 st.rerun()
             except Exception as e:
                 st.error(f"Could not restore: {e}")
