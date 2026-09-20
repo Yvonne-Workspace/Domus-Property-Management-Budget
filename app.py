@@ -45,6 +45,20 @@ def pct_from_amounts(actual: float, yearly: float) -> float:
     return (y / a) * 100.0 - 100.0
 
 
+def clean_note(v) -> str:
+    if v is None:
+        return ""
+    try:
+        if isinstance(v, float) and pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    s = str(v).strip()
+    if s.lower() in ("nan", "none", "nat", "<na>"):
+        return ""
+    return s
+
+
 def norm(s: str) -> str:
     s = str(s or "").lower()
     s = re.sub(r"[–—-]", " ", s)
@@ -1030,6 +1044,12 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             pct = pct_from_amounts(actual, yearly)
         else:
             pct = pct_from_amounts(actual, yearly) if actual >= 0.5 else pct
+        if "Notes" not in rec or rec.get("Notes") is None or (
+            isinstance(rec.get("Notes"), float) and pd.isna(rec.get("Notes"))
+        ):
+            note = prev.get("note") or ""
+        else:
+            note = clean_note(rec.get("Notes"))
         recovery = municipal and is_muni_recovery(desc, prev.get("is_recovery"))
         out.append({
             "id": prev.get("id") or uid(),
@@ -1038,7 +1058,7 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             "pct": pct,
             "yearly": yearly,
             "insurance": ins,
-            "note": str(rec.get("Notes") or ""),
+            "note": note,
             "is_recovery": recovery,
         })
     return out
@@ -1259,10 +1279,14 @@ def generate_excel(state: dict) -> BytesIO:
             else:
                 fml(ws.cell(r, 6), f"D{r}*(1+E{r})")
             fml(ws.cell(r, 7), f"F{r}/12")
-            note = it.get("note") or ""
+            note = clean_note(it.get("note"))
             if ins:
-                note = (note + " | Insurance payout " + f"{ins:,.2f}").strip(" |")
-            inp(ws.cell(r, 8), note)
+                extra = "Insurance payout " + f"{ins:,.2f}"
+                note = f"{note} | {extra}".strip(" |") if note else extra
+            cnote = ws.cell(r, 8, note)
+            cnote.font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
+            cnote.alignment = Alignment(wrap_text=True, vertical="top")
+            cnote.border = THIN
             r += 1
         return start, r - 1
 
@@ -1746,7 +1770,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
                 ),
                 "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="Yearly ÷ 12. Updates when you Save."),
                 "Insurance payout": st.column_config.NumberColumn("Insurance payout", format="%.2f"),
-                "Notes": st.column_config.TextColumn("Notes"),
+                "Notes": st.column_config.TextColumn("Notes", width="large", help="Shows on the Excel Comments / Notes column. Click Save after typing."),
             },
             disabled=["Monthly"],
         )
