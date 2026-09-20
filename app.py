@@ -235,6 +235,49 @@ def municipal_gross_and_rec(state: dict) -> tuple[float, float]:
     return gross, rec
 
 
+def municipal_bucket(desc: str) -> str:
+    d = (desc or "").lower()
+    if "plant" in d and ("electric" in d or "sewer" in d):
+        return "Sewer plant electricity"
+    if "electric" in d:
+        return "Electricity"
+    if "water" in d:
+        return "Water"
+    if "sewer" in d or "effluent" in d:
+        return "Sewerage"
+    if "refuse" in d or "waste" in d:
+        return "Refuse"
+    if "rates" in d or "property tax" in d:
+        return "Rates"
+    return "Other municipal"
+
+
+def municipal_gaps(state: dict) -> list:
+    """Per-service gross vs recovered. Positive gap = under-recovery (levy pays the shortfall)."""
+    buckets: dict[str, dict] = {}
+    for r in (state["sections"].get("municipal") or []) + (state["sections"].get("recoveries_other") or []):
+        desc = r.get("desc") or ""
+        y = abs(float(r.get("yearly") or 0))
+        if y < 0.5 and abs(float(r.get("actual") or 0)) < 0.5:
+            continue
+        name = municipal_bucket(desc)
+        slot = buckets.setdefault(name, {"name": name, "gross": 0.0, "rec": 0.0, "gross_descs": [], "rec_descs": []})
+        if is_muni_recovery(desc, r.get("is_recovery")):
+            slot["rec"] += y
+            slot["rec_descs"].append(desc)
+        else:
+            slot["gross"] += y
+            slot["gross_descs"].append(desc)
+    out = []
+    for name, slot in buckets.items():
+        gap = slot["gross"] - slot["rec"]
+        slot["gap"] = gap
+        out.append(slot)
+    order = ["Electricity", "Water", "Sewerage", "Refuse", "Sewer plant electricity", "Rates", "Other municipal"]
+    out.sort(key=lambda x: order.index(x["name"]) if x["name"] in order else 99)
+    return out
+
+
 def municipal_net(state: dict) -> float:
     g, rec = municipal_gross_and_rec(state)
     return g - rec
@@ -1249,7 +1292,30 @@ def generate_excel(state: dict) -> BytesIO:
     fml(ws.cell(r, 6), f"F{muni_g_tot}-F{util_tot}", RED)
     fml(ws.cell(r, 7), f"F{r}/12", RED)
     net_muni = r
-    r += 2
+    r += 1
+    ws.cell(r, 2, "UNDER-RECOVERY (if positive: owners did not pay the city bill back — already in ordinary levies. Trustees to attend.)")
+    ws.cell(r, 2).font = Font(italic=True, size=9, color="9C0006")
+    fml(ws.cell(r, 6), f"MAX(0,F{net_muni})", RED)
+    fml(ws.cell(r, 7), f"F{r}/12", RED)
+    r += 1
+    gaps = municipal_gaps(state)
+    under_rows = [g for g in gaps if g["gap"] > 1]
+    if under_rows:
+        ws.cell(r, 2, "Under-recovery by service (city bill minus recovered)").font = Font(bold=True, size=10, color="9C0006")
+        r += 1
+        for g in under_rows:
+            grefs = [f"F{named_rows[d]}" for d in g["gross_descs"] if d in named_rows]
+            rrefs = [f"F{named_rows[d]}" for d in g["rec_descs"] if d in named_rows]
+            ws.cell(r, 2, f"{g['name']} under-recovered")
+            if grefs or rrefs:
+                gf = "+".join(grefs) if grefs else "0"
+                rf = "+".join(rrefs) if rrefs else "0"
+                fml(ws.cell(r, 6), f"MAX(0,({gf})-({rf}))", RED)
+            else:
+                inp(ws.cell(r, 6), max(0.0, g["gap"]), MONEY)
+            fml(ws.cell(r, 7), f"F{r}/12")
+            r += 1
+    r += 1
     bar("EXPENDITURE")
     hdr()
     exp_items = list(s.get("expenditure") or [])
@@ -2074,10 +2140,32 @@ That line’s net = budgeted yearly − insurance payout.
         n1.metric("Gross municipal (what the city bills us)", money(g))
         n2.metric("Recovered from owners", money(rec))
         n3.metric("Net municipal (in the levy)", money(g - rec))
+        gaps = municipal_gaps(st.session_state)
+        under = [x for x in gaps if x["gap"] > 1]
+        over = [x for x in gaps if x["gap"] < -1]
+        if under:
+            total_under = sum(x["gap"] for x in under)
+            st.warning(
+                f"**Under-recovery {money(total_under)}** — the city bill is more than owners paid back. "
+                f"That shortfall is **already in ordinary levies**. Trustees should attend: meters, billing, or raise recoveries."
+            )
+            for x in under:
+                st.write(
+                    f"- **{x['name']}**: city {money(x['gross'])} − recovered {money(x['rec'])} = **under {money(x['gap'])}**"
+                )
+        if over:
+            st.info(
+                "Over-recovery (owners paid back more than the city bill). That credit reduces the levy."
+            )
+            for x in over:
+                st.write(
+                    f"- **{x['name']}**: recovered {money(x['rec'])} − city {money(x['gross'])} = **over {money(-x['gap'])}**"
+                )
+        if not under and not over and (g > 1 or rec > 1):
+            st.success("Municipal recoveries match the city bill. Nothing extra is sitting in the levy.")
         st.caption(
-            "Net = gross − recoveries. Same as last year’s pack. "
-            "Sewerage and Domestic Effluent is GROSS (add). "
-            "Sewerage recovered is a recovery (subtract). Type recoveries as a positive rand."
+            "Net = gross − recoveries. Under-recovery is included in the levy — this box is so trustees can see it and act. "
+            "Sewerage and Domestic Effluent is GROSS. Sewerage recovered is the recovery (positive rand)."
         )
         section_form(
             "municipal",
