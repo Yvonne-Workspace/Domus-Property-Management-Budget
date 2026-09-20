@@ -24,7 +24,7 @@ THIN = Border(
     top=Side(style="thin", color="B0B0B0"),
     bottom=Side(style="thin", color="B0B0B0"),
 )
-MONEY = '#,##0.00;(#,##0.00);"-"'
+MONEY = '#,##0.00;(#,##0.00);0.00'
 
 
 def uid() -> str:
@@ -137,14 +137,14 @@ def is_muni_recovery(desc: str, flag: bool = False) -> bool:
     # Insurance recovered / legal recovered are INCOME, not municipal credits.
     if "insurance" in d or "legal recover" in d:
         return False
-    if flag:
-        return True
     if d.startswith("less:"):
         return True
     if "recover" in d:
         return True
     if "sewer" in d and "plant" in d and "electric" in d:
         return True
+    # Ignore a leftover recovery flag if they renamed the line to a normal expense
+    # (e.g. "Less: Sewerage recovered" → "Sewerage and Domestic Effluent").
     return False
 
 
