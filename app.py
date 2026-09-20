@@ -147,7 +147,6 @@ def default_sections() -> dict:
             row("Special Project 1"), row("Special Project 2"), row("Special Project 3"),
         ],
         "fixed": [
-            row("Garden services", "Owners each pay the same rand. Yearly total for the whole complex. Not in ordinary levies."),
             row("Prepaid meters estimate (monthly)"),
             row("Eskom fixed charge (monthly)"),
             row("Communal charge (monthly)"),
@@ -217,8 +216,6 @@ def insurance_bill_amount(state: dict) -> float:
 def equal_charge_keys(desc: str) -> set:
     d = (desc or "").lower()
     keys = set()
-    if "garden" in d:
-        keys.add("garden")
     if "eskom" in d or ("fixed" in d and "electr" in d):
         keys.add("eskom")
     if "communal" in d:
@@ -605,7 +602,11 @@ def section_for(desc: str) -> str:
         return "recoveries_other"
     if f == "salaries":
         return "personnel"
-    if re.search(r"garden(ing)? contract|site cleaning", d):
+    if re.search(r"garden(ing)?\s*(expense|general|repair)", d):
+        return "rm"
+    if re.search(r"garden(ing)?\s*(service|contract)", d):
+        return "expenditure"
+    if re.search(r"site cleaning", d):
         return "rm"
     if re.search(r"\b(repair|maintenance|plumb|paint|roof|gutter|pool|electrical|fire equipment|gate|paving)\b", d):
         return "rm"
@@ -1881,15 +1882,23 @@ def main():
             "so the premium is a PQ column, not a 30k+ levy jump."
         )
 
-    with st.expander("Why is the levy this amount? (plain English)", expanded=abs(levy_pct) > 25):
+    with st.expander("Why is the levy this amount? (plain English)", expanded=True):
         st.write(
-            "Ordinary levy is **not** last year’s levy plus a %. "
-            "It is the **cost the owners must cover**: municipal after recoveries + running costs + repairs + staff + tax."
+            "**Ordinary levies (Budgeted yearly)** is the money owners must put in to cover this year’s costs. "
+            "It is **not** last year’s levy plus a %."
+        )
+        st.write(
+            "**Ordinary = net municipal + expenditure + R&M + personnel + tax** "
+            "(and special projects only if that box is ticked)."
+        )
+        st.write(
+            "**Left out of ordinary:** Xanadu / estate pass-through, CSOS (own PQ column), "
+            "insurance when it is extra on the invoice, and any line you set to R0 (e.g. garden service if owners pay the gardener themselves)."
         )
         for label, amt in levy_pieces(st.session_state):
             if amt or "Special" not in label:
                 st.write(f"- {label}: **{money(amt)}**")
-        st.write(f"- **Ordinary levies for the year: {money(ord_amt)}**")
+        st.write(f"- **Ordinary levies for the year: {money(ord_amt)}**  →  monthly **{money(ord_amt/12)}**")
         flags = odd_budget_lines(st.session_state)
         if flags:
             st.warning("These lines are making the levy jump. Fix them on the tabs, then Save — you do not need to start over.")
@@ -2207,11 +2216,11 @@ That line’s net = budgeted yearly − insurance payout.
         section_form(
             "fixed",
             "Fixed monthly charges on the owner invoice",
-            "Use this when EVERY owner pays the SAME extra rand (garden service, prepaid, Eskom fixed, communal). "
-            "Type the YEARLY total for the whole complex, add Garden services if needed, then Save. "
-            "Each owner pays that total ÷ 12 ÷ number of units. It is NOT split by PQ. "
-            "Keep Garden on Expenditure so the books show what we pay the contractor — we take it OUT of ordinary levies "
-            "so owners are not billed twice. Do NOT put Thornhill insurance here (that is Extra on the owner invoice).",
+            "Equal extra on the invoice (same rand each unit): prepaid / Eskom fixed / communal. "
+            "Type the YEARLY total for the complex, then Save. Each owner pays total ÷ 12 ÷ units. "
+            "Do **not** put garden here. If owners pay the gardener themselves, set **Garden service** on Expenditure to **R0** (omit it). "
+            "**Garden Expenses** on Repair & Maintenance stays in the levy (general garden repairs). "
+            "Do not put Thornhill insurance here.",
         )
 
     with tabs[2]:
@@ -2254,7 +2263,13 @@ That line’s net = budgeted yearly − insurance payout.
         )
 
     with tabs[3]:
-        section_form("expenditure", "Expenditure", "Operating costs except R&M, personnel and tax. Add or delete rows as needed.")
+        section_form(
+            "expenditure",
+            "Expenditure",
+            "Operating costs except R&M, personnel and tax. "
+            "If owners pay the gardener themselves, set Garden service to R0 (omit it from the budget). "
+            "Garden Expenses on Repair & Maintenance is different — that stays in the levy.",
+        )
 
     with tabs[4]:
         over_pay = [
