@@ -147,7 +147,7 @@ def default_sections() -> dict:
             row("Special Project 1"), row("Special Project 2"), row("Special Project 3"),
         ],
         "fixed": [
-            row("Insurance billed to owners (monthly fixed)", "Mount Kos-style extra on the levy invoice."),
+            row("Garden services", "Owners each pay the same rand. Yearly total for the whole complex. Not in ordinary levies."),
             row("Prepaid meters estimate (monthly)"),
             row("Eskom fixed charge (monthly)"),
             row("Communal charge (monthly)"),
@@ -213,6 +213,33 @@ def insurance_bill_amount(state: dict) -> float:
     return insurance_expense_amount(state)
 
 
+def equal_charge_keys(desc: str) -> set:
+    d = (desc or "").lower()
+    keys = set()
+    if "garden" in d:
+        keys.add("garden")
+    if "eskom" in d or ("fixed" in d and "electr" in d):
+        keys.add("eskom")
+    if "communal" in d:
+        keys.add("communal")
+    if "prepaid" in d and "meter" in d:
+        keys.add("prepaid")
+    return keys
+
+
+def billed_as_equal_charge(desc: str, state: dict) -> bool:
+    """True if this cost is billed as a same-rand extra on the invoice (not in ordinary levies)."""
+    keys = equal_charge_keys(desc)
+    if not keys:
+        return False
+    for r in state.get("sections", {}).get("fixed") or []:
+        if float(r.get("yearly") or 0) < 0.5:
+            continue
+        if keys & equal_charge_keys(r.get("desc") or ""):
+            return True
+    return False
+
+
 def skip_from_ordinary(r: dict, state: dict) -> bool:
     f = family(r.get("desc") or "")
     d = (r.get("desc") or "").lower()
@@ -221,6 +248,8 @@ def skip_from_ordinary(r: dict, state: dict) -> bool:
     if "xanadu" in d or "eco park" in d or "csos" in d:
         return True
     if f == "insurance" and insurance_on_pq(state):
+        return True
+    if billed_as_equal_charge(r.get("desc") or "", state):
         return True
     return False
 
@@ -308,7 +337,9 @@ def municipal_net(state: dict) -> float:
 
 def ordinary_total(state: dict) -> float:
     s = state["sections"]
-    total = municipal_net(state) + sum_net(s["rm"]) + sum_net(s["personnel"]) + sum_net(s["tax"])
+    total = municipal_net(state)
+    total += sum(net_of(r) for r in s["rm"] if not skip_from_ordinary(r, state))
+    total += sum_net(s["personnel"]) + sum_net(s["tax"])
     total += sum(net_of(r) for r in s["expenditure"] if not skip_from_ordinary(r, state))
     if state.get("special_in_ordinary"):
         total += sum_net(s["special"])
@@ -320,7 +351,7 @@ def levy_pieces(state: dict) -> list:
     return [
         ("Net municipal (gross minus recoveries)", municipal_net(state)),
         ("Expenditure", sum(net_of(r) for r in s["expenditure"] if not skip_from_ordinary(r, state))),
-        ("R&M after insurance", sum_net(s["rm"])),
+        ("R&M after insurance", sum(net_of(r) for r in s["rm"] if not skip_from_ordinary(r, state))),
         ("Personnel", sum_net(s["personnel"])),
         ("Tax", sum_net(s["tax"])),
         ("Special (only if ticked)", sum_net(s["special"]) if state.get("special_in_ordinary") else 0.0),
@@ -1389,7 +1420,7 @@ def generate_excel(state: dict) -> BytesIO:
 
     # Ordinary levies = costs owners must cover (not Xanadu pass-through, not utility recoveries)
     bits = f"F{net_muni}+F{exp_tot}+F{rm_tot}+F{per_tot}+F{tax_tot}"
-    for it in (s.get("expenditure") or []) + (s.get("hoa_expense") or []):
+    for it in (s.get("expenditure") or []) + (s.get("hoa_expense") or []) + (s.get("rm") or []):
         d = it.get("desc") or ""
         if d in named_rows and skip_from_ordinary(it, state):
             bits += f"-F{named_rows[d]}"
@@ -2176,11 +2207,11 @@ That line’s net = budgeted yearly − insurance payout.
         section_form(
             "fixed",
             "Fixed monthly charges on the owner invoice",
-            "Use this when EVERY owner pays the SAME extra rand (garden service, prepaid estimate, Eskom fixed, communal). "
-            "Type the YEARLY total for the whole complex, add a row if you need Garden services, then Save. "
+            "Use this when EVERY owner pays the SAME extra rand (garden service, prepaid, Eskom fixed, communal). "
+            "Type the YEARLY total for the whole complex, add Garden services if needed, then Save. "
             "Each owner pays that total ÷ 12 ÷ number of units. It is NOT split by PQ. "
-            "Do NOT put Thornhill insurance here — that is the PQ Insurance column. "
-            "If garden is already in Expenditure / R&M and paid from the levy, leave this at 0 or you bill twice.",
+            "Keep Garden on Expenditure so the books show what we pay the contractor — we take it OUT of ordinary levies "
+            "so owners are not billed twice. Do NOT put Thornhill insurance here (that is Extra on the owner invoice).",
         )
 
     with tabs[2]:
