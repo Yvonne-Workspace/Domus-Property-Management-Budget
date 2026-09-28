@@ -79,7 +79,7 @@ def default_sections() -> dict:
             row("Ordinary Levies", "Admin levy. Does not include estate/HOA pass-throughs or insurance billed on its own PQ column."),
             row("Reserve Fund Contribution", "Type the yearly amount, or use 15% of ordinary."),
             row("CSOS Levy (Income)", "This complex’s own CSOS. Not the master-estate CSOS."),
-            row("Insurance billed to owners", "Thornhill / Mount Kos style. Own PQ column. Leave 0 if insurance stays inside ordinary."),
+            row("Insurance billed to owners", "Own column on the owner invoice. Leave 0 if insurance stays inside the ordinary levy."),
             row("Levy - Boathouse"),
             row("Levy - Boatport"),
             row("Special Levy"),
@@ -96,12 +96,12 @@ def default_sections() -> dict:
             row("Clubhouse Rental"),
         ],
         "hoa_income": [
-            row("Estate / HOA Levies recovered", "e.g. Xanadu Levies. Billed to owners on the PQ. Not ordinary."),
-            row("Estate / HOA CSOS recovered", "e.g. Xanadu HOA CSOS. Own PQ column."),
+            row("Estate / HOA Levies recovered", "Master-estate levy billed to owners on the PQ. Not ordinary."),
+            row("Estate / HOA CSOS recovered", "Master-estate CSOS. Own PQ column."),
         ],
         "hoa_expense": [
-            row("Estate / HOA Levies paid", "e.g. Xanadu Eco Park. Paid to the estate. Not in ordinary."),
-            row("Estate / HOA CSOS paid", "e.g. Xanadu CSOS paid. Not in ordinary."),
+            row("Estate / HOA Levies paid", "Paid to the master estate. Not in ordinary."),
+            row("Estate / HOA CSOS paid", "Master-estate CSOS paid. Not in ordinary."),
         ],
         "recoveries_other": [
             row("Insurance claims recovered", "Claim payouts. Deduct on the R&M line. Do not budget as normal income."),
@@ -357,6 +357,17 @@ def levy_pieces(state: dict) -> list:
     ]
 
 
+def estimate_income_tax(state: dict) -> tuple[float, float]:
+    """s 10(1)(e) estimate: levies are exempt. Other income above R50,000 × 27%. Not a SARS assessment."""
+    other = 0.0
+    for r in state["sections"].get("other") or []:
+        d = (r.get("desc") or "").lower()
+        if any(k in d for k in ("interest", "invest", "rental", "rent", "penalty", "garage", "clubhouse")):
+            other += max(0.0, float(r.get("yearly") or 0))
+    taxable = max(0.0, other - 50000.0)
+    return other, round(taxable * 0.27, 2)
+
+
 def odd_budget_lines(state: dict) -> list:
     """Lines that usually explain a huge levy %."""
     flags = []
@@ -376,7 +387,8 @@ def odd_budget_lines(state: dict) -> list:
     gross = sum(net_of(r) for r in state["sections"].get("municipal") or [] if not (r.get("is_recovery") or "recover" in (r.get("desc") or "").lower()))
     if gross > 500000 and rec < gross * 0.4:
         flags.append(
-            f"Municipal recoveries {money(abs(rec))} vs electricity/water {money(gross)} — last year Falcon View recovered most of this, so net municipal was ~R116,000 not {money(sum_net(state['sections']['municipal']))}."
+            f"Municipal recoveries {money(abs(rec))} look low against the city bill {money(gross)}. "
+            "Check that each recovery was typed as a positive rand."
         )
     return flags
 
@@ -2003,14 +2015,14 @@ def main():
             xanadu_left += float(r.get("yearly") or 0)
     if xanadu_left > 1 and not st.session_state.get("has_master_hoa"):
         st.warning(
-            f"Xanadu / estate {money(xanadu_left)} is on the books. Tick **We still bill an estate / Xanadu levy** "
-            "on Income if Thornhill (owners pay it through us — extra PQ columns). "
-            "If Falcon View (owners pay Xanadu themselves), set that Xanadu expense to 0."
+            f"An estate levy of {money(xanadu_left)} is still on the books. "
+            "Tick **We still bill an estate levy to owners** on Income if owners pay it through us. "
+            "If owners pay that estate themselves, set that expense to 0."
         )
     if insurance_on_pq(st.session_state) is False and insurance_expense_amount(st.session_state) > 1:
         st.info(
-            "Insurance is inside ordinary levies. Thornhill should choose **Extra on the owner invoice** "
-            "so the premium is a PQ column, not a 30k+ levy jump."
+            "Insurance is inside ordinary levies. If owners pay it as its own line on the invoice, "
+            "choose **Extra on the owner invoice**."
         )
 
     with st.expander("Why is the levy this amount? (plain English)", expanded=True):
@@ -2023,8 +2035,8 @@ def main():
             "(and special projects only if that box is ticked)."
         )
         st.write(
-            "**Left out of ordinary:** Xanadu / estate pass-through, CSOS (own PQ column), "
-            "insurance when it is extra on the invoice, and any line you set to R0 (e.g. garden service if owners pay the gardener themselves)."
+            "**Left out of ordinary:** estate pass-through, CSOS (own PQ column), "
+            "insurance when it is extra on the invoice, and any line you set to R0 (for example garden service if owners pay the gardener themselves)."
         )
         for label, amt in levy_pieces(st.session_state):
             if amt or "Special" not in label:
@@ -2035,7 +2047,6 @@ def main():
             st.warning("These lines are making the levy jump. Fix them on the tabs, then Save — you do not need to start over.")
             for f in flags:
                 st.write(f"- {f}")
-        st.caption("Last year Falcon View ordinary levies were about R1.36 million (about R1,113 per full PQ unit per month).")
 
     with st.sidebar:
         st.header("Complex")
@@ -2263,41 +2274,79 @@ def main():
     ])
 
     with tabs[0]:
+        st.subheader("How to use this budget")
         st.markdown(
             """
-### One rule for typing
-Change the numbers, then click **Save this section** once. Nothing is stored until Save.
-That stops the amount jumping back to 0.
+**Do this in order.** Click **Save this section** after every tab you change. Nothing is kept until Save.
 
-- Type **% Increase** and Save → Budgeted yearly = Actual × (1 + %).
-- Type **Budgeted yearly** and Save → % = (Yearly ÷ Actual) × 100 − 100.
-- **Monthly** is always yearly ÷ 12.
+### 1. Name the complex
+In the sidebar, type the **complex name** and the **financial year** (for example 1 March 2027 – 28 February 2028).
+Choose **body corporate** or **HOA**. That only changes the reserve note. The four reserve choices work for both.
 
-### Ordinary levies (same as LTP / Depotel / Mount Kos)
-**Ordinary = Net municipal + Expenditure + R&M after insurance + Personnel + Tax**
+### 2. Load last year
+1. **Financial statement PDF** — brings in the line names.
+2. **WeConnectU Excel** — brings in last year’s rands (Actual).
+3. **PQ Excel** — each unit’s share.
 
-Net municipal means gross electricity/water/sewer/refuse minus recoveries from owners.
+If Actual is only part of a year, set **Months covered by the Actual column** (7 means seven months, and we scale it to a year).
 
-Reserve and CSOS are billed on their own PQ columns. They are not folded into ordinary.
+### 3. Type this year’s amounts
+On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly.
 
-### Second levy (inside another estate) — Thornhill / Xanadu
-Xanadu invoices **Thornhill BC**. Thornhill bills owners on the PQ as extra columns:
+- Type **%** and Save → yearly = Actual × (1 + %). Example: 10 means plus 10%.
+- Type **Budgeted yearly** and Save → we fill in the %.
+- **Monthly** is always yearly ÷ 12. You cannot type it.
 
-- Levies (ordinary admin)
-- Xanadu Levies
-- Xanadu HOA CSOS
-- Insurance
-- Reserve Fund
-- CSOS (this complex)
+### 4. What ordinary levies are
+Ordinary levies are **not** last year’s levy plus a %.
 
-Those estate lines are **not** folded into ordinary. Leave them 0 on a standalone complex.
+**Ordinary = net municipal + expenditure + repairs and maintenance + personnel + tax**
 
-### Reserve
-Type the yearly rand amount, **or** choose 15% of ordinary (Matte Court style).
+(and special projects only if you tick that box).
 
-### Insurance claims
-On **Repair & Maintenance**, type the payout against the **specific line** (roof, plumbing, …).
-That line’s net = budgeted yearly − insurance payout.
+**Net municipal** = what the city bills us, minus what owners pay back (electricity, water, sewer, refuse).
+
+**Left out of ordinary** (they have their own columns, or they are R0):
+
+- Reserve fund
+- CSOS
+- Insurance, if owners pay it on its own invoice line
+- A master-estate levy, if owners pay another estate through us
+- Garden service, if owners pay the gardener themselves (set that line to R0)
+
+### 5. Reserve fund
+Pick one, for a body corporate **or** an HOA:
+
+- Own amount
+- 15% of last year’s ordinary levy (Actual)
+- 25% of last year’s ordinary levy (Actual)
+- 100% of this year’s repairs and maintenance
+
+An HOA uses whichever option the MOI or the members approved. A body corporate also sees the Act’s minimum as a note. The note does not override your choice.
+
+### 6. Insurance
+- **Inside the ordinary levy** — owners do not get a separate insurance line. The premium is part of the levy.
+- **Extra on the owner invoice** — owners pay insurance on its own column. Keep the premium on Expenditure. It is **not** inside ordinary levies.
+
+On Repair & Maintenance, an **insurance payout** is a deduction on that repair line (yearly minus payout). Do not type the new budget in the payout column.
+
+### 7. Master estate
+Tick **We still bill an estate levy** only if owners pay another estate **through us**. Those amounts are extra PQ columns, not part of ordinary levies.
+If owners pay that estate themselves, leave the tick off and set that expense to R0.
+
+### 8. CSOS
+We collect CSOS from owners and pay the same amount to CSOS. Income and expense match.
+The formula is 2% of (monthly admin levy − R500), maximum R40 per unit per month. It is its own PQ column.
+
+### 9. Income tax
+Levies are not taxed. Interest, investment income and rent above **R50,000** can be. Use the **Tax** tab to estimate it, or type the auditor’s figure. See that tab for when it is paid.
+
+### 10. PQ and 10-year plan
+Upload the unit PQ file. Each owner’s levy = their PQ × the monthly total.
+On the 10-year plan, **Year 1 is this budget year**. Paste or upload the plan, then **Copy Year 1 into Special Projects** only if levies must pay for that work this year. If the reserve pays for it, leave the special-projects tick off.
+
+### 11. Download
+Download Excel for the meeting. Yellow cells can be changed in the meeting. To carry on later, **Restore** that file. Do not use Erase everything unless you mean to wipe the screen.
             """
         )
 
@@ -2307,9 +2356,9 @@ That line’s net = budgeted yearly − insurance payout.
             "Insurance — how do owners pay it?",
             ["levy", "pq"],
             format_func=lambda x: (
-                "Part of the ordinary levy (no extra PQ column)"
+                "Inside the ordinary levy (no extra column on the invoice)"
                 if x == "levy"
-                else "Extra on the owner invoice (own PQ column — Thornhill style)"
+                else "Extra on the owner invoice (its own column)"
             ),
             index=0 if st.session_state.get("insurance_mode") != "pq" else 1,
             help="Extra = we recover the premium from owners. It is NOT in ordinary levies. Part of levy = insurance expense stays in the admin levy.",
@@ -2343,7 +2392,7 @@ That line’s net = budgeted yearly − insurance payout.
         st.checkbox(
             "Calculate CSOS from the legal formula: 2% of (monthly admin levy − R500), max R40 per unit per month.",
             key="auto_csos",
-            help="Last year Thornhill: levy R580/unit → CSOS R1.60/unit (R76.67 a year for the complex). Xanadu levy is over R2,500/unit so Xanadu CSOS is the R40 cap (R1,920 a year).",
+            help="2% of (monthly admin levy minus R500), maximum R40 per unit per month. CSOS is its own column, not inside ordinary levies.",
         )
         if st.session_state.auto_csos and st.session_state.pq:
             own = scheme_csos_yearly(st.session_state, ordinary_total(st.session_state))
@@ -2351,16 +2400,16 @@ That line’s net = budgeted yearly − insurance payout.
         st.divider()
         section_form("levy", "Levy Income", "Ordinary, Reserve and CSOS. CSOS income = CSOS expense (we collect it and pay it on). Add boathouse / extra levy types with a new row, then Save.")
         st.session_state.has_master_hoa = st.checkbox(
-            "We still bill an estate / Xanadu levy to owners (they pay it through us).",
+            "We still bill an estate levy to owners (they pay it through us).",
             value=bool(st.session_state.get("has_master_hoa")),
-            help="OFF = Xanadu (or the estate) bills owners themselves. PQ will only show our levies, reserve and CSOS. ON = Thornhill-style extra PQ columns.",
+            help="Off = owners pay that estate themselves. On = extra columns on our owner schedule.",
         )
         if st.session_state.has_master_hoa:
             st.divider()
             section_form(
                 "hoa_income",
                 "Estate / HOA recovered from owners",
-                "Billed to owners on the PQ as extra columns (Thornhill / Xanadu style).",
+                "Billed to owners on the PQ as extra columns. Not part of ordinary levies.",
             )
             st.divider()
             section_form(
@@ -2369,7 +2418,7 @@ That line’s net = budgeted yearly − insurance payout.
                 "What we pay the master HOA. Not included in ordinary levies.",
             )
         else:
-            st.caption("Estate / Xanadu lines are hidden. Owners pay that estate directly — it does not go through this budget.")
+            st.caption("Estate lines are hidden. Owners pay that estate directly — it does not go through this budget.")
         st.divider()
         section_form("other", "Other Income", "Fixed Eskom / rental / interest live here. Leave unused lines at 0.")
         st.divider()
@@ -2382,7 +2431,7 @@ That line’s net = budgeted yearly − insurance payout.
             "Type the YEARLY total for the complex, then Save. Each owner pays total ÷ 12 ÷ units. "
             "Do **not** put garden here. If owners pay the gardener themselves, set **Garden service** on Expenditure to **R0** (omit it). "
             "**Garden Expenses** on Repair & Maintenance stays in the levy (general garden repairs). "
-            "Do not put Thornhill insurance here.",
+            "Do not put insurance here.",
         )
 
     with tabs[2]:
@@ -2460,7 +2509,48 @@ That line’s net = budgeted yearly − insurance payout.
         section_form("personnel", "Personnel", "Salaries, casuals, PAYE/UIF, bonuses.")
 
     with tabs[6]:
-        section_form("tax", "Income Tax", "Most packs forget this. If the financial statements show tax, budget it here.")
+    with tabs[6]:
+        other_inc, tax_est = estimate_income_tax(st.session_state)
+        st.subheader("Income tax")
+        st.markdown(
+            f"""
+**Levies are not taxed.** Interest, investment income and rent can be.
+
+Estimate from Other Income on the Income tab: **{money(other_inc)}**.
+The first **R50,000** of that income is exempt. The rest × **27%** = **{money(tax_est)}**.
+
+This is a budget estimate (section 10(1)(e)), not a SARS assessment. If the auditor has a different figure, type that instead.
+            """
+        )
+        if st.button("Put this estimate on the tax line"):
+            found = False
+            for r in st.session_state.sections["tax"]:
+                if "tax" in (r.get("desc") or "").lower():
+                    r["yearly"] = tax_est
+                    a = float(r.get("actual") or 0)
+                    r["pct"] = 0.0 if a == 0 else (tax_est / a) * 100 - 100
+                    found = True
+            if not found:
+                rec = row("Taxation Payable", "Estimate: other income above R50,000 × 27%.")
+                rec["yearly"] = tax_est
+                st.session_state.sections["tax"].append(rec)
+            apply_levy_lines(st.session_state)
+            st.success(f"Tax line set to {money(tax_est)}. It is included in ordinary levies.")
+            st.rerun()
+        st.markdown(
+            """
+**When it is paid**
+
+- Put **one yearly amount** in this budget. Owners do not pay SARS every month. The monthly column is only yearly ÷ 12, so the levy can fund it.
+- If the estimate is **R0** (other income under R50,000), nothing is paid to SARS.
+- If tax is payable, SARS usually wants **provisional tax**: one payment **six months** into the financial year, and one at **year-end**. A top-up can be due a few months after year-end if the estimate was short.
+- Example for a **February** year-end: 31 August, 28 February, and a top-up by 30 September if needed.
+- The tax return is filed **after** year-end, not when you finish this budget.
+
+Confirm the dates and the amount with the auditor or tax practitioner.
+            """
+        )
+        section_form("tax", "Income Tax", "Use the estimate button, or type the auditor’s yearly figure, then Save.")
 
     with tabs[7]:
         section_form("special", "Special Projects", "Year 1 of the 10-year plan. Tick the sidebar box only if levies must fund it.")
