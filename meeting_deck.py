@@ -26,6 +26,12 @@ def render_meeting_html(pack: dict, logo_path: Path | None = None) -> bytes:
         b64 = base64.b64encode(Path(logo_path).read_bytes()).decode()
         logo = f'<img class="logo" alt="Domus" src="data:image/jpeg;base64,{b64}">'
     slides = "\n".join(_slides(pack, logo))
+    mark = (
+        f'<div class="letterhead">{logo or "<span class=\"wordmark\">DOMUS</span>"}'
+        f'<span class="lh-note">Property Management</span></div>'
+    )
+    slides = slides.replace('<section class="slide dark">', '<section class="slide dark">' + mark)
+    slides = slides.replace('<section class="slide">', '<section class="slide">' + mark)
     name = _e(pack.get("name") or "Budget")
     year = _e(pack.get("year") or "")
     page = _PAGE.replace("<!--TITLE-->", f"{name} — Budget")
@@ -39,9 +45,6 @@ def _slides(p: dict, logo: str) -> list[str]:
     why = _why(p)
     if why:
         out.append(why)
-    run = _running(p)
-    if run:
-        out.append(run)
     if p.get("muni"):
         out.append(_muni(p))
     if p.get("repairs"):
@@ -52,7 +55,7 @@ def _slides(p: dict, logo: str) -> list[str]:
     if p.get("years"):
         out.append(_ten(p))
     out.append(_ask(p))
-    out.append(_end(p, logo))
+    out.append(_end(p))
     return out
 
 
@@ -60,18 +63,16 @@ def _cover(p, logo):
     who = _e(p["who"])
     return f"""
 <section class="slide dark">
-  <div class="blob" style="width:420px;height:420px;background:var(--green);top:-140px;right:-90px;"></div>
-  <div class="blob" style="width:200px;height:200px;background:#1a4736;bottom:-70px;right:120px;"></div>
-  <div style="position:relative;padding-top:36px;">
-    <div class="r" style="--d:40">{logo}</div>
-    <div class="kicker r" style="--d:120;margin-top:18px;">{_e(p['name'])}</div>
-    <h1 class="r" style="--d:200;font-size:58px;">Your budget, in plain words</h1>
-    <div class="r" style="--d:280;font-family:var(--head);font-size:24px;color:var(--moss);margin-top:10px;">{_e(p['year'])}</div>
-    <p class="r" style="--d:360;color:#bfd8c6;margin-top:8px;font-size:16px;">So you can see what your money pays for. Nothing is hidden.</p>
-    <div style="display:flex;gap:16px;margin-top:36px;">
-      <div class="card rp" style="--d:480;width:230px;"><div class="num" style="font-size:34px;" data-count="{int(p['units'])}">0</div><div class="mut" style="margin-top:4px;">owners sharing the cost</div></div>
-      <div class="card rp" style="--d:580;width:250px;"><div class="num" style="font-size:34px;" data-count="{int(round(p['owner_month']))}" data-prefix="R">R0</div><div class="mut" style="margin-top:4px;">a month for {who}</div></div>
-      <div class="card rp" style="--d:680;width:250px;"><div class="num" style="font-size:34px;" data-count="{int(round(p['collect_year']))}" data-prefix="R">R0</div><div class="mut" style="margin-top:4px;">collected for the whole year</div></div>
+  <div class="blob" style="width:460px;height:460px;background:#1a4736;top:-180px;right:-120px;"></div>
+  <div style="position:relative;padding-top:28px;">
+    <div class="kicker r" style="--d:80">Proposed budget</div>
+    <h1 class="r" style="--d:160;font-size:64px;max-width:980px;">{_e(p['name'])}</h1>
+    <div class="r" style="--d:240;font-family:var(--head);font-size:26px;color:var(--moss);margin-top:12px;">{_e(p['year'])}</div>
+    <p class="r" style="--d:320;color:#cfe0d4;margin-top:14px;font-size:18px;max-width:640px;">Prepared by Domus, so every owner can see what the year will cost.</p>
+    <div style="display:flex;gap:16px;margin-top:42px;">
+      <div class="card rp" style="--d:420;width:230px;"><div class="num" style="font-size:34px;" data-count="{int(p['units'])}">0</div><div class="mut" style="margin-top:4px;">owners sharing the cost</div></div>
+      <div class="card rp" style="--d:520;width:250px;"><div class="num" style="font-size:34px;" data-count="{int(round(p['owner_month']))}" data-prefix="R">R0</div><div class="mut" style="margin-top:4px;">a month for {who}</div></div>
+      <div class="card rp" style="--d:620;width:250px;"><div class="num" style="font-size:34px;" data-count="{int(round(p['collect_year']))}" data-prefix="R">R0</div><div class="mut" style="margin-top:4px;">for the whole year</div></div>
     </div>
   </div>
 </section>"""
@@ -81,27 +82,24 @@ def _plain(p):
     return f"""
 <section class="slide">
   <div class="kicker r">Start here</div>
-  <h1 class="r" style="--d:60">Three simple questions</h1>
-  <p class="sub r" style="--d:120">Every number in this budget answers one of these. If you remember only this slide, that is enough.</p>
-  <div class="grid" style="grid-template-columns:repeat(3,1fr);margin-top:22px;">
-    <div class="card r" style="--d:220;height:210px;">
+  <h1 class="r" style="--d:60">Three quiet questions</h1>
+  <p class="sub r" style="--d:120">The rest of this presentation answers them, one at a time.</p>
+  <div class="grid" style="grid-template-columns:repeat(3,1fr);margin-top:28px;">
+    <div class="card r" style="--d:220;height:230px;">
       <h3>Money in</h3>
-      <div style="font-size:11.5px;font-weight:700;color:var(--amber);letter-spacing:.6px;margin:8px 0;">WHAT OWNERS PAY</div>
-      <p>A levy is the money owners pay each month so the complex can be looked after.</p>
+      <div style="font-size:11.5px;font-weight:700;color:var(--amber);letter-spacing:.6px;margin:10px 0;">WHAT OWNERS PAY</div>
+      <p>Each month, every owner pays a share. That payment is the levy.</p>
     </div>
-    <div class="card r" style="--d:320;height:210px;">
+    <div class="card r" style="--d:340;height:230px;">
       <h3>Money out</h3>
-      <div style="font-size:11.5px;font-weight:700;color:var(--amber);letter-spacing:.6px;margin:8px 0;">WHAT IT IS SPENT ON</div>
-      <p>Security, gardens, insurance, repairs, and the people who pay the bills. Real costs. Not extras.</p>
+      <div style="font-size:11.5px;font-weight:700;color:var(--amber);letter-spacing:.6px;margin:10px 0;">WHAT IT KEEPS GOING</div>
+      <p>Security, gardens, insurance, repairs, and the people who look after the bills.</p>
     </div>
-    <div class="card r" style="--d:420;height:210px;">
+    <div class="card r" style="--d:460;height:230px;">
       <h3>Money saved</h3>
-      <div style="font-size:11.5px;font-weight:700;color:var(--amber);letter-spacing:.6px;margin:8px 0;">THE RESERVE</div>
-      <p>A little is saved every month. Then a big job does not become a sudden bill.</p>
+      <div style="font-size:11.5px;font-weight:700;color:var(--amber);letter-spacing:.6px;margin:10px 0;">SET ASIDE</div>
+      <p>Part of the payment is kept for the larger jobs, which we show on their own slides.</p>
     </div>
-  </div>
-  <div class="card pale row r" style="--d:540;margin-top:18px;">
-    <p><b style="color:var(--green)">Please remember:</b> {_e(p['calm'])}</p>
   </div>
 </section>"""
 
@@ -113,24 +111,16 @@ def _headlines(p):
     else:
         sign = "+" if change >= 0 else "−"
         word = "higher" if change >= 0.5 else ("lower" if change <= -0.5 else "about the same")
-        ch = f'<div class="num" style="font-size:33px;color:var(--amber);" data-count="{abs(change):.1f}" data-prefix="{sign}" data-suffix="%" data-dec="1">{sign}0%</div><div style="font-weight:600;font-size:13px;margin:8px 0 6px;">{word} than last year</div><div class="mut">The next slides show why, in plain words</div>'
+        ch = f'<div class="num" style="font-size:33px;color:var(--amber);" data-count="{abs(change):.1f}" data-prefix="{sign}" data-suffix="%" data-dec="1">{sign}0%</div><div style="font-weight:600;font-size:14px;margin:10px 0 6px;">{word} than last year</div><div class="mut">Only where the cost itself changed</div>'
     return f"""
 <section class="slide">
   <div class="kicker r">At a glance</div>
-  <h1 class="r" style="--d:60">The only numbers that matter</h1>
-  <div class="grid" style="grid-template-columns:repeat(4,1fr);margin-top:22px;">
-    <div class="card rp" style="--d:180;min-height:168px;"><div class="num" style="font-size:30px;" data-count="{int(round(p['ordinary']))}" data-prefix="R">R0</div><div style="font-weight:600;font-size:13px;margin:8px 0 6px;">to run the complex</div><div class="mut">The ordinary levy for the year</div></div>
-    <div class="card rp" style="--d:260;min-height:168px;"><div class="num" style="font-size:30px;" data-count="{int(round(p['ordinary']/12))}" data-prefix="R">R0</div><div style="font-weight:600;font-size:13px;margin:8px 0 6px;">each month, all owners</div><div class="mut">What must reach the bank</div></div>
-    <div class="card rp" style="--d:340;min-height:168px;"><div class="num" style="font-size:30px;" data-count="{int(round(p['owner_month']))}" data-prefix="R">R0</div><div style="font-weight:600;font-size:13px;margin:8px 0 6px;">for {_e(p['who'])}</div><div class="mut">Levy, reserve and CSOS together</div></div>
-    <div class="card rp" style="--d:420;min-height:168px;">{ch}</div>
-  </div>
-  <div class="card r" style="--d:540;margin-top:18px;">
-    <h3>How we worked out the levy</h3>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:16px;">
-      <div class="row rx" style="--d:640"><div class="badge" style="width:34px;height:34px;background:var(--green);color:#fff;font-family:var(--head);font-weight:700;">1</div><p>We listed what the complex must pay this year.</p></div>
-      <div class="row rx" style="--d:740"><div class="badge" style="width:34px;height:34px;background:var(--green);color:#fff;font-family:var(--head);font-weight:700;">2</div><p>We took off money that owners pay back, such as their own electricity.</p></div>
-      <div class="row rx" style="--d:840"><div class="badge" style="width:34px;height:34px;background:var(--green);color:#fff;font-family:var(--head);font-weight:700;">3</div><p>What is left is the levy. Each owner pays their share.</p></div>
-    </div>
+  <h1 class="r" style="--d:60">The year in four figures</h1>
+  <div class="grid" style="grid-template-columns:repeat(4,1fr);margin-top:36px;">
+    <div class="card rp" style="--d:180;min-height:200px;"><div class="num" style="font-size:32px;" data-count="{int(round(p['ordinary']))}" data-prefix="R">R0</div><div style="font-weight:600;font-size:14px;margin:10px 0 6px;">to run the complex</div><div class="mut">Ordinary levy for the year</div></div>
+    <div class="card rp" style="--d:280;min-height:200px;"><div class="num" style="font-size:32px;" data-count="{int(round(p['ordinary']/12))}" data-prefix="R">R0</div><div style="font-weight:600;font-size:14px;margin:10px 0 6px;">each month, together</div><div class="mut">From all the owners</div></div>
+    <div class="card rp" style="--d:380;min-height:200px;"><div class="num" style="font-size:32px;" data-count="{int(round(p['owner_month']))}" data-prefix="R">R0</div><div style="font-weight:600;font-size:14px;margin:10px 0 6px;">for {_e(p['who'])}</div><div class="mut">Everything on the monthly bill</div></div>
+    <div class="card rp" style="--d:480;min-height:200px;">{ch}</div>
   </div>
 </section>"""
 
@@ -163,7 +153,7 @@ def _split(p):
 <section class="slide">
   <div class="kicker r">The split</div>
   <h1 class="r" style="--d:60">Where every rand of the levy goes</h1>
-  <p class="sub r" style="--d:100">This is the ordinary levy only. The reserve is extra, and it is saved, not spent on these bills.</p>
+  <p class="sub r" style="--d:100">One circle. Each colour is one part of the ordinary levy.</p>
   <div style="display:flex;gap:26px;margin-top:8px;align-items:center;">
     <div class="rp" style="--d:180;flex:0 0 auto;">
       <svg width="300" height="300" viewBox="0 0 200 200">
@@ -192,12 +182,11 @@ def _bill(p):
 <section class="slide">
   <div class="kicker r">What you actually pay</div>
   <h1 class="r" style="--d:60">Your monthly bill, line by line</h1>
-  <p class="sub r" style="--d:100">Each line has a job. You can see them separately, so nothing is buried in one number.</p>
+  <p class="sub r" style="--d:100">For {_e(p['who'])}. Each line is separate, so you can see what it is for.</p>
   <table style="margin-top:16px;">
-    <thead><tr><th style="width:240px;">On your statement</th><th style="width:160px;">A month</th><th>What it pays for</th></tr></thead>
+    <thead><tr><th style="width:240px;">On the statement</th><th style="width:160px;">A month</th><th>What it is for</th></tr></thead>
     <tbody>{''.join(rows)}</tbody>
   </table>
-  <div class="card pale row r" style="--d:780;margin-top:14px;"><p>{_e(p['bill_note'])}</p></div>
 </section>"""
 
 
@@ -228,35 +217,9 @@ def _why(p):
   <h1 class="r" style="--d:60">{title}</h1>
   <p class="sub r" style="--d:100">{_e(p.get('why_lead') or 'These are the lines that cost more than last year. The rest barely moved.')}</p>
   <div style="display:flex;gap:22px;margin-top:16px;">
-    <div style="flex:1;display:flex;flex-direction:column;gap:12px;">{''.join(bars)}
-      <div class="card pale r" style="--d:700;padding:12px 16px;"><p style="font-style:italic;">This is not money for luxuries. It is the real cost of looking after the place you live.</p></div>
-    </div>
+    <div style="flex:1;display:flex;flex-direction:column;gap:12px;">{''.join(bars)}</div>
     <div style="flex:0 0 420px;display:flex;flex-direction:column;gap:10px;">{''.join(cards)}</div>
   </div>
-</section>"""
-
-
-def _running(p):
-    lines = p.get("big") or []
-    if not lines:
-        return ""
-    top = max(x["yearly"] for x in lines) or 1
-    colors = ["#1b5e43", "#2e7d5b", "#4e9a72", "#7fb685", "#a7c4a9"]
-    bars = []
-    for i, r in enumerate(lines[:6]):
-        w = max(4, r["yearly"] / top * 100)
-        bars.append(
-            f'<div class="track r" style="--d:{200+i*70}"><span class="tlabel">{_e(_short(r["label"]))}</span>'
-            f'<div class="bar" style="--w:{w:.1f}%;background:{colors[i%5]};"></div>'
-            f'<span class="tval">{_r(r["yearly"])}</span></div>'
-        )
-    return f"""
-<section class="slide">
-  <div class="kicker r">Money out</div>
-  <h1 class="r" style="--d:60">The cost of keeping it running</h1>
-  <p class="sub r" style="--d:100">These are the bigger bills. Each one has a job. None of them is a hidden extra.</p>
-  <div style="display:flex;flex-direction:column;gap:14px;margin-top:26px;max-width:980px;">{''.join(bars)}</div>
-  <p class="mut r" style="--d:680;margin-top:16px;font-style:italic;">Last year’s real cost is where we started. We then allowed a fair increase, or we typed the quote we already have.</p>
 </section>"""
 
 
@@ -274,22 +237,18 @@ def _muni(p):
             note = "Owners pay back more than this bill. That helps the levy."
         else:
             word, col = "It balances", "var(--green)"
-            note = "What we pay and what owners pay back are almost the same."
+            note = "Paid back in full, or very nearly."
         cards.append(
             f'<div class="card rx" style="--d:{360+i*80}"><div class="row" style="justify-content:space-between;">'
             f'<b style="color:var(--green);">{_e(g["name"])}</b><span class="money" style="color:{col};">{word}</span></div>'
-            f'<div class="mut" style="margin-top:4px;">Bill {_r(g["gross"])} · paid back {_r(g["rec"])}. {note}</div></div>'
+            f'<div class="mut" style="margin-top:4px;">City bill {_r(g["gross"])}. Owners pay back {_r(g["rec"])}. {note}</div></div>'
         )
-    net = m["net"]
-    if net > 50:
-        lead = "Some of the city bill is for the common property. That shared part is inside the levy. You are not charged for it twice."
-    else:
-        lead = "Owners pay back what they use. That money is taken off the levy. You are not charged for it twice."
+    net = float(m.get("net") or 0)
     return f"""
 <section class="slide">
-  <div class="kicker r">The city account</div>
-  <h1 class="r" style="--d:60">You do not pay the city bill twice</h1>
-  <p class="sub r" style="--d:100">{lead}</p>
+  <div class="kicker r">Municipal</div>
+  <h1 class="r" style="--d:60">The city account, on its own</h1>
+  <p class="sub r" style="--d:100">Home use is paid back by the owner who used it. Only the shared part remains in the levy.</p>
   <div style="display:flex;gap:18px;margin-top:18px;">
     <div class="card rp" style="--d:200;flex:1;"><div class="mut">We pay the city</div><div class="num" style="font-size:32px;margin-top:6px;" data-count="{int(round(m['gross']))}" data-prefix="R">R0</div></div>
     <div class="card rp" style="--d:280;flex:1;"><div class="mut">Owners pay back</div><div class="num" style="font-size:32px;margin-top:6px;" data-count="{int(round(m['rec']))}" data-prefix="R">R0</div></div>
@@ -311,8 +270,8 @@ def _repairs(p):
     return f"""
 <section class="slide">
   <div class="kicker r">When something breaks</div>
-  <h1 class="r" style="--d:60">Small repairs, already allowed for</h1>
-  <p class="sub r" style="--d:100">This money is for ordinary breakages. Big planned jobs come from the reserve, not from a surprise collection.</p>
+  <h1 class="r" style="--d:60">The smaller repairs</h1>
+  <p class="sub r" style="--d:100">Everyday breakages. The larger planned work is on the next slides.</p>
   <div class="grid" style="grid-template-columns:repeat({min(4,len(cards))},1fr);margin-top:20px;">{''.join(cards)}</div>
 </section>"""
 
@@ -320,17 +279,17 @@ def _repairs(p):
 def _reserve(p):
     return f"""
 <section class="slide dark">
-  <div class="kicker r">Saving instead of surprising</div>
-  <h1 class="r" style="--d:60">The reserve is a savings jar</h1>
-  <p class="sub r" style="--d:100">It is not spent on the monthly bills. Those are in the levy. This jar is for the big jobs.</p>
+  <div class="kicker r">The reserve</div>
+  <h1 class="r" style="--d:60">The reserve fund</h1>
+  <p class="sub r" style="--d:100">What is already saved, what is added, and what this year’s work will use.</p>
   <div class="row" style="margin-top:28px;gap:12px;align-items:stretch;">
-    <div class="card rp" style="--d:220;flex:1;"><div class="mut">Already in the bank</div><div class="num" style="font-size:30px;margin-top:8px;" data-count="{int(round(p['opening']))}" data-prefix="R">R0</div><div class="mut" style="margin-top:6px;">Interest already earned is inside this amount.</div></div>
+    <div class="card rp" style="--d:220;flex:1;"><div class="mut">Already saved</div><div class="num" style="font-size:30px;margin-top:8px;" data-count="{int(round(p['opening']))}" data-prefix="R">R0</div></div>
     <div class="r" style="--d:300;font-family:var(--head);font-size:28px;color:var(--moss);">+</div>
-    <div class="card rp" style="--d:340;flex:1;"><div class="mut">Put in this year</div><div class="num" style="font-size:30px;margin-top:8px;" data-count="{int(round(p['reserve']))}" data-prefix="R">R0</div><div class="mut" style="margin-top:6px;">From the owners, a little each month.</div></div>
+    <div class="card rp" style="--d:340;flex:1;"><div class="mut">Added this year</div><div class="num" style="font-size:30px;margin-top:8px;" data-count="{int(round(p['reserve']))}" data-prefix="R">R0</div></div>
     <div class="r" style="--d:400;font-family:var(--head);font-size:28px;color:var(--moss);">−</div>
-    <div class="card rp" style="--d:440;flex:1;"><div class="mut">Used on this year’s jobs</div><div class="num" style="font-size:30px;margin-top:8px;" data-count="{int(round(p['projects']))}" data-prefix="R">R0</div><div class="mut" style="margin-top:6px;">Only the work planned for this year.</div></div>
+    <div class="card rp" style="--d:440;flex:1;"><div class="mut">Used this year</div><div class="num" style="font-size:30px;margin-top:8px;" data-count="{int(round(p['projects']))}" data-prefix="R">R0</div></div>
   </div>
-  <div class="card r" style="--d:560;margin-top:18px;background:var(--green);"><div style="font-family:var(--head);font-size:26px;font-weight:800;">Should still be in the jar: {_r(p['projected'])}</div></div>
+  <div class="card r" style="--d:560;margin-top:22px;background:var(--green);"><div style="font-family:var(--head);font-size:28px;font-weight:800;">Still in the fund at year-end: {_r(p['projected'])}</div></div>
 </section>"""
 
 
@@ -345,11 +304,11 @@ def _jobs(p):
     return f"""
 <section class="slide">
   <div class="kicker r">This year’s big jobs</div>
-  <h1 class="r" style="--d:60">Paid from the savings, not from a new levy</h1>
+  <h1 class="r" style="--d:60">Work planned for this year</h1>
   <div class="grid" style="grid-template-columns:repeat({min(4,len(cards))},1fr);margin-top:22px;">{''.join(cards)}</div>
   <div class="card solid row r" style="--d:620;margin-top:18px;justify-content:space-between;">
     <div style="font-family:var(--head);font-size:22px;font-weight:800;">Together: {_r(p['projects'])}</div>
-    <div style="font-size:14px;">Already taken off the reserve. Not added on top of the levy.</div>
+    <div style="font-size:15px;">Taken from the reserve fund.</div>
   </div>
 </section>"""
 
@@ -371,13 +330,12 @@ def _ten(p):
     return f"""
 <section class="slide">
   <div class="kicker r">Looking ahead</div>
-  <h1 class="r" style="--d:60">The next ten years</h1>
-  <p class="sub r" style="--d:80">This is the plan, so a big year is not a surprise. The tall bar is the busy year.</p>
+  <h1 class="r" style="--d:60">The ten-year plan</h1>
+  <p class="sub r" style="--d:80">The taller column is the busiest year.</p>
   <div style="margin-top:18px;">
     <div style="display:flex;align-items:end;gap:8px;height:280px;border-bottom:2px solid #dce5dd;">{''.join(cols)}</div>
     <div style="display:flex;gap:8px;padding-top:8px;">{''.join(labels)}</div>
   </div>
-  <p class="mut r" style="--d:500;margin-top:12px;font-style:italic;">These jobs are paid from the reserve, not from the ordinary levy.</p>
 </section>"""
 
 
@@ -385,10 +343,10 @@ def _ask(p):
     items = [
         ("1", "Approve the budget", f"Ordinary levies of {_r(p['ordinary'])} for the year."),
         ("2", f"Approve what {_e(p['who'])} pays", f"{_r(p['owner_month'])} a month, levy plus reserve plus CSOS."),
-        ("3", "Approve the reserve", f"{_r(p['reserve'])} put into the savings jar this year."),
+        ("3", "Approve the reserve", f"{_r(p['reserve'])} added to the reserve this year."),
     ]
     if p.get("projects", 0) > 1:
-        items.append(("4", "Note the big jobs", f"{_r(p['projects'])} of planned work, paid from the reserve."))
+        items.append(("4", "Note the planned work", f"{_r(p['projects'])} for the jobs on the plan."))
     blocks = []
     for i, (n, title, body) in enumerate(items):
         blocks.append(
@@ -398,21 +356,18 @@ def _ask(p):
     return f"""
 <section class="slide dark">
   <div class="kicker r">Please approve</div>
-  <h1 class="r" style="--d:60">What we are asking of you</h1>
-  <div style="display:flex;flex-direction:column;gap:10px;margin-top:20px;">{''.join(blocks)}</div>
-  <p class="mut r" style="--d:640;margin-top:14px;font-style:italic;">We prepared this from last year’s real costs, so you can say yes with your eyes open.</p>
+  <h1 class="r" style="--d:60">For your approval</h1>
+  <div style="display:flex;flex-direction:column;gap:12px;margin-top:28px;">{''.join(blocks)}</div>
 </section>"""
 
 
-def _end(p, logo):
+def _end(p):
     return f"""
 <section class="slide dark">
-  <div class="blob" style="width:430px;height:430px;background:var(--green);top:-130px;right:-100px;"></div>
-  <div style="position:relative;padding-top:150px;">
-    <div class="r" style="--d:80">{logo}</div>
-    <h1 class="r" style="--d:180;font-size:64px;margin-top:18px;">Any questions?</h1>
-    <p class="r" style="--d:320;font-size:18px;color:#c7dbcd;margin-top:16px;max-width:720px;">We are happy to walk through any line. The full budget is available to every owner.</p>
-    <p class="r" style="--d:420;margin-top:18px;color:var(--moss);font-size:14px;">Domus · prepared with care for the owners of {_e(p['name'])}</p>
+  <div class="blob" style="width:480px;height:480px;background:#1a4736;top:-160px;right:-140px;"></div>
+  <div style="position:relative;padding-top:120px;max-width:820px;">
+    <h1 class="r" style="--d:120;font-size:72px;">Thank you.</h1>
+    <p class="r" style="--d:260;font-size:20px;color:#d5e6da;margin-top:18px;line-height:1.5;">Questions are welcome.<br>Domus will walk through any line with you.</p>
   </div>
 </section>"""
 
@@ -438,7 +393,7 @@ html,body{height:100%;}
 body{background:#0c231c; font-family:var(--body); color:var(--ink); overflow:hidden; display:flex; align-items:center; justify-content:center;}
 #viewport{position:fixed; inset:0; display:flex; align-items:center; justify-content:center;}
 #stage{width:1280px; height:720px; position:relative; transform-origin:center center; border-radius:14px; overflow:hidden; box-shadow:0 30px 90px rgba(0,0,0,.55);}
-.slide{position:absolute; inset:0; padding:48px 52px 58px; opacity:0; visibility:hidden; transform:translateX(42px) scale(.985); transition:opacity .5s ease, transform .55s cubic-bezier(.22,.9,.3,1), visibility .55s; background:var(--light);}
+.slide{position:absolute; inset:0; padding:84px 56px 58px; opacity:0; visibility:hidden; transform:translateX(42px) scale(.985); transition:opacity .5s ease, transform .55s cubic-bezier(.22,.9,.3,1), visibility .55s; background:var(--light);}
 .slide.dark{background:var(--forest);}
 .slide.active{opacity:1; visibility:visible; transform:none;}
 .slide.prev{transform:translateX(-42px) scale(.985);}
@@ -487,7 +442,14 @@ tbody tr{opacity:0; transform:translateX(-14px); transition:opacity .45s ease, t
 .slide.active tbody tr{opacity:1; transform:none; transition-delay:calc(var(--d) * 1ms);}
 .money{font-family:var(--head); font-weight:700;}
 .blob{position:absolute; border-radius:50%; pointer-events:none;}
-.logo{height:42px; background:#fff; border-radius:8px; padding:4px 8px;}
+.logo{height:34px; background:#fff; border-radius:8px; padding:3px 8px; display:block;}
+.letterhead{position:absolute; top:18px; left:48px; right:48px; display:flex; align-items:center; justify-content:space-between; z-index:4;}
+.letterhead .logo{height:38px;}
+.lh-note{font-size:11px; letter-spacing:2.2px; text-transform:uppercase; color:var(--muted); font-weight:600;}
+.dark .lh-note{color:#d7efe4;}
+.wordmark{font-family:var(--head); font-weight:800; letter-spacing:3px; font-size:18px; color:var(--green);}
+.dark .wordmark{color:#fff;}
+.slide{padding:84px 56px 58px;}
 @keyframes drift{0%,100%{transform:translate(0,0);} 50%{transform:translate(-16px,18px);}}
 .slide.active .blob{animation:drift 14s ease-in-out infinite;}
 #bar{position:absolute; top:0; left:0; height:4px; background:var(--amber); width:0; transition:width .45s ease; z-index:6;}
