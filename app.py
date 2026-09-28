@@ -155,18 +155,15 @@ def default_sections() -> dict:
 
 
 def is_muni_recovery(desc: str, flag: bool = False) -> bool:
+    """A municipal recovery is a utility line owners pay back (electricity, water, sewer, refuse, rates)."""
     d = (desc or "").lower()
-    # Insurance recovered / legal recovered are INCOME, not municipal credits.
-    if "insurance" in d or "legal recover" in d:
+    if any(k in d for k in ("insurance", "legal", "maintenance recovered", "garden")):
         return False
-    if d.startswith("less:"):
+    utility = any(k in d for k in ("electric", "water", "sewer", "effluent", "refuse", "waste", "rates", "property tax"))
+    if not utility:
+        return False
+    if d.startswith("less:") or "recover" in d:
         return True
-    if "recover" in d:
-        return True
-    if "sewer" in d and "plant" in d and "electric" in d:
-        return True
-    # Ignore a leftover recovery flag if they renamed the line to a normal expense
-    # (e.g. "Less: Sewerage recovered" → "Sewerage and Domestic Effluent").
     return False
 
 
@@ -279,9 +276,6 @@ def municipal_gross_and_rec(state: dict) -> tuple[float, float]:
             rec += y
         else:
             gross += y
-    for r in state["sections"].get("recoveries_other") or []:
-        if is_muni_recovery(r.get("desc") or "", False):
-            rec += abs(float(r.get("yearly") or 0))
     return gross, rec
 
 
@@ -305,7 +299,7 @@ def municipal_bucket(desc: str) -> str:
 def municipal_gaps(state: dict) -> list:
     """Per-service gross vs recovered. Positive gap = under-recovery (levy pays the shortfall)."""
     buckets: dict[str, dict] = {}
-    for r in (state["sections"].get("municipal") or []) + (state["sections"].get("recoveries_other") or []):
+    for r in state["sections"].get("municipal") or []:
         desc = r.get("desc") or ""
         y = abs(float(r.get("yearly") or 0))
         if y < 0.5 and abs(float(r.get("actual") or 0)) < 0.5:
@@ -1494,7 +1488,6 @@ def generate_excel(state: dict) -> BytesIO:
             named_rows[it.get("desc") or ""] = named_rows.get(it.get("desc") or "")
     muni_gross = [x for x in (s.get("municipal") or []) if not is_muni_recovery(x.get("desc") or "", x.get("is_recovery"))]
     muni_rec = [x for x in (s.get("municipal") or []) if is_muni_recovery(x.get("desc") or "", x.get("is_recovery"))]
-    muni_rec += [x for x in (s.get("recoveries_other") or []) if is_muni_recovery(x.get("desc") or "", False)]
     bar("Recoveries on Utilities")
     hdr()
     a, b = write(muni_rec, recovery_as_income=True)
@@ -1502,13 +1495,13 @@ def generate_excel(state: dict) -> BytesIO:
     bar("Municipal Charges")
     hdr()
     a, b = write(muni_gross)
-    muni_g_tot = tot("TOTAL", a, b)
-    ws.cell(r, 2, "TOTAL NET MUNICIPAL CHARGES").font = Font(bold=True)
+    muni_g_tot = tot("TOTAL CITY BILL", a, b)
+    ws.cell(r, 2, "TOTAL NET MUNICIPAL (city bill minus recovered)").font = Font(bold=True)
     fml(ws.cell(r, 6), f"F{muni_g_tot}-F{util_tot}", RED)
     fml(ws.cell(r, 7), f"F{r}/12", RED)
     net_muni = r
     r += 1
-    ws.cell(r, 2, "UNDER-RECOVERY (if positive: owners did not pay the city bill back — already in ordinary levies. Trustees to attend.)")
+    ws.cell(r, 2, "UNDER-RECOVERY memo (already inside the net above — do not add it again)")
     ws.cell(r, 2).font = Font(italic=True, size=9, color="9C0006")
     fml(ws.cell(r, 6), f"MAX(0,F{net_muni})", RED)
     fml(ws.cell(r, 7), f"F{r}/12", RED)
@@ -1960,7 +1953,14 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
         apply_levy_lines(st.session_state)
         st.success("Saved. If you typed %, yearly = actual × (1 + %). If you typed the rand amount, % = (yearly ÷ actual) × 100 − 100.")
         st.rerun()
-    st.caption(f"Section net total: {money(sum_net(st.session_state.sections[key]))}  ·  Monthly total: {money(sum_net(st.session_state.sections[key]) / 12)}")
+    if key == "municipal":
+        g, rec = municipal_gross_and_rec(st.session_state)
+        st.caption(
+            f"Add the city-bill lines {money(g)}, then subtract the recovered lines {money(rec)}. "
+            f"Net in the levy = {money(g - rec)}. Do not add the recovered lines on top of the city bill."
+        )
+    else:
+        st.caption(f"Section net total: {money(sum_net(st.session_state.sections[key]))}  ·  Monthly total: {money(sum_net(st.session_state.sections[key]) / 12)}")
 
 
 def main():
@@ -2464,8 +2464,9 @@ Download Excel for the meeting. Yellow cells can be changed in the meeting. To c
         if not under and not over and (g > 1 or rec > 1):
             st.success("Municipal recoveries match the city bill. Nothing extra is sitting in the levy.")
         st.caption(
-            "Net = gross − recoveries. Under-recovery is included in the levy — this box is so trustees can see it and act. "
-            "Sewerage and Domestic Effluent is GROSS. Sewerage recovered is the recovery (positive rand)."
+            f"Check: {money(g)} city bill − {money(rec)} recovered = {money(g - rec)} net. "
+            "Recovered lines stay as positive rands. We subtract them. "
+            "The under-recovery note is already inside that net — do not add it again."
         )
         section_form(
             "municipal",
