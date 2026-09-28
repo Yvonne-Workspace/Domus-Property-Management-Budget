@@ -13,6 +13,11 @@ import streamlit as st
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+from pptx.util import Emu, Inches, Pt
 
 st.set_page_config(page_title="Domus Budget", layout="wide", initial_sidebar_state="expanded")
 
@@ -1380,6 +1385,335 @@ def plan_start_year(state: dict) -> int:
     return max(y, NOW_YEAR)
 
 
+def _rgb(h: str) -> RGBColor:
+    h = h.lstrip("#")
+    return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+def _r0(n: float) -> str:
+    return f"R {abs(float(n or 0)):,.0f}"
+
+
+def _typical_share(state: dict):
+    """Most common positive PQ, and a plain name for that owner."""
+    pos = [float(u.get("PQ") or 0) for u in (state.get("pq") or []) if float(u.get("PQ") or 0) > 1e-8]
+    if not pos:
+        return None, "the complex"
+    from collections import Counter
+    share = Counter(round(p, 6) for p in pos).most_common(1)[0][0]
+    if max(pos) - share < 1e-5 and min(pos) > share * 0.9:
+        return share, "each owner"
+    return share, "a full erf"
+
+
+def _story_costs(state: dict) -> list:
+    """Plain groups that add up to the ordinary levy."""
+    groups: dict[str, list] = {}
+    order: list[str] = []
+
+    def add(label, amount, line):
+        amount = float(amount or 0)
+        if amount < 1:
+            return
+        if label not in groups:
+            groups[label] = [0.0, line]
+            order.append(label)
+        groups[label][0] += amount
+
+    net = municipal_net(state)
+    add("The shared city bill", net, "Electricity and water for the common property, after owners pay back what they use.")
+    blurbs = {
+        "Security and the gate": "Someone watching, and a gate that opens.",
+        "Gardens": "The grounds you come home to.",
+        "Cleaning": "The complex kept clean.",
+        "Repairs": "What breaks, fixed before it gets worse.",
+        "Day-to-day management": "Bills, owners, contractors and the work in between.",
+        "Insurance": "Cover when something serious happens.",
+        "Tax": "Tax on interest and rental. Your levy itself is not taxed.",
+        "Other running costs": "Audit, bank charges, legal, meetings and the smaller bills.",
+    }
+    sources = list(state["sections"].get("expenditure") or []) + list(state["sections"].get("rm") or []) + list(state["sections"].get("personnel") or [])
+    for r in sources:
+        if skip_from_ordinary(r, state):
+            continue
+        d = (r.get("desc") or "").lower()
+        y = net_of(r)
+        if "secur" in d or "gate" in d or "fence" in d or "camera" in d:
+            label = "Security and the gate"
+        elif "garden" in d:
+            label = "Gardens"
+        elif "clean" in d or "refuse" in d:
+            label = "Cleaning"
+        elif "manag" in d:
+            label = "Day-to-day management"
+        elif "insur" in d:
+            label = "Insurance"
+        elif any(k in d for k in ("plumb", "sewer", "electric", "maint", "repair", "fire")):
+            label = "Repairs"
+        else:
+            label = "Other running costs"
+        add(label, y, blurbs[label])
+    for r in state["sections"].get("tax") or []:
+        add("Tax", net_of(r), blurbs["Tax"])
+    if state.get("special_in_ordinary"):
+        add("Special projects", sum_net(state["sections"].get("special") or []), "Big jobs the owners asked to pay this year, not from the reserve.")
+    rows = [(label, groups[label][0], groups[label][1]) for label in order]
+    rows.sort(key=lambda x: -x[1])
+    if len(rows) > 6:
+        head, tail = rows[:5], rows[5:]
+        extra = sum(a for _, a, _ in tail)
+        if extra > 1:
+            head.append(("Other running costs", extra, blurbs["Other running costs"]))
+        rows = head
+    return rows
+
+
+def generate_pptx(state: dict) -> BytesIO:
+    """A short owner presentation. Plain language, Domus logo, this complex's own numbers."""
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    prs.core_properties.title = f"{state.get('complex_name') or 'Budget'} — for the owners"
+    prs.core_properties.author = "Domus Property Management"
+    prs.core_properties.subject = "Budget explained for owners"
+    blank = prs.slide_layouts[6]
+    name = state.get("complex_name") or "your complex"
+    year = state.get("fin_year") or ""
+    logo = Path(__file__).parent / "domus_logo.jpeg"
+    ink, cream, mint, deep, muted, card, line = "1C1C1C", "F7F5F1", "3DDC97", "0C3D2E", "5C6762", "FFFFFF", "E4E0D8"
+
+    def slide():
+        s = prs.slides.add_slide(blank)
+        fill = s.background.fill
+        fill.solid()
+        fill.fore_color.rgb = _rgb(cream)
+        bar = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, Inches(0.12), prs.slide_height)
+        bar.fill.solid()
+        bar.fill.fore_color.rgb = _rgb(mint)
+        bar.line.fill.background()
+        return s
+
+    def rect(s, l, t, w, h, color):
+        sh = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(l), Inches(t), Inches(w), Inches(h))
+        sh.fill.solid()
+        sh.fill.fore_color.rgb = _rgb(color)
+        sh.line.fill.background()
+        # tighter corners
+        try:
+            sh.adjustments[0] = 0.08
+        except Exception:
+            pass
+        return sh
+
+    def text(s, l, t, w, h, lines, align="left", anchor="top"):
+        box = s.shapes.add_textbox(Inches(l), Inches(t), Inches(w), Inches(h))
+        tf = box.text_frame
+        tf.word_wrap = True
+        tf.auto_size = None
+        tf.margin_left = Emu(0)
+        tf.margin_right = Emu(0)
+        tf.margin_top = Emu(0)
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE if anchor == "middle" else MSO_ANCHOR.TOP
+        align_e = {"left": PP_ALIGN.LEFT, "center": PP_ALIGN.CENTER, "right": PP_ALIGN.RIGHT}[align]
+        for i, item in enumerate(lines):
+            msg, size, bold, color = item[0], item[1], item[2], item[3]
+            space = item[4] if len(item) > 4 else 6
+            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+            p.alignment = align_e
+            p.space_after = Pt(space)
+            run = p.add_run()
+            run.text = msg
+            run.font.name = "Calibri"
+            run.font.size = Pt(size)
+            run.font.bold = bold
+            run.font.color.rgb = _rgb(color)
+        return box
+
+    def brand(s, big=False):
+        if logo.exists():
+            w = 2.55 if big else 1.45
+            s.shapes.add_picture(str(logo), Inches(0.55 if big else 11.35), Inches(0.38 if big else 6.85), width=Inches(w))
+        text(s, 0.55, 7.05, 8, 0.3, [(f"Domus  ·  prepared for the owners of {name}", 11, False, muted)], )
+
+    ordinary = ordinary_total(state)
+    reserve = reserve_contribution(state)
+    csos = scheme_csos_yearly(state, ordinary) if state.get("auto_csos", True) else 0.0
+    if not csos:
+        for r in state["sections"].get("levy") or []:
+            if family(r.get("desc") or "") == "csos_inc":
+                csos = float(r.get("yearly") or 0)
+    share, who = _typical_share(state)
+    per_levy = ordinary / 12 * share if share else ordinary / 12
+    per_res = reserve / 12 * share if share else reserve / 12
+    per_csos = csos / 12 * share if share else csos / 12
+    per_total = per_levy + per_res + per_csos
+    last_complex = float(state.get("current_monthly_levy") or 0)
+    this_complex = ordinary / 12 if ordinary else 0
+    opening = float(state.get("reserve_balance") or 0)
+    projects = reserve_project_spend(state)
+    projected = projected_reserve(state)
+    gross, recovered = municipal_gross_and_rec(state)
+
+    # 1 Cover
+    s = slide()
+    rect(s, 0.45, 1.55, 1.15, 0.08, mint)
+    text(s, 0.5, 1.8, 10, 1.5, [(name, 48, True, ink, 0)])
+    text(s, 0.5, 3.4, 10, 1.2, [
+        ("The budget, explained for every owner.", 26, False, deep, 8),
+        (year, 18, False, muted, 0),
+    ])
+    text(s, 0.5, 5.15, 9, 1.1, [
+        ("We went through last year’s figures, line by line,", 18, False, ink, 2),
+        ("so you can see what your levy pays for.", 18, False, ink, 0),
+    ])
+    brand(s, big=True)
+
+    # 2 Why
+    s = slide()
+    text(s, 0.55, 0.4, 12, 0.9, [("Why you pay a levy", 32, True, ink)])
+    cards = [
+        ("It is your home", "The gate, the lights, the garden, the insurance and the people who keep it all going. A levy is how owners share that cost."),
+        ("No sudden bill", "When a pump fails or a wall needs paint, the money is already there. You are not asked for a large amount out of the blue."),
+        ("A fair share", "Each owner pays according to their share. A smaller erf pays less. Nobody is asked to carry the complex alone."),
+    ]
+    for i, (title, body) in enumerate(cards):
+        x = 0.5 + i * 4.2
+        rect(s, x, 1.7, 3.95, 4.3, card)
+        rect(s, x, 1.7, 3.95, 0.1, mint)
+        text(s, x + 0.3, 2.05, 3.35, 3.6, [
+            (title, 22, True, deep, 12),
+            (body, 16, False, ink, 0),
+        ])
+    brand(s)
+
+    # 3 The number
+    s = slide()
+    text(s, 0.55, 0.38, 12, 0.6, [("The amount we ask you to approve", 30, True, ink)])
+    rect(s, 0.5, 1.35, 7.4, 4.7, deep)
+    text(s, 0.85, 1.65, 6.8, 4.1, [
+        (f"For {who}, each month", 16, False, "D7F8EA", 8),
+        (_r0(per_total), 60, True, "FFFFFF", 6),
+        ("Levy  +  reserve  +  CSOS", 16, False, mint, 0),
+    ], anchor="top")
+    rect(s, 8.15, 1.35, 4.6, 4.7, card)
+    bits = [("What that is for", 18, True, deep, 14)]
+    if this_complex > 1:
+        bits.append(("Whole complex, ordinary levy", 13, False, muted, 2))
+        bits.append((f"{_r0(this_complex)} a month", 20, True, ink, 10))
+    if last_complex > 1 and this_complex > 1:
+        change = (this_complex - last_complex) / last_complex * 100
+        word = "more" if change >= 0 else "less"
+        bits.append((f"{abs(change):.0f}% {word} than owners pay now", 15, False, ink, 8))
+    bits.append(("A smaller erf pays a smaller share.", 15, False, muted, 0))
+    text(s, 8.45, 1.65, 4.1, 4.1, bits)
+    brand(s)
+
+    # 4 Where it goes
+    s = slide()
+    text(s, 0.55, 0.32, 12, 0.55, [("Where the levy goes", 30, True, ink)])
+    text(s, 0.55, 0.95, 12, 0.4, [("These are the costs inside the ordinary levy. Nothing here is counted twice.", 15, False, muted)])
+    costs = _story_costs(state)
+    top = max((a for _, a, _ in costs), default=1) or 1
+    if not costs:
+        text(s, 0.55, 2.2, 12, 1, [("Fill in the budget first. This slide will show where the levy goes.", 20, False, ink)])
+    for i, (label, amount, blurb) in enumerate(costs[:6]):
+        y = 1.5 + i * 0.85
+        text(s, 0.55, y, 4.3, 0.7, [(label, 16, True, ink, 0), (blurb, 12, False, muted, 0)])
+        track = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(5.0), Inches(y + 0.12), Inches(5.6), Inches(0.28))
+        track.fill.solid()
+        track.fill.fore_color.rgb = _rgb(line)
+        track.line.fill.background()
+        frac = max(0.04, amount / top)
+        bar = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(5.0), Inches(y + 0.12), Inches(5.6 * frac), Inches(0.28))
+        bar.fill.solid()
+        bar.fill.fore_color.rgb = _rgb(mint if i % 2 == 0 else deep)
+        bar.line.fill.background()
+        text(s, 10.75, y + 0.05, 2.1, 0.45, [(_r0(amount), 15, True, ink)], align="right")
+    brand(s)
+
+    # 5 Municipal
+    s = slide()
+    text(s, 0.55, 0.35, 12, 0.6, [("The city account", 30, True, ink)])
+    text(s, 0.55, 1.05, 12, 0.7, [("We pay the municipality. Owners who use electricity or water pay that back. Only the shared part stays in the levy.", 16, False, muted)])
+    tiles = [
+        ("We will pay the city", _r0(gross), "The full municipal account."),
+        ("Owners pay back", _r0(recovered), "Taken off. Not charged again."),
+        ("Left in the levy", _r0(gross - recovered), "Common property only."),
+    ]
+    for i, (title, amount, blurb) in enumerate(tiles):
+        x = 0.5 + i * 4.2
+        rect(s, x, 2.1, 3.95, 3.15, card if i < 2 else deep)
+        col_t = deep if i < 2 else "FFFFFF"
+        col_a = ink if i < 2 else mint
+        col_b = muted if i < 2 else "D7F8EA"
+        text(s, x + 0.3, 2.35, 3.4, 2.6, [
+            (title, 16, False, col_t, 10),
+            (amount, 32, True, col_a, 8),
+            (blurb, 14, False, col_b, 0),
+        ])
+    brand(s)
+
+    # 6 Reserve
+    s = slide()
+    text(s, 0.55, 0.32, 12, 0.55, [("Money set aside, so a big job is not a shock", 28, True, ink)])
+    text(s, 0.55, 1.0, 12, 0.55, [("The reserve is not spent on the monthly bills. Those are in the levy. This money is for the planned work.", 15, False, muted)])
+    boxes = [
+        ("Already in the bank", _r0(opening)),
+        ("Put back this year", _r0(reserve)),
+        ("Spent on this year’s projects", _r0(projects)),
+        ("Should still be there", _r0(projected)),
+    ]
+    for i, (title, amount) in enumerate(boxes):
+        x = 0.5 + (i % 4) * 3.2
+        rect(s, x, 1.75, 3.0, 1.85, deep if i == 3 else card)
+        text(s, x + 0.18, 1.9, 2.65, 1.55, [
+            (title, 13, False, "D7F8EA" if i == 3 else muted, 6),
+            (amount, 22, True, "FFFFFF" if i == 3 else ink, 0),
+        ])
+    jobs = [r for r in (state["sections"].get("special") or []) if float(r.get("yearly") or 0) > 1 and not state.get("special_in_ordinary")]
+    if jobs:
+        text(s, 0.55, 3.85, 12, 0.4, [("This year’s planned work", 16, True, deep)])
+        bits = "   ·   ".join(f"{r.get('desc')}  {_r0(r.get('yearly'))}" for r in jobs[:4])
+        text(s, 0.55, 4.3, 12, 1.3, [(bits, 15, False, ink)])
+    else:
+        text(s, 0.55, 4.0, 12, 1.2, [("No projects are being taken from the reserve this year. The contribution stays in the bank for later.", 16, False, ink)])
+    brand(s)
+
+    # 7 One owner
+    s = slide()
+    text(s, 0.55, 0.35, 12, 0.6, [(f"What {who} pays each month", 30, True, ink)])
+    rows_inv = [
+        ("Ordinary levy", per_levy, "Running the complex."),
+        ("Reserve", per_res, "Saved for the big jobs."),
+        ("CSOS", per_csos, "Collected and paid over. It does not stay with us."),
+    ]
+    for i, (label, amount, blurb) in enumerate(rows_inv):
+        y = 1.35 + i * 1.15
+        rect(s, 0.5, y, 12.3, 1.02, card)
+        text(s, 0.8, y + 0.18, 6.5, 0.7, [(label, 20, True, ink, 0), (blurb, 13, False, muted, 0)])
+        text(s, 8.2, y + 0.22, 4.2, 0.6, [(_r0(amount), 26, True, deep)], align="right")
+    text(s, 0.55, 4.95, 8, 0.8, [("Total on the invoice", 16, False, muted, 0)])
+    text(s, 7.5, 4.85, 5.2, 0.8, [(_r0(per_total), 32, True, ink)], align="right")
+    brand(s)
+
+    # 8 Close
+    s = slide()
+    rect(s, 0.45, 1.7, 1.15, 0.08, mint)
+    text(s, 0.5, 1.95, 12, 1.3, [("We prepared this for you.", 36, True, ink, 8)])
+    text(s, 0.5, 3.3, 11.5, 1.6, [
+        ("Every line started from last year’s actual cost.", 20, False, ink, 4),
+        ("Recoveries are taken off. The reserve is shown on its own.", 20, False, ink, 4),
+        ("Nothing on these slides is hidden in a total.", 20, False, ink, 0),
+    ])
+    text(s, 0.5, 5.3, 10, 0.8, [(f"Please approve the budget for {name}.", 22, True, deep)])
+    brand(s, big=True)
+
+    buf = BytesIO()
+    prs.save(buf)
+    buf.seek(0)
+    return buf
+
+
 def generate_excel(state: dict) -> BytesIO:
     apply_levy_lines(state)
     s = state["sections"]
@@ -2390,7 +2724,7 @@ def main():
     tabs = st.tabs([
         "How it works", "Income", "Municipal", "Expenditure",
         "Repair & Maintenance", "Personnel", "Tax", "Special",
-        "PQ / Levies", "10-year plan", "Download",
+        "PQ / Levies", "10-year plan", "For the meeting", "Download",
     ])
 
     with tabs[0]:
@@ -2840,6 +3174,27 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 st.success(f"Copied {len(spec)} projects (Year 1 rands only).")
 
     with tabs[10]:
+        st.subheader("For the owners")
+        st.caption(
+            "A short PowerPoint in plain language, with the Domus logo and this complex’s own numbers. "
+            "It explains why there is a levy, where the money goes, and what one owner pays. "
+            "Download it and present it. Do not read the Excel sheet to the meeting."
+        )
+        if not st.session_state.complex_name:
+            st.warning("Type the complex name in the sidebar first.")
+        elif st.button("Build the presentation", type="primary"):
+            deck = generate_pptx(st.session_state)
+            st.session_state["pptx"] = deck.getvalue()
+        if st.session_state.get("pptx"):
+            name = re.sub(r"\s+", "_", st.session_state.complex_name or "budget")
+            st.download_button(
+                "Download PowerPoint",
+                data=st.session_state["pptx"],
+                file_name=f"Budget_presentation_{name}.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+
+    with tabs[11]:
         st.subheader("Download Excel")
         st.caption("Budget + PQ + 10-year plan. Yellow cells are inputs.")
         if not st.session_state.complex_name:
