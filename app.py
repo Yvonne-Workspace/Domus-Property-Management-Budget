@@ -155,14 +155,9 @@ def default_sections() -> dict:
 
 
 def is_muni_recovery(desc: str, flag: bool = False) -> bool:
-    """A municipal recovery is a utility line owners pay back (electricity, water, sewer, refuse, rates)."""
+    """Any municipal line with 'recovered' or 'Less:' is subtracted. The name need not say water or electricity."""
     d = (desc or "").lower()
-    if any(k in d for k in ("insurance", "legal", "maintenance recovered", "garden")):
-        return False
-    utility = any(k in d for k in ("electric", "water", "sewer", "effluent", "refuse", "waste", "rates", "property tax"))
-    if not utility:
-        return False
-    if d.startswith("less:") or "recover" in d:
+    if "recover" in d or d.startswith("less:"):
         return True
     return False
 
@@ -170,7 +165,7 @@ def is_muni_recovery(desc: str, flag: bool = False) -> bool:
 def net_of(r: dict) -> float:
     y = float(r.get("yearly") or 0)
     ins = float(r.get("insurance") or 0)
-    if is_muni_recovery(r.get("desc") or "", r.get("is_recovery")):
+    if r.get("is_recovery"):
         return -abs(y)
     # Payout reduces that line; it must not drive the levy negative.
     return max(0.0, y - ins)
@@ -1414,7 +1409,7 @@ def generate_excel(state: dict) -> BytesIO:
             if in_levy and not skip_from_ordinary(it, state):
                 levy_comp_rows.append(r)
             ins = float(it.get("insurance") or 0)
-            rec = is_muni_recovery(desc, it.get("is_recovery"))
+            rec = bool(it.get("is_recovery")) and not recovery_as_income
             inp(ws.cell(r, 4), act, MONEY)
             if fam == "ordinary":
                 # % follows the levy formula so a meeting change to costs updates the %
@@ -1479,9 +1474,7 @@ def generate_excel(state: dict) -> BytesIO:
     inc_tot = tot("TOTAL INCOME", a, b)
     bar("OTHER INCOME")
     hdr()
-    other_items = list(s.get("other") or []) + [
-        x for x in (s.get("recoveries_other") or []) if not is_muni_recovery(x.get("desc") or "", False)
-    ]
+    other_items = list(s.get("other") or []) + list(s.get("recoveries_other") or [])
     a, b = write(other_items)
     tot("TOTAL OTHER INCOME", a, b)
     hoa_tot = None
@@ -2516,7 +2509,7 @@ Download Excel for the meeting. Yellow cells can be changed in the meeting. To c
         section_form(
             "municipal",
             "Municipal charges",
-            "Gross on its own line. Recoveries: add a new row, name it ‘… recovered’, type a POSITIVE rand (no minus). Save. We subtract it.",
+            "City bill on its own line. Any line with the word recovered is subtracted, including a sewer-plant rental. Type a positive rand, then Save.",
         )
 
     with tabs[3]:
