@@ -20,6 +20,7 @@ from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Emu, Inches, Pt
+from lxml import etree
 
 st.set_page_config(page_title="Domus Budget", layout="wide", initial_sidebar_state="expanded")
 
@@ -1471,244 +1472,270 @@ def _story_costs(state: dict) -> list:
 
 
 def generate_pptx(state: dict) -> BytesIO:
-    """A short owner presentation. Plain language, Domus logo, this complex's own numbers."""
+    """PowerPoint of the same owner story as the HTML deck."""
+    pack = meeting_pack(state)
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
-    prs.core_properties.title = f"{state.get('complex_name') or 'Budget'} — for the owners"
+    prs.core_properties.title = f"{pack['name']} — for the owners"
     prs.core_properties.author = "Domus Property Management"
-    prs.core_properties.subject = "Budget explained for owners"
     blank = prs.slide_layouts[6]
-    name = state.get("complex_name") or "your complex"
-    year = state.get("fin_year") or ""
     logo = Path(__file__).parent / "domus_logo.jpeg"
-    ink, cream, mint, deep, muted, card, line = "1C1C1C", "F7F5F1", "3DDC97", "0C3D2E", "5C6762", "FFFFFF", "E4E0D8"
+    INK, MINT, CREAM, WHITE, MUTED, SOFT = "111111", "70F8C8", "F6F6F4", "FFFFFF", "6B6B6B", "F3F3F1"
 
-    def slide():
+    def fade(sld):
+        el = sld._element
+        for child in list(el):
+            if child.tag.endswith("transition"):
+                el.remove(child)
+        el.append(etree.fromstring(
+            '<p:transition xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" spd="slow"><p:fade/></p:transition>'
+        ))
+
+    def slide(dark=False):
         s = prs.slides.add_slide(blank)
         fill = s.background.fill
         fill.solid()
-        fill.fore_color.rgb = _rgb(cream)
-        bar = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, Inches(0.12), prs.slide_height)
-        bar.fill.solid()
-        bar.fill.fore_color.rgb = _rgb(mint)
-        bar.line.fill.background()
+        fill.fore_color.rgb = _rgb(INK if dark else CREAM)
+        fade(s)
+        if logo.exists():
+            s.shapes.add_picture(str(logo), Inches(0.38), Inches(0.16), width=Inches(3.15))
+        rule = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.38), Inches(1.68), Inches(12.55), Inches(0.045))
+        rule.fill.solid()
+        rule.fill.fore_color.rgb = _rgb(MINT)
+        rule.line.fill.background()
+        if pack.get("year"):
+            text(s, 6.4, 0.55, 6.4, 0.35, [(pack["year"], 13, False, WHITE if dark else INK)], align="right")
+        text(s, 0.4, 7.08, 8, 0.28, [(f"Domus  ·  {pack['name']}", 11, False, MINT if dark else MUTED)])
         return s
 
-    def rect(s, l, t, w, h, color):
+    def rect(s, l, t, w, h, color, radius=0.08):
         sh = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(l), Inches(t), Inches(w), Inches(h))
         sh.fill.solid()
         sh.fill.fore_color.rgb = _rgb(color)
         sh.line.fill.background()
-        # tighter corners
         try:
-            sh.adjustments[0] = 0.08
+            sh.adjustments[0] = radius
         except Exception:
             pass
         return sh
 
-    def text(s, l, t, w, h, lines, align="left", anchor="top"):
+    def text(s, l, t, w, h, lines, align="left"):
         box = s.shapes.add_textbox(Inches(l), Inches(t), Inches(w), Inches(h))
         tf = box.text_frame
         tf.word_wrap = True
         tf.auto_size = None
-        tf.margin_left = Emu(0)
-        tf.margin_right = Emu(0)
-        tf.margin_top = Emu(0)
-        tf.vertical_anchor = MSO_ANCHOR.MIDDLE if anchor == "middle" else MSO_ANCHOR.TOP
+        tf.margin_left = tf.margin_right = tf.margin_top = Emu(0)
         align_e = {"left": PP_ALIGN.LEFT, "center": PP_ALIGN.CENTER, "right": PP_ALIGN.RIGHT}[align]
         for i, item in enumerate(lines):
             msg, size, bold, color = item[0], item[1], item[2], item[3]
-            space = item[4] if len(item) > 4 else 6
+            space = item[4] if len(item) > 4 else 4
             p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
             p.alignment = align_e
             p.space_after = Pt(space)
             run = p.add_run()
-            run.text = msg
-            run.font.name = "Calibri"
+            run.text = str(msg)
+            run.font.name = "Georgia" if bold and size >= 20 else "Calibri"
             run.font.size = Pt(size)
             run.font.bold = bold
             run.font.color.rgb = _rgb(color)
         return box
 
-    def brand(s, big=False):
-        if logo.exists():
-            w = 2.55 if big else 1.45
-            s.shapes.add_picture(str(logo), Inches(0.55 if big else 11.35), Inches(0.38 if big else 6.85), width=Inches(w))
-        text(s, 0.55, 7.05, 8, 0.3, [(f"Domus  ·  prepared for the owners of {name}", 11, False, muted)], )
-
-    ordinary = ordinary_total(state)
-    reserve = reserve_contribution(state)
-    csos = scheme_csos_yearly(state, ordinary) if state.get("auto_csos", True) else 0.0
-    if not csos:
-        for r in state["sections"].get("levy") or []:
-            if family(r.get("desc") or "") == "csos_inc":
-                csos = float(r.get("yearly") or 0)
-    share, who = _typical_share(state)
-    per_levy = ordinary / 12 * share if share else ordinary / 12
-    per_res = reserve / 12 * share if share else reserve / 12
-    per_csos = csos / 12 * share if share else csos / 12
-    per_total = per_levy + per_res + per_csos
-    last_complex = float(state.get("current_monthly_levy") or 0)
-    this_complex = ordinary / 12 if ordinary else 0
-    opening = float(state.get("reserve_balance") or 0)
-    projects = reserve_project_spend(state)
-    projected = projected_reserve(state)
-    gross, recovered = municipal_gross_and_rec(state)
+    def kicker(s, msg, dark=False):
+        text(s, 0.45, 1.82, 12, 0.32, [(msg.upper(), 12, True, MINT if dark else INK)])
 
     # 1 Cover
-    s = slide()
-    rect(s, 0.45, 1.55, 1.15, 0.08, mint)
-    text(s, 0.5, 1.8, 10, 1.5, [(name, 48, True, ink, 0)])
-    text(s, 0.5, 3.4, 10, 1.2, [
-        ("The budget, explained for every owner.", 26, False, deep, 8),
-        (year, 18, False, muted, 0),
-    ])
-    text(s, 0.5, 5.15, 9, 1.1, [
-        ("We went through last year’s figures, line by line,", 18, False, ink, 2),
-        ("so you can see what your levy pays for.", 18, False, ink, 0),
-    ])
-    brand(s, big=True)
-
-    # 2 Why
-    s = slide()
-    text(s, 0.55, 0.4, 12, 0.9, [("Why you pay a levy", 32, True, ink)])
-    cards = [
-        ("It is your home", "The gate, the lights, the garden, the insurance and the people who keep it all going. A levy is how owners share that cost."),
-        ("No sudden bill", "When a pump fails or a wall needs paint, the money is already there. You are not asked for a large amount out of the blue."),
-        ("A fair share", "Each owner pays according to their share. A smaller erf pays less. Nobody is asked to carry the complex alone."),
+    s = slide(True)
+    kicker(s, "Proposed budget", True)
+    text(s, 0.45, 2.15, 12.2, 1.3, [(pack["name"], 40, True, WHITE, 0)])
+    text(s, 0.45, 3.5, 10, 0.7, [("Prepared by Domus, so every owner can see what the year will cost.", 18, False, "E4E4E4")])
+    tiles = [
+        (str(int(pack["units"])), "owners sharing the cost"),
+        (_r0(pack["owner_month"]), f"a month for {pack['who']}"),
+        (_r0(pack["collect_year"]), "for the whole year"),
     ]
-    for i, (title, body) in enumerate(cards):
-        x = 0.5 + i * 4.2
-        rect(s, x, 1.7, 3.95, 4.3, card)
-        rect(s, x, 1.7, 3.95, 0.1, mint)
-        text(s, x + 0.3, 2.05, 3.35, 3.6, [
-            (title, 22, True, deep, 12),
-            (body, 16, False, ink, 0),
-        ])
-    brand(s)
+    for i, (num, cap) in enumerate(tiles):
+        x = 0.45 + i * 4.2
+        rect(s, x, 4.55, 3.95, 1.85, "1C1C1C")
+        text(s, x + 0.25, 4.7, 3.5, 1.5, [(num, 28, True, WHITE, 4), (cap, 14, False, "CFCFCF", 0)])
 
-    # 3 The number
+    # 2 Three questions
     s = slide()
-    text(s, 0.55, 0.38, 12, 0.6, [("The amount we ask you to approve", 30, True, ink)])
-    rect(s, 0.5, 1.35, 7.4, 4.7, deep)
-    text(s, 0.85, 1.65, 6.8, 4.1, [
-        (f"For {who}, each month", 16, False, "D7F8EA", 8),
-        (_r0(per_total), 60, True, "FFFFFF", 6),
-        ("Levy  +  reserve  +  CSOS", 16, False, mint, 0),
-    ], anchor="top")
-    rect(s, 8.15, 1.35, 4.6, 4.7, card)
-    bits = [("What that is for", 18, True, deep, 14)]
-    if this_complex > 1:
-        bits.append(("Whole complex, ordinary levy", 13, False, muted, 2))
-        bits.append((f"{_r0(this_complex)} a month", 20, True, ink, 10))
-    if last_complex > 1 and this_complex > 1:
-        change = (this_complex - last_complex) / last_complex * 100
-        word = "more" if change >= 0 else "less"
-        bits.append((f"{abs(change):.0f}% {word} than owners pay now", 15, False, ink, 8))
-    bits.append(("A smaller erf pays a smaller share.", 15, False, muted, 0))
-    text(s, 8.45, 1.65, 4.1, 4.1, bits)
-    brand(s)
+    kicker(s, "Start here")
+    text(s, 0.45, 2.15, 12, 0.7, [("Three quiet questions", 32, True, INK, 2), ("The rest of this presentation answers them, one at a time.", 16, False, MUTED, 0)])
+    qs = [
+        ("Money in", "WHAT OWNERS PAY", "Each month, every owner pays a share. That payment is the levy."),
+        ("Money out", "WHAT IT KEEPS GOING", "Security, gardens, insurance, repairs, and the people who look after the bills."),
+        ("Money saved", "SET ASIDE", "Part of the payment is kept for the larger jobs, shown on their own slides."),
+    ]
+    for i, (title, tag, body) in enumerate(qs):
+        x = 0.45 + i * 4.2
+        rect(s, x, 3.35, 3.95, 3.15, WHITE)
+        bar = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x), Inches(3.35), Inches(3.95), Inches(0.08))
+        bar.fill.solid(); bar.fill.fore_color.rgb = _rgb(MINT); bar.line.fill.background()
+        text(s, x + 0.25, 3.6, 3.45, 2.7, [(title, 22, True, INK, 8), (tag, 12, True, INK, 8), (body, 15, False, INK, 0)])
+
+    # 3 Four figures
+    s = slide()
+    kicker(s, "At a glance")
+    text(s, 0.45, 2.15, 12, 0.55, [("The year in four figures", 32, True, INK)])
+    pct = pack.get("pct")
+    fourth = "—" if pct is None else f"{'+' if pct >= 0 else '−'}{abs(pct):.1f}%"
+    fourth_cap = "compared with last year" if pct is None else ("higher than last year" if pct >= 0.5 else ("lower than last year" if pct <= -0.5 else "about the same as last year"))
+    figs = [
+        (_r0(pack["ordinary"]), "to run the complex", "Ordinary levy for the year"),
+        (_r0(pack["ordinary"] / 12), "each month, together", "From all the owners"),
+        (_r0(pack["owner_month"]), f"for {pack['who']}", "Everything on the monthly bill"),
+        (fourth, fourth_cap, "Only where the cost itself changed"),
+    ]
+    for i, (num, title, cap) in enumerate(figs):
+        x = 0.4 + i * 3.2
+        rect(s, x, 3.05, 3.02, 3.2, WHITE)
+        text(s, x + 0.18, 3.3, 2.66, 2.7, [(num, 26, True, INK, 10), (title, 15, True, INK, 6), (cap, 13, False, MUTED, 0)])
 
     # 4 Where it goes
     s = slide()
-    text(s, 0.55, 0.32, 12, 0.55, [("Where the levy goes", 30, True, ink)])
-    text(s, 0.55, 0.95, 12, 0.4, [("These are the costs inside the ordinary levy. Nothing here is counted twice.", 15, False, muted)])
-    costs = _story_costs(state)
-    top = max((a for _, a, _ in costs), default=1) or 1
-    if not costs:
-        text(s, 0.55, 2.2, 12, 1, [("Fill in the budget first. This slide will show where the levy goes.", 20, False, ink)])
-    for i, (label, amount, blurb) in enumerate(costs[:6]):
-        y = 1.5 + i * 0.85
-        text(s, 0.55, y, 4.3, 0.7, [(label, 16, True, ink, 0), (blurb, 12, False, muted, 0)])
-        track = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(5.0), Inches(y + 0.12), Inches(5.6), Inches(0.28))
-        track.fill.solid()
-        track.fill.fore_color.rgb = _rgb(line)
-        track.line.fill.background()
-        frac = max(0.04, amount / top)
-        bar = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(5.0), Inches(y + 0.12), Inches(5.6 * frac), Inches(0.28))
-        bar.fill.solid()
-        bar.fill.fore_color.rgb = _rgb(mint if i % 2 == 0 else deep)
-        bar.line.fill.background()
-        text(s, 10.75, y + 0.05, 2.1, 0.45, [(_r0(amount), 15, True, ink)], align="right")
-    brand(s)
+    kicker(s, "The split")
+    text(s, 0.45, 2.15, 12, 0.7, [("Where every rand of the levy goes", 30, True, INK, 2), ("Each bar is one part of the ordinary levy.", 15, False, MUTED, 0)])
+    costs = pack.get("costs") or []
+    top = max((c["amount"] for c in costs), default=1) or 1
+    for i, c in enumerate(costs[:6]):
+        y = 3.05 + i * 0.62
+        text(s, 0.45, y, 3.6, 0.5, [(c["label"], 14, True, INK)])
+        track = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(4.2), Inches(y + 0.08), Inches(6.3), Inches(0.28))
+        track.fill.solid(); track.fill.fore_color.rgb = _rgb("E6E6E6"); track.line.fill.background()
+        bar = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(4.2), Inches(y + 0.08), Inches(max(0.15, 6.3 * c["amount"] / top)), Inches(0.28))
+        bar.fill.solid(); bar.fill.fore_color.rgb = _rgb(INK if i % 2 == 0 else "3A3A3A"); bar.line.fill.background()
+        if i == 1:
+            bar.fill.fore_color.rgb = _rgb(MINT)
+        text(s, 10.6, y, 2.2, 0.45, [(_r0(c["amount"]), 14, True, INK)], align="right")
 
-    # 5 Municipal
+    # 5 Monthly bill
     s = slide()
-    text(s, 0.55, 0.35, 12, 0.6, [("The city account", 30, True, ink)])
-    text(s, 0.55, 1.05, 12, 0.7, [("We pay the municipality. Owners who use electricity or water pay that back. Only the shared part stays in the levy.", 16, False, muted)])
-    tiles = [
-        ("We will pay the city", _r0(gross), "The full municipal account."),
-        ("Owners pay back", _r0(recovered), "Taken off. Not charged again."),
-        ("Left in the levy", _r0(gross - recovered), "Common property only."),
+    kicker(s, "What you actually pay")
+    text(s, 0.45, 2.15, 12, 0.6, [("Your monthly bill, line by line", 30, True, INK, 2), (f"For {pack['who']}.", 15, False, MUTED, 0)])
+    head = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.45), Inches(3.0), Inches(12.4), Inches(0.42))
+    head.fill.solid(); head.fill.fore_color.rgb = _rgb(INK); head.line.fill.background()
+    text(s, 0.6, 3.05, 4, 0.32, [("On the statement", 13, True, WHITE)])
+    text(s, 5.2, 3.05, 2.2, 0.32, [("A month", 13, True, WHITE)])
+    text(s, 7.6, 3.05, 4.8, 0.32, [("What it is for", 13, True, WHITE)])
+    for i, line in enumerate((pack.get("invoice") or [])[:5]):
+        y = 3.42 + i * 0.52
+        if i % 2 == 0:
+            bg = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.45), Inches(y), Inches(12.4), Inches(0.52))
+            bg.fill.solid(); bg.fill.fore_color.rgb = _rgb(SOFT); bg.line.fill.background()
+        text(s, 0.6, y + 0.08, 4.4, 0.36, [(line["name"], 14, True, INK)])
+        text(s, 5.2, y + 0.08, 2.2, 0.36, [(_r0(line["monthly"]), 14, True, INK)])
+        text(s, 7.6, y + 0.08, 5, 0.36, [(line["plain"], 13, False, MUTED)])
+    text(s, 0.5, 6.35, 6, 0.4, [("Total", 16, True, INK)])
+    text(s, 7.5, 6.2, 5.2, 0.5, [(_r0(pack["owner_month"]), 26, True, INK)], align="right")
+
+    # 6 Why
+    if pack.get("risers"):
+        s = slide()
+        kicker(s, "The honest answer")
+        title = "Why the levy is higher" if (pack.get("pct") or 0) >= 0.5 else "What changed from last year"
+        text(s, 0.45, 2.15, 12, 0.85, [(title, 30, True, INK, 4), (pack.get("why_lead") or "", 15, False, MUTED, 0)])
+        most = max(r["more"] for r in pack["risers"]) or 1
+        for i, r in enumerate(pack["risers"][:5]):
+            y = 3.2 + i * 0.7
+            text(s, 0.45, y, 3.5, 0.45, [(r["label"][:28], 14, True, INK)])
+            bar = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(4.1), Inches(y + 0.06), Inches(max(0.2, 6.2 * r["more"] / most)), Inches(0.3))
+            bar.fill.solid(); bar.fill.fore_color.rgb = _rgb(INK if i else MINT); bar.line.fill.background()
+            text(s, 10.5, y, 2.3, 0.4, [("+" + _r0(r["more"]), 14, True, INK)], align="right")
+
+    # 7 Municipal
+    if pack.get("muni"):
+        m = pack["muni"]
+        s = slide()
+        kicker(s, "Municipal")
+        text(s, 0.45, 2.15, 12, 0.85, [("The city account, on its own", 30, True, INK, 4), ("Home use is paid back by the owner who used it. Only the shared part remains in the levy.", 15, False, MUTED, 0)])
+        tiles = [("We pay the city", m["gross"]), ("Owners pay back", m["rec"]), ("Left in the levy", max(m["net"], 0))]
+        for i, (label, amount) in enumerate(tiles):
+            x = 0.45 + i * 4.2
+            rect(s, x, 3.3, 3.95, 2.15, INK if i == 2 else WHITE)
+            text(s, x + 0.25, 3.5, 3.5, 1.8, [
+                (label, 14, False, "CFCFCF" if i == 2 else MUTED, 8),
+                (_r0(amount), 28, True, MINT if i == 2 else INK, 0),
+            ])
+
+    # 8 Repairs
+    if pack.get("repairs"):
+        s = slide()
+        kicker(s, "When something breaks")
+        text(s, 0.45, 2.15, 12, 0.7, [("The smaller repairs", 30, True, INK, 2), ("Everyday breakages. The larger planned work is on the next slides.", 15, False, MUTED, 0)])
+        items = pack["repairs"][:4]
+        w = 12.4 / len(items) - 0.18
+        for i, r in enumerate(items):
+            x = 0.45 + i * (w + 0.18)
+            rect(s, x, 3.2, w, 3.0, WHITE)
+            text(s, x + 0.2, 3.45, w - 0.4, 2.5, [(_r0(r["yearly"]), 26, True, INK, 10), (r["desc"], 16, True, INK, 8), (r["plain"], 13, False, MUTED, 0)])
+
+    # 9 Reserve
+    s = slide(True)
+    kicker(s, "The reserve", True)
+    text(s, 0.45, 2.15, 12, 0.7, [("The reserve fund", 32, True, WHITE, 2), ("What is already saved, what is added, and what this year’s work will use.", 16, False, "CFCFCF", 0)])
+    boxes = [("Already saved", pack["opening"]), ("Added this year", pack["reserve"]), ("Used this year", pack["projects"])]
+    for i, (label, amount) in enumerate(boxes):
+        x = 0.45 + i * 4.2
+        rect(s, x, 3.25, 3.95, 1.9, "1C1C1C")
+        text(s, x + 0.22, 3.4, 3.5, 1.55, [(label, 14, False, "BDBDBD", 6), (_r0(amount), 26, True, WHITE, 0)])
+    rect(s, 0.45, 5.4, 12.4, 1.15, "1C1C1C")
+    text(s, 0.7, 5.65, 12, 0.7, [(f"Still in the fund at year-end:  {_r0(pack['projected'])}", 24, True, WHITE)])
+
+    # 10 Jobs
+    if pack.get("jobs"):
+        s = slide()
+        kicker(s, "This year’s big jobs")
+        text(s, 0.45, 2.15, 12, 0.55, [("Work planned for this year", 30, True, INK)])
+        items = pack["jobs"][:4]
+        w = 12.4 / len(items) - 0.18
+        for i, j in enumerate(items):
+            x = 0.45 + i * (w + 0.18)
+            rect(s, x, 3.0, w, 2.3, WHITE)
+            text(s, x + 0.18, 3.2, w - 0.35, 1.9, [(_r0(j["yearly"]), 24, True, INK, 8), (j["desc"], 15, True, INK, 0)])
+        rect(s, 0.45, 5.55, 12.4, 1.05, INK)
+        text(s, 0.7, 5.75, 12, 0.65, [(f"Together: {_r0(pack['projects'])}    ·    Taken from the reserve fund.", 20, True, WHITE)])
+
+    # 11 Ten year
+    if pack.get("years"):
+        s = slide()
+        kicker(s, "Looking ahead")
+        text(s, 0.45, 2.15, 12, 0.6, [("The ten-year plan", 30, True, INK, 2), ("The taller column is the busiest year.", 15, False, MUTED, 0)])
+        years = pack["years"]
+        mx = max(y["amount"] for y in years) or 1
+        gap = 12.4 / len(years)
+        for i, y in enumerate(years):
+            h = 0.08 if y["amount"] < 1 else max(0.15, 2.6 * y["amount"] / mx)
+            x = 0.55 + i * gap
+            col = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x), Inches(5.55 - h), Inches(gap * 0.62), Inches(h))
+            hot = y["amount"] >= mx * 0.98 and y["amount"] > 1
+            col.fill.solid(); col.fill.fore_color.rgb = _rgb(MINT if hot else INK); col.line.fill.background()
+            text(s, x - 0.05, 5.6, gap * 0.8, 0.55, [(y["label"], 11, False, MUTED)], align="center")
+
+    # 12 Approve
+    s = slide(True)
+    kicker(s, "Please approve", True)
+    text(s, 0.45, 2.15, 12, 0.55, [("For your approval", 32, True, WHITE)])
+    asks = [
+        ("1", "Approve the budget", f"Ordinary levies of {_r0(pack['ordinary'])} for the year."),
+        ("2", f"Approve what {pack['who']} pays", f"{_r0(pack['owner_month'])} a month."),
+        ("3", "Approve the reserve", f"{_r0(pack['reserve'])} added to the reserve this year."),
     ]
-    for i, (title, amount, blurb) in enumerate(tiles):
-        x = 0.5 + i * 4.2
-        rect(s, x, 2.1, 3.95, 3.15, card if i < 2 else deep)
-        col_t = deep if i < 2 else "FFFFFF"
-        col_a = ink if i < 2 else mint
-        col_b = muted if i < 2 else "D7F8EA"
-        text(s, x + 0.3, 2.35, 3.4, 2.6, [
-            (title, 16, False, col_t, 10),
-            (amount, 32, True, col_a, 8),
-            (blurb, 14, False, col_b, 0),
-        ])
-    brand(s)
+    if pack.get("projects", 0) > 1:
+        asks.append(("4", "Note the planned work", f"{_r0(pack['projects'])} for the jobs on the plan."))
+    for i, (n, title, body) in enumerate(asks):
+        y = 2.9 + i * 0.95
+        rect(s, 0.45, y, 12.4, 0.85, "1C1C1C")
+        text(s, 0.7, y + 0.12, 1, 0.6, [(n, 22, True, MINT)])
+        text(s, 1.6, y + 0.1, 10.8, 0.65, [(title, 18, True, WHITE, 0), (body, 13, False, "CFCFCF", 0)])
 
-    # 6 Reserve
-    s = slide()
-    text(s, 0.55, 0.32, 12, 0.55, [("Money set aside, so a big job is not a shock", 28, True, ink)])
-    text(s, 0.55, 1.0, 12, 0.55, [("The reserve is not spent on the monthly bills. Those are in the levy. This money is for the planned work.", 15, False, muted)])
-    boxes = [
-        ("Already in the bank", _r0(opening)),
-        ("Put back this year", _r0(reserve)),
-        ("Spent on this year’s projects", _r0(projects)),
-        ("Should still be there", _r0(projected)),
-    ]
-    for i, (title, amount) in enumerate(boxes):
-        x = 0.5 + (i % 4) * 3.2
-        rect(s, x, 1.75, 3.0, 1.85, deep if i == 3 else card)
-        text(s, x + 0.18, 1.9, 2.65, 1.55, [
-            (title, 13, False, "D7F8EA" if i == 3 else muted, 6),
-            (amount, 22, True, "FFFFFF" if i == 3 else ink, 0),
-        ])
-    jobs = [r for r in (state["sections"].get("special") or []) if float(r.get("yearly") or 0) > 1 and not state.get("special_in_ordinary")]
-    if jobs:
-        text(s, 0.55, 3.85, 12, 0.4, [("This year’s planned work", 16, True, deep)])
-        bits = "   ·   ".join(f"{r.get('desc')}  {_r0(r.get('yearly'))}" for r in jobs[:4])
-        text(s, 0.55, 4.3, 12, 1.3, [(bits, 15, False, ink)])
-    else:
-        text(s, 0.55, 4.0, 12, 1.2, [("No projects are being taken from the reserve this year. The contribution stays in the bank for later.", 16, False, ink)])
-    brand(s)
-
-    # 7 One owner
-    s = slide()
-    text(s, 0.55, 0.35, 12, 0.6, [(f"What {who} pays each month", 30, True, ink)])
-    rows_inv = [
-        ("Ordinary levy", per_levy, "Running the complex."),
-        ("Reserve", per_res, "Saved for the big jobs."),
-        ("CSOS", per_csos, "Collected and paid over. It does not stay with us."),
-    ]
-    for i, (label, amount, blurb) in enumerate(rows_inv):
-        y = 1.35 + i * 1.15
-        rect(s, 0.5, y, 12.3, 1.02, card)
-        text(s, 0.8, y + 0.18, 6.5, 0.7, [(label, 20, True, ink, 0), (blurb, 13, False, muted, 0)])
-        text(s, 8.2, y + 0.22, 4.2, 0.6, [(_r0(amount), 26, True, deep)], align="right")
-    text(s, 0.55, 4.95, 8, 0.8, [("Total on the invoice", 16, False, muted, 0)])
-    text(s, 7.5, 4.85, 5.2, 0.8, [(_r0(per_total), 32, True, ink)], align="right")
-    brand(s)
-
-    # 8 Close
-    s = slide()
-    rect(s, 0.45, 1.7, 1.15, 0.08, mint)
-    text(s, 0.5, 1.95, 12, 1.3, [("We prepared this for you.", 36, True, ink, 8)])
-    text(s, 0.5, 3.3, 11.5, 1.6, [
-        ("Every line started from last year’s actual cost.", 20, False, ink, 4),
-        ("Recoveries are taken off. The reserve is shown on its own.", 20, False, ink, 4),
-        ("Nothing on these slides is hidden in a total.", 20, False, ink, 0),
-    ])
-    text(s, 0.5, 5.3, 10, 0.8, [(f"Please approve the budget for {name}.", 22, True, deep)])
-    brand(s, big=True)
+    # 13 Close
+    s = slide(True)
+    if logo.exists():
+        s.shapes.add_picture(str(logo), Inches(0.45), Inches(2.15), width=Inches(4.4))
+    text(s, 0.45, 4.55, 12, 1.1, [("Thank you.", 48, True, WHITE, 8)])
+    text(s, 0.45, 5.8, 10, 0.9, [("Questions are welcome. Domus will walk through any line with you.", 18, False, "E4E4E4")])
 
     buf = BytesIO()
     prs.save(buf)
@@ -3404,15 +3431,16 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 file_name=f"Budget_presentation_{name}.html",
                 mime="text/html",
             )
-            st.caption("Open that file. It plays in the browser, like a slide show. You do not need PowerPoint.")
+            st.caption("Open that file in Chrome. Arrow keys move on. Press F for full screen.")
         if st.session_state.get("pptx"):
             name = re.sub(r"\s+", "_", st.session_state.complex_name or "budget")
             st.download_button(
-                "Or download a PowerPoint file",
+                "Download the PowerPoint — same slides",
                 data=st.session_state["pptx"],
                 file_name=f"Budget_presentation_{name}.pptx",
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
             )
+            st.caption("Same story, Domus logo, black and mint. The slides fade as you click through. It cannot glide the logo the way the browser file does.")
 
     with tabs[11]:
         st.subheader("Download Excel")
