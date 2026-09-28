@@ -2509,7 +2509,6 @@ Download Excel for the meeting. Yellow cells can be changed in the meeting. To c
         section_form("personnel", "Personnel", "Salaries, casuals, PAYE/UIF, bonuses.")
 
     with tabs[6]:
-    with tabs[6]:
         other_inc, tax_est = estimate_income_tax(st.session_state)
         st.subheader("Income tax")
         st.markdown(
