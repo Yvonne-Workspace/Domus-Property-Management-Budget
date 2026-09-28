@@ -966,79 +966,124 @@ def sections_from_afs(rows: list) -> dict:
     return secs
 
 
-def parse_pq_upload(uploaded):
-    """WeConnectU unit-pqs: PQ column is often 0, real share is Ratio 1."""
-    if uploaded.name.lower().endswith(".csv"):
-        raw = pd.read_csv(uploaded)
-    else:
-        raw = pd.read_excel(uploaded)
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = [" ".join(str(x) for x in col if str(x) != "nan").strip() for col in raw.columns]
-    raw.columns = [str(c).strip() for c in raw.columns]
+def _dedupe_headers(headers: list) -> list:
     seen, cols = {}, []
-    for c in raw.columns:
+    for c in headers:
+        c = str(c).strip() or "col"
         if c in seen:
             seen[c] += 1
             cols.append(f"{c}_{seen[c]}")
         else:
             seen[c] = 0
             cols.append(c)
-    raw.columns = cols
+    return cols
+
+
+def _pq_from_frame(raw: pd.DataFrame) -> tuple[list, str]:
+    """Find a header row with a unit column and a PQ / ratio column. Sum near 100 is treated as percent."""
+    if raw is None or raw.empty:
+        raise ValueError("Empty sheet.")
+    header_idx = None
+    for i in range(min(25, len(raw))):
+        cells = [str(v).strip().lower() for v in raw.iloc[i].tolist()]
+        has_unit = any(re.search(r"unit|erf|stand|plot|door|owner|customer|section|\bcode\b", c) for c in cells)
+        has_pq = any(re.search(r"\bpq\b|quota|ratio|share", c) for c in cells)
+        if has_unit and has_pq:
+            header_idx = i
+            break
+    if header_idx is None:
+        raise ValueError("No header row with a unit and a PQ or ratio column.")
+    cols = _dedupe_headers(raw.iloc[header_idx].tolist())
+    body = raw.iloc[header_idx + 1 :].copy()
+    body.columns = cols
 
     unit_candidates = [
-        c for c in raw.columns
-        if re.search(r"customer code|owner code|account code|unit|owner|code|section", str(c), re.I)
+        c for c in body.columns
+        if re.search(r"customer code|owner code|account code|unit|erf|stand|plot|door|owner|code|section", str(c), re.I)
         and "size" not in str(c).lower()
     ]
     unit_col = None
     for c in unit_candidates:
-        sample = raw[c].astype(str).head(20)
-        if sample.str.contains(r"[A-Za-z]", regex=True).any() and "customer" in str(c).lower():
+        sample = body[c].astype(str).head(25)
+        if "customer" in str(c).lower() and sample.str.contains(r"[A-Za-z]", regex=True).any():
             unit_col = c
             break
     if unit_col is None:
         for c in unit_candidates:
-            sample = raw[c].astype(str).head(20)
+            sample = body[c].astype(str).head(25)
             if sample.str.contains(r"[A-Za-z]", regex=True).any():
                 unit_col = c
                 break
     if unit_col is None and unit_candidates:
         unit_col = unit_candidates[0]
 
-    pq_candidates = [c for c in raw.columns if re.search(r"pq|quota|ratio|^share$", str(c), re.I)]
-    pq_col, best = None, -1
+    pq_candidates = [c for c in body.columns if re.search(r"\bpq\b|quota|ratio|^share$", str(c), re.I)]
+    pq_col, best = None, -1.0
     for c in pq_candidates:
-        nums = pd.to_numeric(raw[c], errors="coerce").fillna(0.0)
+        nums = pd.to_numeric(body[c], errors="coerce").fillna(0.0)
         pos = nums[nums > 0]
         if len(pos) < 2:
             continue
         s = float(pos.sum())
-        score = len(pos)
-        if abs(s - 1) < 0.2:
+        score = float(len(pos))
+        if abs(s - 1) < 0.05:
+            score += 200
+        elif abs(s - 1) < 0.25:
             score += 80
-        if abs(s - 100) < 20:
+        if abs(s - 100) < 5:
+            score += 120
+        elif abs(s - 100) < 25:
             score += 60
         if score > best:
             best, pq_col = score, c
     if pq_col is None and pq_candidates:
         pq_col = pq_candidates[0]
     if not unit_col or not pq_col:
-        raise ValueError("Need a Unit / Customer Code column and a PQ or Ratio column. Found: " + ", ".join(map(str, raw.columns)))
+        raise ValueError("Need a unit column and a PQ or ratio column. Found: " + ", ".join(cols))
 
     clean = pd.DataFrame({
-        "Unit": raw[unit_col].astype(str).str.strip(),
-        "PQ": pd.to_numeric(raw[pq_col], errors="coerce").fillna(0),
+        "Unit": body[unit_col].astype(str).str.strip(),
+        "PQ": pd.to_numeric(body[pq_col], errors="coerce").fillna(0.0),
     })
-    clean = clean[clean["Unit"].str.lower().ne("nan") & clean["Unit"].ne("")].reset_index(drop=True)
+    clean = clean[~clean["Unit"].str.lower().isin({"", "nan", "none", "total", "totals"})]
+    clean = clean[~clean["Unit"].str.contains(r"^total\b", case=False, na=False)].reset_index(drop=True)
+    if clean.empty:
+        raise ValueError(f"No unit rows under {unit_col}.")
     total = float(clean["PQ"].sum())
     note = ""
     if 50 < total < 150:
-        clean["PQ"] = clean["PQ"] / 100
-        note = f" Values looked like percentages (total {total:.2f}) so they were divided by 100."
-    if clean.empty:
-        raise ValueError(f"No units with a PQ greater than 0. Tried column {pq_col}.")
-    msg = f"Loaded {len(clean)} units from column {pq_col} (PQ total {clean['PQ'].sum():.6f}).{note} Open the PQ / Levies tab to see each owner."
+        clean["PQ"] = clean["PQ"] / 100.0
+        total = float(clean["PQ"].sum())
+        note = " The file used percentages, so they were divided by 100."
+    if abs(total - 1) > 0.02:
+        note += f" Warning: ratios add to {total:.4f}, not 1.000. Levies will not add up until they do."
+    msg = f"Loaded {len(clean)} units from {pq_col}. Ratio total {total:.6f}.{note}"
     return clean.to_dict("records"), msg
+
+
+def parse_pq_upload(uploaded):
+    """WeConnectU unit file, a two-column sheet, or this app’s workbook (the PQ sheet, not the first tab)."""
+    name = str(getattr(uploaded, "name", "") or "").lower()
+    raw_bytes = uploaded.read() if hasattr(uploaded, "read") else uploaded
+    bio = BytesIO(raw_bytes)
+    frames = []
+    if name.endswith(".csv") or (isinstance(raw_bytes, (bytes, bytearray)) and not name.endswith((".xlsx", ".xls", ".xlsm"))):
+        frames.append(pd.read_csv(bio, header=None))
+    else:
+        xl = pd.ExcelFile(bio)
+        names = list(xl.sheet_names)
+        ordered = sorted(names, key=lambda n: (0 if re.search(r"pq|ratio|unit|levy", n, re.I) else 1))
+        for n in ordered:
+            if str(n).startswith("_"):
+                continue
+            frames.append(pd.read_excel(xl, sheet_name=n, header=None))
+    errors = []
+    for frame in frames:
+        try:
+            return _pq_from_frame(frame)
+        except Exception as e:
+            errors.append(str(e))
+    raise ValueError(errors[-1] if errors else "Could not find unit ratios in this file.")
 
 
 def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
@@ -1780,6 +1825,12 @@ def restore_from_app_excel(uploaded) -> dict:
         wb = load_workbook(bio, data_only=False, read_only=False)
         packed = _restore_from_domus_sheet(wb)
         if packed:
+            try:
+                recs, _msg = parse_pq_upload(BytesIO(raw))
+                if recs:
+                    packed["pq"] = recs
+            except Exception:
+                pass
             return packed
     except Exception:
         packed = None
@@ -2110,7 +2161,12 @@ def main():
             except Exception as e:
                 st.error(f"Could not read file: {e}")
 
-        pq_up = st.file_uploader("PQ / unit ratios (Excel or CSV)", type=["csv", "xlsx", "xls"], key="pq_sidebar")
+        pq_up = st.file_uploader(
+            "PQ / unit ratios (Excel or CSV)",
+            type=["csv", "xlsx", "xls", "xlsm"],
+            key="pq_sidebar",
+        )
+        st.caption("WeConnectU’s unit file, or this budget’s Excel after you correct the PQ sheet. Then click Load PQs. The ratios must add to 1.")
         if pq_up and st.button("Load PQs"):
             try:
                 records, msg = parse_pq_upload(pq_up)
