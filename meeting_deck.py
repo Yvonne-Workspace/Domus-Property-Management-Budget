@@ -53,7 +53,7 @@ def _slides(p: dict, logo: str) -> list[str]:
     if p.get("years"):
         out.append(_ten(p))
     out.append(_ask(p))
-    out.append(_end(p))
+    out.append(_end(p, logo))
     return out
 
 
@@ -62,15 +62,15 @@ def _cover(p, logo):
     return f"""
 <section class="slide dark">
   <div class="blob" style="width:520px;height:520px;background:rgba(112,248,200,.16);top:-220px;right:-160px;"></div>
-  <div style="position:relative;padding-top:28px;">
-    <div class="kicker r" style="--d:80">Proposed budget</div>
-    <h1 class="r" style="--d:160;font-size:64px;max-width:980px;">{_e(p['name'])}</h1>
-    <div class="r" style="--d:240;font-family:var(--head);font-size:26px;color:var(--moss);margin-top:12px;">{_e(p['year'])}</div>
-    <p class="r" style="--d:320;color:#d8d8d8;margin-top:14px;font-size:18px;max-width:640px;">Prepared by Domus, so every owner can see what the year will cost.</p>
-    <div style="display:flex;gap:16px;margin-top:42px;">
-      <div class="card rp" style="--d:420;width:230px;"><div class="num" style="font-size:34px;" data-count="{int(p['units'])}">0</div><div class="mut" style="margin-top:4px;">owners sharing the cost</div></div>
-      <div class="card rp" style="--d:520;width:250px;"><div class="num" style="font-size:34px;" data-count="{int(round(p['owner_month']))}" data-prefix="R">R0</div><div class="mut" style="margin-top:4px;">a month for {who}</div></div>
-      <div class="card rp" style="--d:620;width:250px;"><div class="num" style="font-size:34px;" data-count="{int(round(p['collect_year']))}" data-prefix="R">R0</div><div class="mut" style="margin-top:4px;">for the whole year</div></div>
+  <div style="position:relative;padding-top:8px;">
+    <div class="kicker r" style="--d:900">Proposed budget</div>
+    <h1 class="r" style="--d:1100;font-size:64px;max-width:980px;">{_e(p['name'])}</h1>
+    <div class="r" style="--d:1300;font-family:var(--head);font-size:26px;color:var(--moss);margin-top:12px;">{_e(p['year'])}</div>
+    <p class="r" style="--d:1450;color:#d8d8d8;margin-top:14px;font-size:18px;max-width:640px;">Prepared by Domus, so every owner can see what the year will cost.</p>
+    <div style="display:flex;gap:16px;margin-top:28px;">
+      <div class="card rp" style="--d:1600;width:230px;"><div class="num" style="font-size:34px;" data-count="{int(p['units'])}">0</div><div class="mut" style="margin-top:4px;">owners sharing the cost</div></div>
+      <div class="card rp" style="--d:1750;width:250px;"><div class="num" style="font-size:34px;" data-count="{int(round(p['owner_month']))}" data-prefix="R">R0</div><div class="mut" style="margin-top:4px;">a month for {who}</div></div>
+      <div class="card rp" style="--d:1900;width:250px;"><div class="num" style="font-size:34px;" data-count="{int(round(p['collect_year']))}" data-prefix="R">R0</div><div class="mut" style="margin-top:4px;">for the whole year</div></div>
     </div>
   </div>
 </section>"""
@@ -359,13 +359,15 @@ def _ask(p):
 </section>"""
 
 
-def _end(p):
+def _end(p, logo):
+    bye = (logo or "").replace('class="logo"', 'class="logo logo-bye"', 1)
     return f"""
 <section class="slide dark">
   <div class="blob" style="width:520px;height:520px;background:rgba(112,248,200,.16);top:-200px;right:-160px;"></div>
-  <div style="position:relative;padding-top:120px;max-width:820px;">
-    <h1 class="r" style="--d:120;font-size:72px;">Thank you.</h1>
-    <p class="r" style="--d:260;font-size:20px;color:#e4e4e4;margin-top:18px;line-height:1.5;">Questions are welcome.<br>Domus will walk through any line with you.</p>
+  <div style="position:relative;padding-top:20px;max-width:820px;">
+    {bye}
+    <h1 class="r" style="--d:900;font-size:72px;">Thank you.</h1>
+    <p class="r" style="--d:1200;font-size:20px;color:#e4e4e4;margin-top:18px;line-height:1.5;">Questions are welcome.<br>Domus will walk through any line with you.</p>
   </div>
 </section>"""
 
@@ -444,6 +446,26 @@ tbody tr{opacity:0; transform:translateX(-14px); transition:opacity .45s ease, t
 .logo{height:96px; width:auto; background:#fff; border-radius:10px; padding:6px 10px; display:block; box-shadow:0 8px 24px rgba(0,0,0,.12);}
 .letterhead{position:absolute; top:16px; left:40px; right:40px; display:flex; align-items:center; justify-content:space-between; z-index:4; padding-bottom:10px; border-bottom:2px solid var(--mint);}
 .letterhead .logo{height:112px;}
+section.slide:first-of-type .letterhead .logo{animation:none;}
+section.slide:last-of-type .letterhead .logo{visibility:hidden;}
+.slide.play:first-of-type .letterhead .logo{
+  animation:flowIn 1.7s cubic-bezier(.16,1,.3,1) both;
+}
+.logo-bye{height:150px; width:auto; margin:8px 0 18px; background:#fff; border-radius:12px; padding:8px 12px; box-shadow:0 12px 30px rgba(0,0,0,.18);}
+.slide.play .logo-bye{animation:flowOut 2.1s cubic-bezier(.55,.05,.75,.4) .15s both;}
+@keyframes flowIn{
+  0%{opacity:0; transform:translateX(-120%) scale(.9); filter:blur(10px);}
+  55%{opacity:1; filter:blur(0);}
+  100%{opacity:1; transform:none; filter:none;}
+}
+@keyframes flowOut{
+  0%{opacity:1; transform:none; filter:none;}
+  100%{opacity:0; transform:translateX(78vw) scale(1.12); filter:blur(8px);}
+}
+@keyframes mintDraw{
+  from{clip-path:inset(0 100% 0 0);}
+  to{clip-path:inset(0 0 0 0);}
+}
 .lh-note{font-size:12px; letter-spacing:2.4px; text-transform:uppercase; color:#111; font-weight:600;}
 .dark .lh-note{color:#fff;}
 .wordmark{font-family:var(--head); font-weight:800; letter-spacing:3px; font-size:18px; color:var(--green);}
@@ -489,6 +511,9 @@ tbody tr{opacity:0; transform:translateX(-14px); transition:opacity .45s ease, t
     requestAnimationFrame(step);
   }
   function animate(s){
+    s.classList.remove('play');
+    void s.offsetWidth;
+    s.classList.add('play');
     s.querySelectorAll('[data-count]').forEach(function(el, n){ setTimeout(function(){ countUp(el); }, 280 + n * 80); });
     s.querySelectorAll('.dseg').forEach(function(c, n){
       c.style.strokeDasharray = '0 440'; c.style.strokeDashoffset = c.dataset.off;
