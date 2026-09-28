@@ -1036,8 +1036,12 @@ def _pq_from_frame(raw: pd.DataFrame) -> tuple[list, str]:
             score += 60
         if score > best:
             best, pq_col = score, c
-    if pq_col is None and pq_candidates:
-        pq_col = pq_candidates[0]
+        # WeConnectU leaves the PQ column at 0. The real share is Ratio 1.
+        ratio1 = next((c for c in pq_candidates if re.fullmatch(r"ratio\s*1", str(c).strip(), re.I)), None)
+        if ratio1 is not None:
+            nums = pd.to_numeric(body[ratio1], errors="coerce").fillna(0.0)
+            if float(nums[nums > 0].sum()) > 0:
+                pq_col = ratio1
     if not unit_col or not pq_col:
         raise ValueError("Need a unit column and a PQ or ratio column. Found: " + ", ".join(cols))
 
@@ -1064,7 +1068,12 @@ def _pq_from_frame(raw: pd.DataFrame) -> tuple[list, str]:
 def parse_pq_upload(uploaded):
     """WeConnectU unit file, a two-column sheet, or this app’s workbook (the PQ sheet, not the first tab)."""
     name = str(getattr(uploaded, "name", "") or "").lower()
-    raw_bytes = uploaded.read() if hasattr(uploaded, "read") else uploaded
+    if hasattr(uploaded, "getvalue"):
+        raw_bytes = uploaded.getvalue()
+    elif hasattr(uploaded, "read"):
+        raw_bytes = uploaded.read()
+    else:
+        raw_bytes = uploaded
     bio = BytesIO(raw_bytes)
     frames = []
     if name.endswith(".csv") or (isinstance(raw_bytes, (bytes, bytearray)) and not name.endswith((".xlsx", ".xls", ".xlsm"))):
@@ -2651,7 +2660,23 @@ Confirm the dates and the amount with the auditor or tax practitioner.
 
     with tabs[8]:
         st.subheader("PQ / levy schedule")
-        st.caption("Upload the WeConnectU unit PQs on the left. Each owner = their PQ × that column’s monthly total.")
+        st.caption("Choose the unit ratio Excel here. WeConnectU’s PQ column is often 0 — we use Ratio 1. The ratios must add to 1.000.")
+        pq_here = st.file_uploader(
+            "Upload unit ratios",
+            type=["xlsx", "xls", "xlsm", "csv"],
+            key="pq_tab_file",
+        )
+        if pq_here is not None:
+            sig = f"{pq_here.name}:{getattr(pq_here, 'size', 0)}"
+            if st.session_state.get("_pq_sig") != sig:
+                try:
+                    records, msg = parse_pq_upload(pq_here)
+                    st.session_state.pq = records
+                    st.session_state["_pq_sig"] = sig
+                    st.session_state.msg = msg
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not read this ratio file: {e}")
         if not st.session_state.pq:
             st.info("No PQs loaded yet. On the left, choose the unit PQs Excel and click Load PQs.")
         else:
@@ -2674,6 +2699,8 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             if extra_cols:
                 prev["Total monthly"] = prev[extra_cols].sum(axis=1)
             show = prev.copy()
+            if show.columns.duplicated().any():
+                show.columns = _dedupe_headers([str(c) for c in show.columns])
             if "PQ" in show.columns:
                 show["PQ"] = show["PQ"].astype(float).round(6)
             for c in extra_cols + (["Total monthly"] if extra_cols else []):
