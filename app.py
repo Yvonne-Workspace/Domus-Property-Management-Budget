@@ -266,17 +266,22 @@ def scheme_csos_yearly(state: dict, levy_yearly: float) -> float:
     return csos_monthly_for_levy(levy_yearly / 12.0 / n) * n * 12.0
 
 
-def municipal_gross_and_rec(state: dict) -> tuple[float, float]:
-    """Gross municipal bills vs owner recoveries. Insurance/legal claims are not recoveries."""
+def municipal_split(state: dict, field: str) -> tuple[float, float]:
+    """City-bill total and recovered total for Actual or Budgeted yearly. Recoveries stay positive."""
     gross = 0.0
     rec = 0.0
     for r in state["sections"].get("municipal") or []:
-        y = abs(float(r.get("yearly") or 0))
+        y = abs(float(r.get(field) or 0))
         if is_muni_recovery(r.get("desc") or "", r.get("is_recovery")):
             rec += y
         else:
             gross += y
     return gross, rec
+
+
+def municipal_gross_and_rec(state: dict) -> tuple[float, float]:
+    """This year’s budget: city bill vs owner recoveries."""
+    return municipal_split(state, "yearly")
 
 
 def municipal_bucket(desc: str) -> str:
@@ -1461,6 +1466,7 @@ def generate_excel(state: dict) -> BytesIO:
     def tot(label, start, end):
         nonlocal r
         ws.cell(r, 2, label).font = Font(bold=True)
+        fml(ws.cell(r, 4), f"SUM(D{start}:D{end})", TOTAL)
         fml(ws.cell(r, 6), f"SUM(F{start}:F{end})", TOTAL)
         fml(ws.cell(r, 7), f"F{r}/12", TOTAL)
         row_n = r
@@ -1497,6 +1503,7 @@ def generate_excel(state: dict) -> BytesIO:
     a, b = write(muni_gross)
     muni_g_tot = tot("TOTAL CITY BILL", a, b)
     ws.cell(r, 2, "TOTAL NET MUNICIPAL (city bill minus recovered)").font = Font(bold=True)
+    fml(ws.cell(r, 4), f"D{muni_g_tot}-D{util_tot}", RED)
     fml(ws.cell(r, 6), f"F{muni_g_tot}-F{util_tot}", RED)
     fml(ws.cell(r, 7), f"F{r}/12", RED)
     net_muni = r
@@ -2435,11 +2442,27 @@ Download Excel for the meeting. Yellow cells can be changed in the meeting. To c
         )
 
     with tabs[2]:
-        g, rec = municipal_gross_and_rec(st.session_state)
+        ag, ar = municipal_split(st.session_state, "actual")
+        yg, yr = municipal_split(st.session_state, "yearly")
+        st.markdown("**Last year — add the Actual column like this**")
+        st.caption("City-bill actuals are added. Lines named recovered are subtracted. Do not add those actuals on top.")
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Actual city bill", money(ag))
+        a2.metric("Actual recovered", money(ar))
+        a3.metric("Actual net", money(ag - ar))
+        for r in st.session_state.sections.get("municipal") or []:
+            act = abs(float(r.get("actual") or 0))
+            if act < 0.5:
+                continue
+            kind = "subtract" if is_muni_recovery(r.get("desc") or "", r.get("is_recovery")) else "add"
+            st.write(f"- {r.get('desc')}: Actual {money(act)} — **{kind}**")
+        st.write(f"**{money(ag)} − {money(ar)} = {money(ag - ar)}**")
+        st.markdown("**This year — Budgeted yearly**")
         n1, n2, n3 = st.columns(3)
-        n1.metric("Gross municipal (what the city bills us)", money(g))
-        n2.metric("Recovered from owners", money(rec))
-        n3.metric("Net municipal (in the levy)", money(g - rec))
+        n1.metric("Budget city bill", money(yg))
+        n2.metric("Budget recovered", money(yr))
+        n3.metric("Budget net (in the levy)", money(yg - yr))
+        g, rec = yg, yr
         gaps = municipal_gaps(st.session_state)
         under = [x for x in gaps if x["gap"] > 1]
         over = [x for x in gaps if x["gap"] < -1]
