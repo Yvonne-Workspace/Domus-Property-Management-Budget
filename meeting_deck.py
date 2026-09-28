@@ -26,10 +26,8 @@ def render_meeting_html(pack: dict, logo_path: Path | None = None) -> bytes:
         b64 = base64.b64encode(Path(logo_path).read_bytes()).decode()
         logo = f'<img class="logo" alt="Domus" src="data:image/jpeg;base64,{b64}">'
     slides = "\n".join(_slides(pack, logo))
-    mark = (
-        f'<div class="letterhead">{logo or "<span class=\"wordmark\">DOMUS</span>"}'
-        f'<span class="lh-note">Property Management</span></div>'
-    )
+    fallback = '<span class="wordmark">DOMUS</span>'
+    mark = f'<div class="letterhead">{logo or fallback}<span class="lh-note">Property Management</span></div>'
     slides = slides.replace('<section class="slide dark">', '<section class="slide dark">' + mark)
     slides = slides.replace('<section class="slide">', '<section class="slide">' + mark)
     name = _e(pack.get("name") or "Budget")
