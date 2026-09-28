@@ -1125,7 +1125,7 @@ def items_to_df(items: list, rm: bool) -> pd.DataFrame:
             "Actual": actual,
             "% Increase": round(pct, 2),
             "Budgeted yearly": yearly,
-            "Monthly": net_of(it) / 12,
+            "Monthly": abs(yearly) / 12.0,
             "Insurance payout": float(it.get("insurance") or 0),
             "Notes": it.get("note") or "",
         })
@@ -1936,7 +1936,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
                     format="%.2f",
                     help="Or type the rand amount then Save. We fill in the %.",
                 ),
-                "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="Yearly ÷ 12. Updates when you Save."),
+                "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="Budgeted yearly ÷ 12. Always positive. Recoveries are subtracted only in the net."),
                 "Insurance payout": st.column_config.NumberColumn("Insurance payout", format="%.2f"),
                 "Notes": st.column_config.TextColumn("Notes", width="large", help="Shows on the Excel Comments / Notes column. Click Save after typing."),
             },
@@ -2463,11 +2463,33 @@ Download Excel for the meeting. Yellow cells can be changed in the meeting. To c
                 )
         if not under and not over and (g > 1 or rec > 1):
             st.success("Municipal recoveries match the city bill. Nothing extra is sitting in the levy.")
+        gaps = municipal_gaps(st.session_state)
         st.caption(
-            f"Check: {money(g)} city bill − {money(rec)} recovered = {money(g - rec)} net. "
-            "Recovered lines stay as positive rands. We subtract them. "
-            "The under-recovery note is already inside that net — do not add it again."
+            f"City bill {money(g)} − recovered {money(rec)} = **net {money(g - rec)}**. "
+            "Every line on this tab is a positive rand. Monthly = Budgeted yearly ÷ 12. "
+            "We subtract the lines named recovered. Do not add them to the city bill."
         )
+        missing_gross = [
+            x["name"] for x in gaps
+            if x["rec"] > 1 and x["gross"] < 1
+        ]
+        if missing_gross:
+            st.warning(
+                "Recovered with no city-bill line: "
+                + ", ".join(missing_gross)
+                + ". Add the city bill (for example Water) or those recoveries reduce the levy on their own."
+            )
+        odd_rec = []
+        for r in st.session_state.sections.get("municipal") or []:
+            act = abs(float(r.get("actual") or 0))
+            y = abs(float(r.get("yearly") or 0))
+            if act > 1000 and y < act * 0.25:
+                odd_rec.append(f"{r.get('desc')}: last year {money(act)}, this year {money(y)}")
+        if odd_rec:
+            st.warning(
+                "These municipal lines are far below last year. If that was not on purpose, set % to 0 and Save: "
+                + "; ".join(odd_rec)
+            )
         section_form(
             "municipal",
             "Municipal charges",
