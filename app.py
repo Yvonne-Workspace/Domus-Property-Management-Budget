@@ -411,16 +411,6 @@ def prev_admin_contributions(state: dict) -> float:
     return 0.0
 
 
-def reserve_interest(state: dict) -> float:
-    """Interest and investment income credited to the reserve. Not rental."""
-    total = 0.0
-    for r in state["sections"].get("other") or []:
-        d = (r.get("desc") or "").lower()
-        if any(k in d for k in ("interest", "invest")):
-            total += max(0.0, float(r.get("yearly") or 0))
-    return total
-
-
 def reserve_project_spend(state: dict) -> float:
     """This year’s special projects, if the reserve pays them. Zero when they are inside the levy."""
     if state.get("special_in_ordinary"):
@@ -429,8 +419,9 @@ def reserve_project_spend(state: dict) -> float:
 
 
 def projected_reserve(state: dict) -> float:
+    """Opening balance already includes interest earned to date. Do not add it again."""
     opening = float(state.get("reserve_balance") or 0)
-    return opening + reserve_contribution(state) + reserve_interest(state) - reserve_project_spend(state)
+    return opening + reserve_contribution(state) - reserve_project_spend(state)
 
 
 def rm_budget(state: dict) -> float:
@@ -1426,14 +1417,13 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B5"] = "Current reserve fund (already in the bank)"
     inp(ws["D5"], float(state.get("reserve_balance") or 0), MONEY)
     ws["B6"] = "This year’s reserve contribution"
-    ws["B7"] = "Interest added to the reserve"
-    ws["B8"] = "This year’s projects paid from the reserve"
-    ws["B9"] = "Projected reserve at year-end"
-    fml(ws["D9"], "D5+D6+D7-D8")
-    ws["B10"] = "Yellow cells = type here. Budgeted Yearly = Actual × (1 + %). Monthly = Yearly ÷ 12. Change % or overwrite Yearly in the meeting."
-    ws["B10"].font = Font(italic=True, size=9, color="666666")
+    ws["B7"] = "This year’s projects paid from the reserve"
+    ws["B8"] = "Projected reserve at year-end"
+    fml(ws["D8"], "D5+D6-D7")
+    ws["B9"] = "Interest is already inside the reserve balance above. It is not added again. Yellow cells = type here. Budgeted Yearly = Actual × (1 + %). Monthly = Yearly ÷ 12."
+    ws["B9"].font = Font(italic=True, size=9, color="666666")
 
-    r = 12
+    r = 11
 
     def bar(title):
         nonlocal r
@@ -1654,19 +1644,11 @@ def generate_excel(state: dict) -> BytesIO:
         fml(ws["D6"], f"F{levy_rows['reserve']}")
     else:
         ws["D6"] = 0
-    interest_refs = [
-        f"F{n}" for desc, n in named_rows.items()
-        if any(k in desc.lower() for k in ("interest", "invest")) and "reserve" not in desc.lower()
-    ]
-    if interest_refs:
-        fml(ws["D7"], "+".join(interest_refs))
-    else:
-        ws["D7"] = 0
     if state.get("special_in_ordinary"):
-        ws["D8"] = 0
-        ws["B8"] = "This year’s projects paid from the reserve (none — they are in the levy)"
+        ws["D7"] = 0
+        ws["B7"] = "This year’s projects paid from the reserve (none — they are in the levy)"
     else:
-        fml(ws["D8"], f"F{sp_tot}")
+        fml(ws["D7"], f"F{sp_tot}")
 
     pq = wb.create_sheet("PQ")
     pq["A1"] = "PQ / LEVY SCHEDULE"
@@ -2320,16 +2302,15 @@ def main():
                     "That does not change the option you picked above."
                 )
         opening = float(st.session_state.reserve_balance or 0)
-        interest = reserve_interest(st.session_state)
         projects = reserve_project_spend(st.session_state)
         st.caption(
             f"Already in reserve {money(opening)} + this year {money(contrib)} "
-            f"+ interest {money(interest)} − this year’s projects {money(projects)} "
+            f"− this year’s projects {money(projects)} "
             f"= projected {money(projected_reserve(st.session_state))}."
         )
         st.caption(
-            "Leave interest under Other Income. It is added here, not into the levy. "
-            "It still counts for the tax estimate. Rental is not added until you know what it is for."
+            "Interest already sits inside the reserve balance, so it is not added again. "
+            "Leave the interest line under Other Income only for the tax estimate."
         )
         st.caption(
             "Guidance only, not legal advice. Body corporate minimums: STSMA Regulation 2. "
