@@ -1963,6 +1963,34 @@ def restore_from_app_excel(uploaded) -> dict:
     return out
 
 
+def apply_falcon_view_notes(state: dict) -> None:
+    """Correct Falcon View comments that no longer match the figures. Other complexes are left alone."""
+    if "falcon" not in (state.get("complex_name") or "").lower():
+        return
+    notes = {
+        "levies received": "Ordinary levy for the year, worked out from the costs. The 27.42% is the change from last year’s R1,259,000. It was not typed in as an increase.",
+        "reserve fund contribution": "R539,604.12, equal to 100% of this year’s repairs and maintenance. Collected so the reserve can pay the 10-year plan. Interest is already in the opening balance and is not added again.",
+        "csos levy recovered": "R18,763.91. Owners pay this on its own column. It is not part of the ordinary levy. The expense is the same amount.",
+        "csos levy": "R18,763.91, the same as CSOS income. Left out of the ordinary levy so owners are not charged twice.",
+        "investment income": "7% on last year’s R85,615.96 = R91,609.08. Already inside the reserve balance, so it is not added to the reserve again and it does not reduce the levy. Kept here only for the tax estimate.",
+        "rental income": "R216,695.40, same as last year. Not used to reduce the levy until the trustees confirm what this rental is for.",
+        "audit fees": "R12,663.45, being last year’s R11,835 plus 7%. The previous fee was for the 2023/2024 year-end. Confirm against the latest quotation.",
+        "security": "R445,484.18. That is 8.24% above last year’s R411,570.72, not 5%.",
+        "meeting expenses": "5% on last year’s R5,459.77. Budget R5,732.76.",
+        "gate airtime & data": "Budget R3,000. The % looks very high only because last year was R583 after the once-off MTN deposits were left out.",
+        "fire equipment & services": "Budget R1,500 for the annual service. The last invoice was R1,380.",
+        "electrical maintenance": "5% on last year’s R10,744.50. Budget R11,281.73.",
+        "taxation": "Estimate only. Interest R91,609 plus rental R216,695 = R308,304. First R50,000 is exempt. The rest × 27% = R69,742.21. This tax is in the levy. Confirm with the auditor.",
+        "loans payable": "R64,545 from the 10-year plan and taken off the reserve. Confirm that this is a loan repayment, not a maintenance job.",
+    }
+    for items in (state.get("sections") or {}).values():
+        for it in items:
+            key = norm(it.get("desc") or "")
+            new = notes.get(key)
+            if new and it.get("note") != new:
+                it["note"] = new
+
+
 def init():
     ss = st.session_state
     ss.setdefault("sections", default_sections())
@@ -2044,6 +2072,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
 
 def main():
     init()
+    apply_falcon_view_notes(st.session_state)
     pending = st.session_state.pop("_pending_insurance_bill", None)
     if pending is not None:
         st.session_state.insurance_bill_yearly = float(pending)
