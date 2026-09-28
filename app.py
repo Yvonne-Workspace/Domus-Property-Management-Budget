@@ -437,11 +437,14 @@ def bc_reserve_rule(state: dict) -> dict:
 
 
 def reserve_contribution(state: dict) -> float:
-    if state.get("scheme_type") == "hoa":
-        return float(state.get("reserve_amount") or 0)
+    """Same four choices for a body corporate and an HOA. The Act does not force the choice."""
     mode = state.get("reserve_mode") or "amount"
-    if mode in ("legal", "15pct"):
-        return float(bc_reserve_rule(state)["minimum"])
+    if mode in ("pct15", "15pct", "legal"):
+        return prev_admin_contributions(state) * 0.15
+    if mode == "pct25":
+        return prev_admin_contributions(state) * 0.25
+    if mode == "rm100":
+        return rm_budget(state)
     return float(state.get("reserve_amount") or 0)
 
 
@@ -1412,14 +1415,16 @@ def generate_excel(state: dict) -> BytesIO:
             expected = act * (1 + pct / 100.0)
             if fam == "ordinary":
                 pass  # F filled after totals
-            elif fam == "reserve" and state.get("scheme_type") != "hoa" and state.get("reserve_mode") in ("legal", "15pct") and levy_rows.get("ordinary"):
-                rule = bc_reserve_rule(state)
-                if rule["band"] == "15":
-                    fml(ws.cell(r, 6), f"0.15*F{levy_rows['ordinary']}")
-                elif rule["band"] == "rm":
-                    pass  # filled once the R&M total row exists
-                else:
-                    inp(ws.cell(r, 6), 0.0, MONEY)
+            elif fam == "reserve" and state.get("reserve_mode") in ("pct15", "15pct", "legal") and levy_rows.get("ordinary"):
+                months = max(1, int(state.get("actual_months") or 12))
+                scale = f"*12/{months}" if months < 12 else ""
+                fml(ws.cell(r, 6), f"0.15*D{levy_rows['ordinary']}{scale}")
+            elif fam == "reserve" and state.get("reserve_mode") == "pct25" and levy_rows.get("ordinary"):
+                months = max(1, int(state.get("actual_months") or 12))
+                scale = f"*12/{months}" if months < 12 else ""
+                fml(ws.cell(r, 6), f"0.25*D{levy_rows['ordinary']}{scale}")
+            elif fam == "reserve" and state.get("reserve_mode") == "rm100":
+                pass  # filled once the R&M total row exists
             elif is_own_scheme_csos(desc) and fam == "csos_exp" and levy_rows.get("csos"):
                 fml(ws.cell(r, 6), f"F{levy_rows['csos']}")
             elif rec and not recovery_as_income:
@@ -1525,12 +1530,7 @@ def generate_excel(state: dict) -> BytesIO:
     hdr()
     a, b = write(s.get("rm") or [], in_levy=True)
     rm_tot = tot("Total Repair and Maintenance", a, b)
-    if (
-        state.get("scheme_type") != "hoa"
-        and state.get("reserve_mode") in ("legal", "15pct")
-        and bc_reserve_rule(state)["band"] == "rm"
-        and levy_rows.get("reserve")
-    ):
+    if state.get("reserve_mode") == "rm100" and levy_rows.get("reserve"):
         fml(ws.cell(levy_rows["reserve"], 6), f"F{rm_tot}")
         fml(ws.cell(levy_rows["reserve"], 7), f"F{levy_rows['reserve']}/12")
     bar("PERSONNEL")
@@ -2159,7 +2159,6 @@ def main():
             ["bc", "hoa"],
             format_func=lambda x: "Sectional title body corporate" if x == "bc" else "Homeowners association (HOA)",
             index=0 if st.session_state.get("scheme_type") != "hoa" else 1,
-            help="The 15% reserve rule is only for a body corporate. An HOA does not have that statutory minimum.",
         )
         st.session_state.reserve_balance = st.number_input(
             "How much is already in the reserve fund?",
@@ -2168,77 +2167,52 @@ def main():
             step=1000.0,
             help="Money in the reserve bank account now. Not this year’s contribution.",
         )
-        if st.session_state.scheme_type == "hoa":
-            st.info(
-                "An HOA has **no automatic 15% reserve rule**. "
-                "Whether you collect a reserve, and how much, comes from the MOI or constitution and a proper approval. "
-                "Type the yearly amount the members approved."
-            )
-            st.session_state.reserve_mode = "amount"
+        mode_now = st.session_state.get("reserve_mode") or "amount"
+        if mode_now in ("15pct", "legal"):
+            mode_now = "pct15"
+        if mode_now not in ("amount", "pct15", "pct25", "rm100"):
+            mode_now = "amount"
+        st.session_state.reserve_mode = st.radio(
+            "This year’s reserve contribution",
+            ["amount", "pct15", "pct25", "rm100"],
+            index=["amount", "pct15", "pct25", "rm100"].index(mode_now),
+            format_func=lambda x: {
+                "amount": "Own amount",
+                "pct15": "15% of last year’s ordinary levy (Actual)",
+                "pct25": "25% of last year’s ordinary levy (Actual)",
+                "rm100": "100% of this year’s Repairs and Maintenance",
+            }[x],
+        )
+        if st.session_state.reserve_mode == "amount":
             st.session_state.reserve_amount = st.number_input(
-                "Reserve contribution this year (yearly rands)",
+                "Reserve fund contribution (yearly rands)",
                 value=float(st.session_state.reserve_amount),
                 step=1000.0,
                 min_value=0.0,
             )
-            contrib = float(st.session_state.reserve_amount or 0)
+        contrib = reserve_contribution(st.session_state)
+        st.caption(f"This year’s contribution: {money(contrib)}.")
+        if st.session_state.reserve_mode in ("pct15", "pct25") and prev_admin_contributions(st.session_state) < 1:
+            st.warning("Put last year’s ordinary levy in the Actual column on Levy Income. 15% and 25% use that figure.")
+        if st.session_state.scheme_type == "hoa":
+            st.caption(
+                "An HOA may use any of these. There is no automatic 15% or 25% rule. "
+                "Use the option the MOI, constitution or members approved."
+            )
         else:
             rule = bc_reserve_rule(st.session_state)
-            prev = rule["prev"]
-            if rule["band"] == "unknown":
-                st.warning(
-                    "Put last year’s ordinary levy in the Actual column on Levy Income. "
-                    "The legal minimum needs that figure."
+            if rule["band"] != "unknown":
+                st.caption(
+                    f"Body corporate note only: the Act’s minimum would be {money(rule['minimum'])}. "
+                    "That does not change the option you picked above."
                 )
-            elif rule["band"] == "15":
-                st.warning(
-                    f"Reserve is **{rule['ratio']*100:.0f}%** of last year’s admin levies ({money(prev)}). "
-                    f"That is **under 25%**, so the legal minimum is **15% of this year’s ordinary levies** "
-                    f"({money(rule['minimum'])}). STSMA Regulation 2."
-                )
-            elif rule["band"] == "rm":
-                st.info(
-                    f"Reserve is **{rule['ratio']*100:.0f}%** of last year’s admin levies ({money(prev)}). "
-                    f"That is **between 25% and 100%**, so the legal minimum is **this year’s repair and maintenance** "
-                    f"({money(rule['minimum'])})."
-                )
-            else:
-                st.success(
-                    f"Reserve is **{rule['ratio']*100:.0f}%** of last year’s admin levies ({money(prev)}). "
-                    "That is **100% or more**. There is **no statutory minimum** this year. You may still budget a contribution."
-                )
-            mode_now = st.session_state.get("reserve_mode") or "amount"
-            if mode_now == "15pct":
-                mode_now = "legal"
-            st.session_state.reserve_mode = st.radio(
-                "How is this year’s contribution set?",
-                ["legal", "amount"],
-                format_func=lambda x: "Use the legal minimum" if x == "legal" else "I will type the yearly amount",
-                index=0 if mode_now == "legal" else 1,
-            )
-            if st.session_state.reserve_mode == "amount":
-                st.session_state.reserve_amount = st.number_input(
-                    "Reserve fund contribution (yearly rands)",
-                    value=float(st.session_state.reserve_amount),
-                    step=1000.0,
-                    min_value=0.0,
-                )
-                contrib = float(st.session_state.reserve_amount or 0)
-                if rule["minimum"] > 1 and contrib + 1 < rule["minimum"]:
-                    st.error(
-                        f"That is below the legal minimum of {money(rule['minimum'])}. "
-                        "Trustees can budget more, not less, unless they have advice that the rule does not apply."
-                    )
-            else:
-                contrib = float(rule["minimum"])
-                st.caption(f"This year’s contribution will be {money(contrib)}.")
         st.caption(
             f"Already in reserve {money(st.session_state.reserve_balance)} + this year {money(contrib)} "
             f"= projected {money(float(st.session_state.reserve_balance or 0) + contrib)}."
         )
         st.caption(
-            "Guidance only, not legal advice. Body corporate rules: Sectional Titles Schemes Management Act 8 of 2011, Regulation 2. "
-            "HOA rules follow the MOI or constitution. CSOS applies to community schemes. Confirm with your attorney if you are unsure."
+            "Guidance only, not legal advice. Body corporate minimums: STSMA Regulation 2. "
+            "HOA amounts follow the MOI or constitution."
         )
         st.session_state.special_in_ordinary = st.checkbox(
             "Add Special Projects into ordinary levies",
