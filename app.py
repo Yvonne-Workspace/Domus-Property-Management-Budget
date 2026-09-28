@@ -7,6 +7,8 @@ import re
 from io import BytesIO
 from pathlib import Path
 
+from meeting_deck import render_meeting_html
+
 import pandas as pd
 import pdfplumber
 import streamlit as st
@@ -1714,6 +1716,215 @@ def generate_pptx(state: dict) -> BytesIO:
     return buf
 
 
+def _child_plain(desc: str) -> str:
+    d = (desc or "").lower()
+    if "secur" in d or "gate" in d or "camera" in d:
+        return "People who watch the complex, and a gate that works."
+    if "garden" in d:
+        return "The grass, the plants and the garden work."
+    if "clean" in d or "refuse" in d:
+        return "Keeping the grounds clean and taking rubbish away."
+    if "manag" in d:
+        return "The office that pays the bills and helps the owners."
+    if "insur" in d:
+        return "Cover if the buildings are damaged."
+    if "audit" in d:
+        return "A check that the books are right."
+    if "account" in d:
+        return "Preparing the books and the statements."
+    if "bank" in d:
+        return "The bank’s fee on the complex account."
+    if "legal" in d:
+        return "Help when the complex needs advice."
+    if "plumb" in d or "sewer" in d:
+        return "Pipes and drains on the shared property."
+    if "electric" in d or "light" in d:
+        return "Lights and power for the shared areas."
+    if "tax" in d:
+        return "Tax on interest and rental. The levy itself is not taxed."
+    if "fire" in d:
+        return "Checking the fire equipment."
+    if "paint" in d or "palisade" in d:
+        return "Paint and care so the buildings last."
+    if "loan" in d:
+        return "A loan repayment, taken from the reserve."
+    return "A cost of looking after the complex."
+
+
+def _invoice_plain(name: str, split: str) -> str:
+    n = (name or "").lower()
+    if "reserve" in n:
+        return "Saved for the big jobs. Not spent on the monthly bills."
+    if "csos" in n:
+        return "A small legal amount. We collect it and pay it over. We keep none of it."
+    if "insur" in n:
+        return "Cover for the buildings, shown on its own line so you can see it."
+    if split == "equal":
+        return "The same rand for every owner. Not based on the size of the erf."
+    if n.startswith("lev"):
+        return "Day-to-day running of the complex."
+    return "Your share of this charge."
+
+
+def meeting_pack(state: dict) -> dict:
+    ordinary = ordinary_total(state)
+    reserve = reserve_contribution(state)
+    csos = scheme_csos_yearly(state, ordinary) if state.get("auto_csos", True) else 0.0
+    share, who = _typical_share(state)
+    units = [u for u in (state.get("pq") or []) if float(u.get("PQ") or 0) > 1e-8]
+    n_units = len(units)
+    if not share:
+        who = "the whole complex"
+    gross, recovered = municipal_gross_and_rec(state)
+
+    invoice = []
+    for name, yearly, split in pq_bill_lines(state):
+        if abs(yearly) < 0.5:
+            continue
+        if split == "equal":
+            monthly = yearly / 12 / max(n_units, 1)
+        elif share:
+            monthly = yearly / 12 * share
+        else:
+            monthly = yearly / 12
+        invoice.append({"name": name, "yearly": yearly, "monthly": monthly, "plain": _invoice_plain(name, split)})
+    owner_month = sum(x["monthly"] for x in invoice) or ((ordinary + reserve + csos) / 12 * (share or 1))
+    collect_year = sum(x["yearly"] for x in invoice) or (ordinary + reserve + csos)
+
+    last_actual = 0.0
+    for r in state["sections"].get("levy") or []:
+        if family(r.get("desc") or "") == "ordinary":
+            last_actual = float(r.get("actual") or 0)
+            break
+    pct = None
+    if last_actual > 1 and ordinary > 1:
+        pct = (ordinary / last_actual) * 100 - 100
+
+    costs = [{"label": a, "amount": b, "blurb": c} for a, b, c in _story_costs(state)]
+
+    risers = []
+    pool = (
+        list(state["sections"].get("expenditure") or [])
+        + list(state["sections"].get("rm") or [])
+        + list(state["sections"].get("personnel") or [])
+        + list(state["sections"].get("tax") or [])
+    )
+    for r in pool:
+        if skip_from_ordinary(r, state):
+            continue
+        a = float(r.get("actual") or 0)
+        y = net_of(r)
+        more = y - a
+        if more > 500 and a > 1:
+            risers.append({
+                "label": r.get("desc") or "Cost",
+                "more": more,
+                "plain": f"Last year this cost {_r0(a)}. This year we allowed {_r0(y)}.",
+            })
+    muni_last = municipal_split(state, "actual")
+    muni_more = (gross - recovered) - (muni_last[0] - muni_last[1])
+    if muni_more > 500:
+        risers.append({
+            "label": "Shared city bill",
+            "more": muni_more,
+            "plain": "The part of the city bill that owners do not pay back on their own meters.",
+        })
+    risers.sort(key=lambda x: -x["more"])
+
+    big = []
+    for r in pool:
+        if skip_from_ordinary(r, state):
+            continue
+        y = net_of(r)
+        if y > 1:
+            big.append({"label": r.get("desc") or "Cost", "yearly": y})
+    big.sort(key=lambda x: -x["yearly"])
+    big_names = {b["label"] for b in big[:6]}
+
+    repairs = []
+    for r in state["sections"].get("rm") or []:
+        if skip_from_ordinary(r, state):
+            continue
+        if (r.get("desc") or "") in big_names:
+            continue
+        y = net_of(r)
+        if y > 1:
+            repairs.append({"desc": r.get("desc"), "yearly": y, "plain": _child_plain(r.get("desc") or "")})
+    repairs.sort(key=lambda x: -x["yearly"])
+
+    jobs = []
+    if not state.get("special_in_ordinary"):
+        for r in state["sections"].get("special") or []:
+            y = float(r.get("yearly") or 0)
+            if y > 1:
+                jobs.append({"desc": r.get("desc") or "Project", "yearly": y})
+
+    years = []
+    start = plan_start_year(state)
+    for i in range(10):
+        amt = 0.0
+        for proj in state.get("ymp") or []:
+            ys = proj.get("years") or []
+            if i < len(ys):
+                amt += float(ys[i] or 0)
+        if amt > 1 or any(float(x or 0) > 1 for proj in (state.get("ymp") or []) for x in (proj.get("years") or [])):
+            years.append({"label": str(start + i), "amount": amt})
+    if years and not any(y["amount"] > 1 for y in years):
+        years = []
+
+    calm = "Every number started from last year’s real cost. We did not guess."
+    if recovered > 1000:
+        calm = "The electricity and water an owner uses is paid back, and taken off the levy. " + calm
+    if insurance_on_pq(state):
+        calm = "Insurance is on its own line, so you can see it. " + calm
+
+    if pct is None:
+        why_lead = "These lines cost more than last year."
+    elif pct >= 0.5:
+        why_lead = f"The ordinary levy is {pct:.0f}% higher than last year. Most of that comes from the lines below."
+    elif pct <= -0.5:
+        why_lead = f"The ordinary levy is {abs(pct):.0f}% lower than last year. These lines still moved."
+    else:
+        why_lead = "The levy is about the same as last year. These are the lines that moved."
+
+    bill_note = "A smaller erf pays a smaller share of the levy, the reserve and CSOS."
+    if not share:
+        bill_note = "Load the PQ sheet and this slide will show one owner’s share."
+    elif gross > 1:
+        bill_note = "Your own home’s electricity and water are not inside this total. Those follow your meter."
+
+    return {
+        "name": state.get("complex_name") or "This complex",
+        "year": state.get("fin_year") or "",
+        "units": n_units,
+        "who": who,
+        "ordinary": ordinary,
+        "reserve": reserve,
+        "owner_month": owner_month,
+        "collect_year": collect_year,
+        "pct": pct,
+        "costs": costs[:6],
+        "invoice": invoice,
+        "risers": risers[:5],
+        "why_lead": why_lead,
+        "big": big[:6],
+        "muni": {"gross": gross, "rec": recovered, "net": gross - recovered, "gaps": municipal_gaps(state)} if gross > 1 or recovered > 1 else None,
+        "repairs": repairs[:4],
+        "opening": float(state.get("reserve_balance") or 0),
+        "projects": reserve_project_spend(state),
+        "projected": projected_reserve(state),
+        "jobs": jobs[:4],
+        "years": years,
+        "calm": calm,
+        "bill_note": bill_note,
+    }
+
+
+def generate_meeting_html(state: dict) -> bytes:
+    logo = Path(__file__).parent / "domus_logo.jpeg"
+    return render_meeting_html(meeting_pack(state), logo)
+
+
 def generate_excel(state: dict) -> BytesIO:
     apply_levy_lines(state)
     s = state["sections"]
@@ -3176,19 +3387,28 @@ Confirm the dates and the amount with the auditor or tax practitioner.
     with tabs[10]:
         st.subheader("For the owners")
         st.caption(
-            "A short PowerPoint in plain language, with the Domus logo and this complex’s own numbers. "
-            "It explains why there is a levy, where the money goes, and what one owner pays. "
-            "Download it and present it. Do not read the Excel sheet to the meeting."
+            "Open the presentation in Chrome. Arrow keys move on. F is full screen. "
+            "It explains the levy in plain words, with this complex’s own numbers, so owners can see what they are paying for."
         )
         if not st.session_state.complex_name:
             st.warning("Type the complex name in the sidebar first.")
         elif st.button("Build the presentation", type="primary"):
+            st.session_state["meeting_html"] = generate_meeting_html(st.session_state)
             deck = generate_pptx(st.session_state)
             st.session_state["pptx"] = deck.getvalue()
+        if st.session_state.get("meeting_html"):
+            name = re.sub(r"\s+", "_", st.session_state.complex_name or "budget")
+            st.download_button(
+                "Download the presentation",
+                data=st.session_state["meeting_html"],
+                file_name=f"Budget_presentation_{name}.html",
+                mime="text/html",
+            )
+            st.caption("Open that file. It plays in the browser, like a slide show. You do not need PowerPoint.")
         if st.session_state.get("pptx"):
             name = re.sub(r"\s+", "_", st.session_state.complex_name or "budget")
             st.download_button(
-                "Download PowerPoint",
+                "Or download a PowerPoint file",
                 data=st.session_state["pptx"],
                 file_name=f"Budget_presentation_{name}.pptx",
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
