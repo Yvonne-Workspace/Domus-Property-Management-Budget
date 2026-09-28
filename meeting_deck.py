@@ -11,6 +11,10 @@ def _e(s) -> str:
     return html.escape(str(s or ""), quote=True)
 
 
+def _r(n: float) -> str:
+    return f"R{abs(float(n or 0)):,.0f}"
+
+
 def _short(s: str, n: int = 22) -> str:
     s = str(s or "")
     return s if len(s) <= n else s[: n - 1] + "…"
