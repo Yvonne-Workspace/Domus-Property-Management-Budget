@@ -27,7 +27,7 @@ def render_meeting_html(pack: dict, logo_path: Path | None = None) -> bytes:
         logo = f'<img class="logo" alt="Domus" src="data:image/jpeg;base64,{b64}">'
     slides = "\n".join(_slides(pack, logo))
     fallback = '<span class="wordmark">DOMUS</span>'
-    mark = f'<div class="letterhead">{logo or fallback}<span class="lh-note">Property Management</span></div>'
+    mark = f'<div class="letterhead">{logo or fallback}<span class="lh-note">{_e(pack.get("year") or "")}</span></div>'
     slides = slides.replace('<section class="slide dark">', '<section class="slide dark">' + mark)
     slides = slides.replace('<section class="slide">', '<section class="slide">' + mark)
     name = _e(pack.get("name") or "Budget")
@@ -61,12 +61,12 @@ def _cover(p, logo):
     who = _e(p["who"])
     return f"""
 <section class="slide dark">
-  <div class="blob" style="width:460px;height:460px;background:#1a4736;top:-180px;right:-120px;"></div>
+  <div class="blob" style="width:520px;height:520px;background:rgba(112,248,200,.16);top:-220px;right:-160px;"></div>
   <div style="position:relative;padding-top:28px;">
     <div class="kicker r" style="--d:80">Proposed budget</div>
     <h1 class="r" style="--d:160;font-size:64px;max-width:980px;">{_e(p['name'])}</h1>
     <div class="r" style="--d:240;font-family:var(--head);font-size:26px;color:var(--moss);margin-top:12px;">{_e(p['year'])}</div>
-    <p class="r" style="--d:320;color:#cfe0d4;margin-top:14px;font-size:18px;max-width:640px;">Prepared by Domus, so every owner can see what the year will cost.</p>
+    <p class="r" style="--d:320;color:#d8d8d8;margin-top:14px;font-size:18px;max-width:640px;">Prepared by Domus, so every owner can see what the year will cost.</p>
     <div style="display:flex;gap:16px;margin-top:42px;">
       <div class="card rp" style="--d:420;width:230px;"><div class="num" style="font-size:34px;" data-count="{int(p['units'])}">0</div><div class="mut" style="margin-top:4px;">owners sharing the cost</div></div>
       <div class="card rp" style="--d:520;width:250px;"><div class="num" style="font-size:34px;" data-count="{int(round(p['owner_month']))}" data-prefix="R">R0</div><div class="mut" style="margin-top:4px;">a month for {who}</div></div>
@@ -127,7 +127,7 @@ def _split(p):
     costs = p.get("costs") or []
     if not costs:
         return """<section class="slide"><h1>Where the levy goes</h1><p class="sub">Fill in the costs first. This slide will then show where the money goes.</p></section>"""
-    colors = ["#1b5e43", "#2e7d5b", "#4e9a72", "#7fb685", "#c9751b", "#a7c4a9"]
+    colors = ["#111111", "#70F8C8", "#3A3A3A", "#B8B8B8", "#1A1A1A", "#A8F5DE"]
     circ = 439.82
     rings = []
     off = 0.0
@@ -156,7 +156,7 @@ def _split(p):
     <div class="rp" style="--d:180;flex:0 0 auto;">
       <svg width="300" height="300" viewBox="0 0 200 200">
         <g transform="rotate(-90 100 100)">{''.join(rings)}</g>
-        <text x="100" y="96" text-anchor="middle" style="font-family:var(--head);font-size:18px;font-weight:800;fill:#1b5e43;">{_r(p['ordinary'])}</text>
+        <text x="100" y="96" text-anchor="middle" style="font-family:var(--head);font-size:18px;font-weight:800;fill:#111111;">{_r(p['ordinary'])}</text>
         <text x="100" y="114" text-anchor="middle" style="font-family:var(--body);font-size:8px;fill:#5f6f66;">LEVY FOR THE YEAR</text>
       </svg>
     </div>
@@ -174,7 +174,7 @@ def _bill(p):
         )
     rows.append(
         f'<tr class="tot" style="--d:700"><td>TOTAL</td><td class="money" style="font-size:17px;">{_r(p["owner_month"])}</td>'
-        f'<td style="font-style:italic;color:#c7dbcd;">For {_e(p["who"])}, each month</td></tr>'
+        f'<td style="font-style:italic;color:#70F8C8;">For {_e(p["who"])}, each month</td></tr>'
     )
     return f"""
 <section class="slide">
@@ -195,7 +195,7 @@ def _why(p):
     top = max(r["more"] for r in risers) or 1
     bars = []
     cards = []
-    colors = ["#c9751b", "#1b5e43", "#2e7d5b", "#4e9a72", "#7fb685"]
+    colors = ["#111111", "#70F8C8", "#3A3A3A", "#8A8A8A", "#1A1A1A"]
     for i, r in enumerate(risers[:5]):
         w = max(6, r["more"] / top * 100)
         bars.append(
@@ -319,7 +319,7 @@ def _ten(p):
     for y in years:
         h = 4 if y["amount"] < 1 else max(8, y["amount"] / mx * 210)
         hot = y["amount"] >= mx * 0.98 and y["amount"] > 1
-        col = "#c9751b" if hot else "#1b5e43"
+        col = "#70F8C8" if hot else "#111111"
         cols.append(
             f'<div style="flex:1;text-align:center;"><div class="tval" style="font-size:10px;margin-bottom:4px;">{_r(y["amount"]) if y["amount"]>1 else "R0"}</div>'
             f'<div class="col" style="--h:{h:.0f}px;background:{col};"></div></div>'
@@ -331,7 +331,7 @@ def _ten(p):
   <h1 class="r" style="--d:60">The ten-year plan</h1>
   <p class="sub r" style="--d:80">The taller column is the busiest year.</p>
   <div style="margin-top:18px;">
-    <div style="display:flex;align-items:end;gap:8px;height:280px;border-bottom:2px solid #dce5dd;">{''.join(cols)}</div>
+    <div style="display:flex;align-items:end;gap:8px;height:280px;border-bottom:2px solid #e6e6e6;">{''.join(cols)}</div>
     <div style="display:flex;gap:8px;padding-top:8px;">{''.join(labels)}</div>
   </div>
 </section>"""
@@ -362,10 +362,10 @@ def _ask(p):
 def _end(p):
     return f"""
 <section class="slide dark">
-  <div class="blob" style="width:480px;height:480px;background:#1a4736;top:-160px;right:-140px;"></div>
+  <div class="blob" style="width:520px;height:520px;background:rgba(112,248,200,.16);top:-200px;right:-160px;"></div>
   <div style="position:relative;padding-top:120px;max-width:820px;">
     <h1 class="r" style="--d:120;font-size:72px;">Thank you.</h1>
-    <p class="r" style="--d:260;font-size:20px;color:#d5e6da;margin-top:18px;line-height:1.5;">Questions are welcome.<br>Domus will walk through any line with you.</p>
+    <p class="r" style="--d:260;font-size:20px;color:#e4e4e4;margin-top:18px;line-height:1.5;">Questions are welcome.<br>Domus will walk through any line with you.</p>
   </div>
 </section>"""
 
@@ -380,18 +380,19 @@ _PAGE = r"""<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
-  --forest:#12342a; --forest2:#194536; --green:#1b5e43; --green2:#2e7d5b;
-  --moss:#7fb685; --moss2:#a7c4a9; --pale:#e4efe6; --light:#f4f7f3;
-  --amber:#c9751b; --amber2:#e8a24a; --ink:#16281f; --muted:#5f6f66;
+  --forest:#111111; --forest2:#1c1c1c; --green:#111111; --green2:#2a2a2a;
+  --moss:#70F8C8; --moss2:#A8F5DE; --pale:#F3F3F1; --light:#F6F6F4;
+  --amber:#111111; --amber2:#70F8C8; --ink:#141414; --muted:#6b6b6b;
+  --mint:#70F8C8;
   --head:'Playfair Display', Georgia, serif;
   --body:'Inter', Calibri, 'Segoe UI', Arial, sans-serif;
 }
 *{box-sizing:border-box; margin:0; padding:0;}
 html,body{height:100%;}
-body{background:#0c231c; font-family:var(--body); color:var(--ink); overflow:hidden; display:flex; align-items:center; justify-content:center;}
+body{background:#0a0a0a; font-family:var(--body); color:var(--ink); overflow:hidden; display:flex; align-items:center; justify-content:center;}
 #viewport{position:fixed; inset:0; display:flex; align-items:center; justify-content:center;}
 #stage{width:1280px; height:720px; position:relative; transform-origin:center center; border-radius:14px; overflow:hidden; box-shadow:0 30px 90px rgba(0,0,0,.55);}
-.slide{position:absolute; inset:0; padding:84px 56px 58px; opacity:0; visibility:hidden; transform:translateX(42px) scale(.985); transition:opacity .5s ease, transform .55s cubic-bezier(.22,.9,.3,1), visibility .55s; background:var(--light);}
+.slide{position:absolute; inset:0; padding:148px 56px 52px; opacity:0; visibility:hidden; transform:translateX(42px) scale(.985); transition:opacity .5s ease, transform .55s cubic-bezier(.22,.9,.3,1), visibility .55s; background:var(--light);}
 .slide.dark{background:var(--forest);}
 .slide.active{opacity:1; visibility:visible; transform:none;}
 .slide.prev{transform:translateX(-42px) scale(.985);}
@@ -401,24 +402,24 @@ body{background:#0c231c; font-family:var(--body); color:var(--ink); overflow:hid
 .slide.active .rx{opacity:1; transform:none;}
 .rp{opacity:0; transform:scale(.9);}
 .slide.active .rp{opacity:1; transform:none;}
-.kicker{font-size:12px; font-weight:700; letter-spacing:2.6px; text-transform:uppercase; color:var(--amber); margin-bottom:8px;}
-.dark .kicker{color:var(--moss);}
+.kicker{font-size:12px; font-weight:700; letter-spacing:2.8px; text-transform:uppercase; color:#111; margin-bottom:8px;}
+.dark .kicker{color:var(--mint);}
 h1{font-family:var(--head); font-size:40px; font-weight:800; color:var(--green); line-height:1.08;}
 .dark h1{color:#fff;}
 .sub{font-size:15.5px; color:var(--muted); margin-top:8px; max-width:1080px; line-height:1.45;}
-.dark .sub{color:#c7dbcd;}
+.dark .sub{color:#cfcfcf;}
 h3{font-family:var(--head); font-size:18px; color:var(--green); font-weight:700;}
 .dark h3{color:#fff;}
 p{font-size:14px; line-height:1.5; color:var(--ink);}
-.dark p{color:#d6e6da;}
+.dark p{color:#e8e8e8;}
 .mut{color:var(--muted); font-size:12.5px; line-height:1.45;}
-.dark .mut{color:#aec9b6;}
+.dark .mut{color:#bdbdbd;}
 .num{font-family:var(--head); font-weight:800; color:var(--green); letter-spacing:-.6px;}
 .dark .num{color:#fff;}
-.card{background:#fff; border-radius:11px; padding:16px 18px; box-shadow:0 3px 14px rgba(27,94,67,.11);}
+.card{background:#fff; border-radius:12px; padding:16px 18px; box-shadow:0 10px 30px rgba(0,0,0,.06); border-top:3px solid var(--mint);}
 .dark .card{background:var(--forest2); box-shadow:none;}
 .card.pale{background:var(--pale); box-shadow:none;}
-.card.amber{background:var(--amber);} .card.amber *{color:#fff !important;} .card.amber .mut{color:#fdf0e0 !important;}
+.card.amber{background:#111;} .card.amber *{color:#fff !important;} .card.amber .mut{color:#cfcfcf !important;} .card.amber .num{color:var(--mint) !important;}
 .card.solid{background:var(--green);} .card.solid *{color:#fff !important;}
 .badge{width:36px; height:36px; border-radius:50%; background:var(--pale); display:flex; align-items:center; justify-content:center; flex:0 0 auto;}
 .grid{display:grid; gap:14px;}
@@ -433,33 +434,34 @@ p{font-size:14px; line-height:1.5; color:var(--ink);}
 .dseg{transition:stroke-dasharray 1.3s cubic-bezier(.22,.9,.3,1); stroke-dasharray:0 440;}
 table{width:100%; border-collapse:collapse; font-size:13.5px;}
 thead th{background:var(--green); color:#fff; text-align:left; padding:8px 12px; font-weight:600;}
-tbody td{padding:8px 12px; border-bottom:1px solid #dce5dd;}
-tbody tr:nth-child(odd){background:#ebf1ea;} tbody tr:nth-child(even){background:#fff;}
+tbody td{padding:8px 12px; border-bottom:1px solid #ececec;}
+tbody tr:nth-child(odd){background:#f7f7f5;} tbody tr:nth-child(even){background:#fff;}
 tbody tr.tot td{background:var(--forest); color:#fff; font-weight:600;}
 tbody tr{opacity:0; transform:translateX(-14px); transition:opacity .45s ease, transform .5s ease;}
 .slide.active tbody tr{opacity:1; transform:none; transition-delay:calc(var(--d) * 1ms);}
 .money{font-family:var(--head); font-weight:700;}
 .blob{position:absolute; border-radius:50%; pointer-events:none;}
-.logo{height:34px; background:#fff; border-radius:8px; padding:3px 8px; display:block;}
-.letterhead{position:absolute; top:18px; left:48px; right:48px; display:flex; align-items:center; justify-content:space-between; z-index:4;}
-.letterhead .logo{height:38px;}
-.lh-note{font-size:11px; letter-spacing:2.2px; text-transform:uppercase; color:var(--muted); font-weight:600;}
-.dark .lh-note{color:#d7efe4;}
+.logo{height:96px; width:auto; background:#fff; border-radius:10px; padding:6px 10px; display:block; box-shadow:0 8px 24px rgba(0,0,0,.12);}
+.letterhead{position:absolute; top:16px; left:40px; right:40px; display:flex; align-items:center; justify-content:space-between; z-index:4; padding-bottom:10px; border-bottom:2px solid var(--mint);}
+.letterhead .logo{height:112px;}
+.lh-note{font-size:12px; letter-spacing:2.4px; text-transform:uppercase; color:#111; font-weight:600;}
+.dark .lh-note{color:#fff;}
 .wordmark{font-family:var(--head); font-weight:800; letter-spacing:3px; font-size:18px; color:var(--green);}
 .dark .wordmark{color:#fff;}
-.slide{padding:84px 56px 58px;}
+.slide{padding:148px 56px 52px;}
 @keyframes drift{0%,100%{transform:translate(0,0);} 50%{transform:translate(-16px,18px);}}
 .slide.active .blob{animation:drift 14s ease-in-out infinite;}
-#bar{position:absolute; top:0; left:0; height:4px; background:var(--amber); width:0; transition:width .45s ease; z-index:6;}
+#bar{position:absolute; top:0; left:0; height:5px; background:var(--mint); width:0; transition:width .45s ease; z-index:6;}
 #foot{position:absolute; bottom:0; left:0; right:0; height:36px; display:flex; align-items:center; justify-content:space-between; padding:0 52px; font-size:10.5px; letter-spacing:1.4px; text-transform:uppercase; color:var(--muted); z-index:5;}
-.dark #foot{color:var(--moss);}
+.dark #foot{color:#70F8C8;}
 #dots{display:flex; gap:5px;}
 .dot{width:7px; height:7px; border-radius:50%; background:#c3d3c6; cursor:pointer;}
-.dot.on{background:var(--amber); width:18px; border-radius:4px;}
-.dark .dot{background:#2f5c49;}
+.dot.on{background:#111; width:18px; border-radius:4px;}
+.dark .dot{background:#3a3a3a;}
+.dark .dot.on{background:var(--mint);}
 #ctl{position:fixed; bottom:16px; right:18px; display:flex; gap:8px; z-index:20;}
 #ctl button{background:rgba(255,255,255,.1); color:#dbeade; border:1px solid rgba(255,255,255,.18); border-radius:8px; padding:7px 13px; font-family:var(--body); font-size:12px; cursor:pointer;}
-#hint{position:fixed; bottom:20px; left:18px; color:#6d8c7c; font-size:11.5px; z-index:20;}
+#hint{position:fixed; bottom:20px; left:18px; color:#9a9a9a; font-size:11.5px; z-index:20;}
 </style>
 </head>
 <body>
@@ -504,7 +506,7 @@ tbody tr{opacity:0; transform:translateX(-14px); transition:opacity .45s ease, t
     fnum.textContent = ('0' + (i + 1)).slice(-2) + ' / ' + slides.length;
     dotEls.forEach(function(d, k){ d.classList.toggle('on', k === i); });
     foot.classList.toggle('dark', slides[i].classList.contains('dark'));
-    document.body.style.background = slides[i].classList.contains('dark') ? '#0c231c' : '#0e2a21';
+    document.body.style.background = slides[i].classList.contains('dark') ? '#0a0a0a' : '#141414';
   }
   document.addEventListener('keydown', function(e){
     if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown'){ e.preventDefault(); go(i + 1); }
