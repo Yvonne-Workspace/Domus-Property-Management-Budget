@@ -77,7 +77,7 @@ def norm(s: str) -> str:
 def row(desc: str, note: str = "") -> dict:
     return {
         "id": uid(), "desc": desc, "actual": 0.0, "pct": 0.0, "yearly": 0.0,
-        "insurance": 0.0, "note": note, "is_recovery": False,
+        "insurance": 0.0, "owner_recovery": 0.0, "note": note, "is_recovery": False,
     }
 
 
@@ -173,10 +173,11 @@ def is_muni_recovery(desc: str, flag: bool = False) -> bool:
 def net_of(r: dict) -> float:
     y = float(r.get("yearly") or 0)
     ins = float(r.get("insurance") or 0)
+    own = float(r.get("owner_recovery") or 0)
     if r.get("is_recovery"):
         return -abs(y)
-    # Payout reduces that line; it must not drive the levy negative.
-    return max(0.0, y - ins)
+    # Payout or owner recovery reduces that line. It is not income, and it must not drive the levy negative.
+    return max(0.0, y - ins - own)
 
 
 def sum_net(items: list) -> float:
@@ -1210,25 +1211,37 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
     return nxt, added
 
 
-def items_to_df(items: list, rm: bool) -> pd.DataFrame:
+def items_to_df(items: list, rm: bool, recover: bool = False) -> pd.DataFrame:
     recs = []
+    show_extra = rm or recover
     for it in items:
         actual = float(it.get("actual") or 0)
         yearly = float(it.get("yearly") or 0)
         stored = float(it.get("pct") or 0)
         pct = pct_from_amounts(actual, yearly) if actual >= 0.5 else stored
-        recs.append({
+        ins = float(it.get("insurance") or 0)
+        own = float(it.get("owner_recovery") or 0)
+        net = max(0.0, yearly - ins - own) if show_extra else abs(yearly)
+        rec = {
             "Description": it["desc"],
             "Actual": actual,
             "% Increase": round(pct, 2),
             "Budgeted yearly": yearly,
-            "Monthly": abs(yearly) / 12.0,
-            "Insurance payout": float(it.get("insurance") or 0),
+            "Monthly": net / 12.0,
             "Notes": it.get("note") or "",
-        })
+        }
+        if rm:
+            rec["Insurance payout"] = ins
+        if recover:
+            rec["Recovered from some owners"] = own
+        recs.append(rec)
     cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Notes"]
     if rm:
         cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Insurance payout", "Notes"]
+    if recover:
+        cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Recovered from some owners", "Monthly", "Notes"]
+        if rm:
+            cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Insurance payout", "Recovered from some owners", "Monthly", "Notes"]
     if not recs:
         return pd.DataFrame(columns=cols)
     return pd.DataFrame(recs)[cols]
@@ -1246,6 +1259,10 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
         pct = float(rec.get("% Increase") or 0)
         yearly = abs(float(rec.get("Budgeted yearly") or 0))
         ins = float(rec.get("Insurance payout") or 0) if rm else float(prev.get("insurance") or 0)
+        if "Recovered from some owners" in rec:
+            own = float(rec.get("Recovered from some owners") or 0)
+        else:
+            own = float(prev.get("owner_recovery") or 0)
         old_actual = abs(float(prev.get("actual") or 0))
         old_y = abs(float(prev.get("yearly") or 0))
         shown_pct = pct_from_amounts(old_actual, old_y) if old_actual >= 0.5 else float(prev.get("pct") or 0)
@@ -1271,6 +1288,7 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             "pct": pct,
             "yearly": yearly,
             "insurance": ins,
+            "owner_recovery": own,
             "note": note,
             "is_recovery": recovery,
         })
@@ -2066,7 +2084,7 @@ def generate_excel(state: dict) -> BytesIO:
     named_rows = {}
     levy_comp_rows = []
 
-    def write(items, recovery_as_income=False, in_levy=False):
+    def write(items, recovery_as_income=False, in_levy=False, owner_box=False):
         """Old pack formulas: F = D*(1+E), G = F/12. Recoveries shown as positive income when asked."""
         nonlocal r
         if not items:
@@ -2139,6 +2157,24 @@ def generate_excel(state: dict) -> BytesIO:
             if ins:
                 extra = "Insurance payout " + f"{ins:,.2f}"
                 note = f"{note} | {extra}".strip(" |") if note else extra
+            own = float(it.get("owner_recovery") or 0)
+            if owner_box:
+                if items and r == start:
+                    hc = ws.cell(start - 1, 9, "Recovered from owners")
+                    fill(hc, NAVY)
+                    hc.font = Font(bold=True, color="FFFFFF", size=10)
+                    hc.border = THIN
+                    ws.column_dimensions["I"].width = 22
+                inp(ws.cell(r, 9), own, MONEY)
+                cur = ws.cell(r, 6).value
+                if isinstance(cur, str) and cur.startswith("="):
+                    ws.cell(r, 6).value = f"=MAX(0,({cur[1:]})-N(I{r}))"
+                elif cur is not None:
+                    ws.cell(r, 6).value = f"=MAX(0,{float(cur)}-N(I{r}))"
+                    ws.cell(r, 6).number_format = MONEY
+                if own:
+                    extra = "Recovered from some owners " + f"{own:,.2f}" + ". Not income. Taken off this line."
+                    note = f"{note} | {extra}".strip(" |") if note else extra
             cnote = ws.cell(r, 8, note)
             cnote.font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
             cnote.alignment = Alignment(wrap_text=True, vertical="top")
@@ -2258,11 +2294,11 @@ def generate_excel(state: dict) -> BytesIO:
     exp_items = list(s.get("expenditure") or [])
     if state.get("has_master_hoa"):
         exp_items = exp_items + list(s.get("hoa_expense") or [])
-    a, b = write(exp_items, in_levy=True)
+    a, b = write(exp_items, in_levy=True, owner_box=True)
     exp_tot = tot("TOTAL EXPENDITURE", a, b)
     bar("REPAIR AND MAINTENANCE")
     hdr()
-    a, b = write(s.get("rm") or [], in_levy=True)
+    a, b = write(s.get("rm") or [], in_levy=True, owner_box=True)
     rm_tot = tot("Total Repair and Maintenance", a, b)
     if state.get("reserve_mode") == "rm100" and levy_rows.get("reserve"):
         fml(ws.cell(levy_rows["reserve"], 6), f"F{rm_tot}")
@@ -2523,6 +2559,9 @@ def _apply_budget_sheet(wb, data: dict) -> None:
         note = ws.cell(r, 8).value
         if isinstance(note, str) and note.strip():
             found["note"] = note.strip()
+        got = ws.cell(r, 9).value
+        if isinstance(got, (int, float)):
+            found["owner_recovery"] = abs(float(got))
         if fam == "ordinary":
             continue
         if fam == "reserve" and isinstance(year_v, (int, float)):
@@ -2795,12 +2834,12 @@ def init():
     ss.setdefault("estate_split", "equal")
 
 
-def section_form(key: str, title: str, help_text: str, rm: bool = False):
+def section_form(key: str, title: str, help_text: str, rm: bool = False, recover: bool = False):
     st.subheader(title)
     if help_text:
         st.caption(help_text)
     items = st.session_state.sections.get(key) or []
-    df = items_to_df(items, rm)
+    df = items_to_df(items, rm, recover)
     with st.form(f"form_{key}"):
         edited = st.data_editor(
             df,
@@ -2818,10 +2857,15 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False):
                 "Budgeted yearly": st.column_config.NumberColumn(
                     "Budgeted yearly",
                     format="%.2f",
-                    help="Or type the rand amount then Save. We fill in the %.",
+                    help="The full bill. Or type the rand amount then Save. We fill in the %.",
                 ),
-                "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="Budgeted yearly ÷ 12. Always positive. Recoveries are subtracted only in the net."),
+                "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="What goes into the levy, per month. Owner recoveries and insurance payouts are already taken off."),
                 "Insurance payout": st.column_config.NumberColumn("Insurance payout", format="%.2f"),
+                "Recovered from some owners": st.column_config.NumberColumn(
+                    "Recovered from some owners",
+                    format="%.2f",
+                    help="What some owners pay towards this same bill. Not income. Not a levy column. The levy carries the bill minus this.",
+                ),
                 "Notes": st.column_config.TextColumn("Notes", width="large", help="Shows on the Excel Comments / Notes column. Click Save after typing."),
             },
             disabled=["Monthly"],
@@ -3222,6 +3266,10 @@ The **% on Levies received** is only the result of those costs. Do not type over
 - A master-estate levy, if owners pay another estate through us
 - Garden service, if owners pay the gardener themselves (set that line to R0)
 
+Some owners may pay part of one bill, for example a private refuse company. That is not income and not municipal.
+On **Expenditure** or **Repair & Maintenance**, type the full bill in Budgeted yearly, and what those owners pay in **Recovered from some owners**.
+The levy carries the bill minus that amount. There is no extra column on the PQ sheet.
+
 ### 5. Reserve fund
 Pick one, for a body corporate **or** an HOA:
 
@@ -3497,9 +3545,11 @@ Do not use Erase everything unless you mean to wipe the screen.
             "expenditure",
             "Expenditure",
             "Operating costs except R&M, personnel and tax. "
-            "CSOS Levies (Expense) is locked to CSOS income — same rand. Last year’s Actuals can differ (timing). "
-            "If owners pay the gardener themselves, set Garden service to R0 (omit it from the budget). "
-            "Garden Expenses on Repair & Maintenance is different — that stays in the levy.",
+            "Budgeted yearly is the full bill. Recovered from some owners is what only some owners pay towards that same bill. "
+            "It is not income and not a levy column. The levy carries the bill minus that recovery. "
+            "CSOS Levies (Expense) is locked to CSOS income — same rand. "
+            "If owners pay the gardener themselves, set Garden service to R0.",
+            recover=True,
         )
 
     with tabs[4]:
@@ -3518,10 +3568,11 @@ Do not use Erase everything unless you mean to wipe the screen.
         section_form(
             "rm",
             "Repair and Maintenance",
-            "Type an insurance payout on the line it belongs to, then Save. "
-            "Budgeted yearly = the job. Insurance payout = what the insurer pays (a deduction). "
-            "Net in the levy = yearly − payout, never below R0. Do not type the new fire budget in Insurance payout.",
+            "Budgeted yearly is the full job. Insurance payout is what the insurer pays. "
+            "Recovered from some owners is what only some owners pay towards that same job. Neither is income. "
+            "The levy carries the job minus those two, never below R0.",
             rm=True,
+            recover=True,
         )
 
     with tabs[5]:
