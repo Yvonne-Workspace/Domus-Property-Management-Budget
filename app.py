@@ -2167,7 +2167,7 @@ def generate_excel(state: dict) -> BytesIO:
         fml(ws.cell(r, 7), f"G{ord_row}")
         r += 1
         ws.cell(r, 2, "Approved %")
-        ws.cell(r, 8, "Type 10% here if the meeting wants 10%. The yearly amount follows. Or use the rand box instead.")
+        ws.cell(r, 8, "Trustees: type the % the meeting agrees, for example 10%. Do not type on the Levies received % — that one will not stick.")
         ws.cell(r, 8).font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
         ws.cell(r, 8).alignment = Alignment(wrap_text=True)
         pct_cell = ws.cell(r, 5)
@@ -2482,6 +2482,74 @@ RESTORE_BARS = [
 ]
 
 
+def _apply_budget_sheet(wb, data: dict) -> None:
+    """Trustees edit the sheet in the meeting. Those cells win when the file comes back."""
+    if "BUDGET" not in getattr(wb, "sheetnames", []):
+        return
+    ws = wb["BUDGET"]
+    sections = data.setdefault("sections", {})
+    current = None
+    for r in range(1, int(ws.max_row or 1) + 1):
+        desc = str(ws.cell(r, 2).value or "").strip()
+        if not desc:
+            continue
+        low = desc.lower()
+        if low in ("description", "gl code"):
+            continue
+        if low.startswith((
+            "meeting decision", "what the costs", "approved %", "approved budget",
+            "approved monthly", "or type the rand", "gap", "total", "under-recovery",
+            "under recovery", "ordinary levies =",
+        )):
+            continue
+        d_val = ws.cell(r, 4).value
+        f_val = ws.cell(r, 6).value
+        mapped = next((k for title, k in RESTORE_BARS if title in low and "total" not in low and "check" not in low), None)
+        if mapped and d_val is None and f_val is None:
+            current = mapped
+            continue
+        if current is None:
+            continue
+        items = sections.setdefault(current, [])
+        found = next((it for it in items if norm(it.get("desc") or "") == norm(desc)), None)
+        if found is None:
+            found = row(desc, "")
+            items.append(found)
+        if isinstance(d_val, (int, float)):
+            found["actual"] = abs(float(d_val))
+        pct_v = ws.cell(r, 5).value
+        year_v = f_val
+        fam = family(desc)
+        note = ws.cell(r, 8).value
+        if isinstance(note, str) and note.strip():
+            found["note"] = note.strip()
+        if fam == "ordinary":
+            continue
+        if fam == "reserve" and isinstance(year_v, (int, float)):
+            found["yearly"] = abs(float(year_v))
+            data["reserve_mode"] = "amount"
+            data["reserve_amount"] = found["yearly"]
+            a = float(found.get("actual") or 0)
+            found["pct"] = 0.0 if a < 0.5 else (found["yearly"] / a) * 100 - 100
+            continue
+        if fam in ("csos_inc", "csos_exp") and isinstance(year_v, (int, float)):
+            found["yearly"] = abs(float(year_v))
+            data["auto_csos"] = False
+            a = float(found.get("actual") or 0)
+            found["pct"] = 0.0 if a < 0.5 else (found["yearly"] / a) * 100 - 100
+            continue
+        if isinstance(year_v, (int, float)):
+            found["yearly"] = abs(float(year_v))
+            a = float(found.get("actual") or 0)
+            if a > 0.5:
+                found["pct"] = (found["yearly"] / a) * 100 - 100
+        elif isinstance(pct_v, (int, float)):
+            p = float(pct_v)
+            found["pct"] = p * 100 if abs(p) <= 2 else p
+            a = float(found.get("actual") or 0)
+            found["yearly"] = a * (1 + float(found["pct"]) / 100.0)
+
+
 def _read_meeting_from_sheet(wb, data: dict) -> None:
     """A % or rand typed in the meeting wins over the saved choice."""
     if "BUDGET" not in getattr(wb, "sheetnames", []):
@@ -2489,7 +2557,7 @@ def _read_meeting_from_sheet(wb, data: dict) -> None:
     ws = wb["BUDGET"]
     pct_v = None
     rand_v = None
-    for r in range(1, min(int(ws.max_row or 1), 160) + 1):
+    for r in range(1, int(ws.max_row or 1) + 1):
         label = str(ws.cell(r, 2).value or "")
         if label.startswith("Approved %"):
             pct_v = ws.cell(r, 5).value
@@ -2544,6 +2612,7 @@ def restore_from_app_excel(uploaded) -> dict:
         wb = load_workbook(bio, data_only=False, read_only=False)
         packed = _restore_from_domus_sheet(wb)
         if packed:
+            _apply_budget_sheet(wb, packed)
             _read_meeting_from_sheet(wb, packed)
             try:
                 recs, _msg = parse_pq_upload(BytesIO(raw))
@@ -3230,8 +3299,10 @@ Download Excel for the meeting. Yellow cells can be changed in the meeting. To c
         st.divider()
         st.subheader("Meeting decision — Levies received")
         st.caption(
-            "The % on the Levies received line is only the result of the costs. It will not move if you type over it. "
-            "Choose here what the trustees approve. The PQ schedule uses this amount. The cost total stays on the sheet as the reference."
+            "You do not set this before the meeting. Download the sheet. "
+            "In the meeting the trustees type on the yellow **Approved %**, or type a rand in **Or type the rand for the year**. "
+            "They can also change the other yellow cells. When they send the file back, use **Restore my budget**. "
+            "The % on the Levies received line itself still will not stick."
         )
         _mode = st.radio(
             "What should owners be charged?",
