@@ -346,6 +346,27 @@ def ordinary_total(state: dict) -> float:
     return total
 
 
+def ordinary_actual(state: dict) -> float:
+    for r in state["sections"].get("levy") or []:
+        if family(r.get("desc") or "") == "ordinary":
+            return float(r.get("actual") or 0)
+    return 0.0
+
+
+def approved_ordinary(state: dict) -> float:
+    """What owners are charged. Costs stay the reference until the meeting types a % or a rand."""
+    costs = ordinary_total(state)
+    mode = state.get("levy_approve_mode") or "costs"
+    if mode == "amount":
+        amt = float(state.get("levy_approved_amount") or 0)
+        return amt if amt > 0.5 else costs
+    if mode == "pct":
+        actual = ordinary_actual(state)
+        if actual > 0.5:
+            return actual * (1 + float(state.get("levy_approved_pct") or 0) / 100.0)
+    return costs
+
+
 def levy_pieces(state: dict) -> list:
     s = state["sections"]
     return [
@@ -487,8 +508,9 @@ def apply_levy_lines(state: dict) -> None:
             r["yearly"] = reserve_contribution(state)
             a = float(r.get("actual") or 0)
             r["pct"] = 0.0 if a == 0 else (float(r["yearly"]) / a) * 100 - 100
+    charged = approved_ordinary(state)
     if state.get("auto_csos", True):
-        csos_y = scheme_csos_yearly(state, ord_amt)
+        csos_y = scheme_csos_yearly(state, charged)
     else:
         csos_y = 0.0
         for r in state["sections"]["levy"]:
@@ -564,10 +586,10 @@ def pq_bill_lines(state: dict) -> list:
 
     for r in s.get("levy", []):
         if family(r["desc"]) == "ordinary":
-            add("Levies", r.get("yearly"))
+            add("Levies", approved_ordinary(state))
             break
     if not out:
-        add("Levies", ordinary_total(state))
+        add("Levies", approved_ordinary(state))
     if state.get("has_master_hoa"):
         for r in s.get("hoa_income", []):
             if float(r.get("yearly") or 0) or float(r.get("actual") or 0):
@@ -1734,7 +1756,12 @@ def generate_pptx(state: dict) -> BytesIO:
     kicker(s, "Please approve", True)
     text(s, 0.45, 2.15, 12, 0.55, [("For your approval", 32, True, WHITE)])
     asks = [
-        ("1", "Approve the budget", f"Ordinary levies of {_r0(pack['ordinary'])} for the year."),
+        ("1", "Approve the budget", (
+            f"Trustees approve {_r0(pack.get('approved', pack['ordinary']))}. "
+            f"The costs need {_r0(pack['ordinary'])}. Gap {_r0(pack.get('levy_gap') or 0)}."
+            if (pack.get("levy_gap") or 0) > 1
+            else f"Ordinary levies of {_r0(pack['ordinary'])} for the year."
+        )),
         ("2", f"Approve what {pack['who']} pays", f"{_r0(pack['owner_month'])} a month."),
         ("3", "Approve the reserve", f"{_r0(pack['reserve'])} added to the reserve this year."),
     ]
@@ -1808,9 +1835,11 @@ def _invoice_plain(name: str, split: str) -> str:
 
 
 def meeting_pack(state: dict) -> dict:
-    ordinary = ordinary_total(state)
+    costs = ordinary_total(state)
+    approved = approved_ordinary(state)
+    ordinary = costs
     reserve = reserve_contribution(state)
-    csos = scheme_csos_yearly(state, ordinary) if state.get("auto_csos", True) else 0.0
+    csos = scheme_csos_yearly(state, approved) if state.get("auto_csos", True) else 0.0
     share, who = _typical_share(state)
     units = [u for u in (state.get("pq") or []) if float(u.get("PQ") or 0) > 1e-8]
     n_units = len(units)
@@ -1940,6 +1969,8 @@ def meeting_pack(state: dict) -> dict:
         "units": n_units,
         "who": who,
         "ordinary": ordinary,
+        "approved": approved,
+        "levy_gap": ordinary - approved,
         "reserve": reserve,
         "owner_month": owner_month,
         "collect_year": collect_year,
@@ -2125,6 +2156,50 @@ def generate_excel(state: dict) -> BytesIO:
     bar("INCOME")
     hdr()
     a, b = write(s["levy"])
+    approved_row = None
+    if levy_rows.get("ordinary"):
+        ord_row = levy_rows["ordinary"]
+        bar("MEETING DECISION — Levies received")
+        ws.cell(r, 2, "What the costs need").font = Font(bold=True)
+        fml(ws.cell(r, 5), f"E{ord_row}")
+        ws.cell(r, 5).number_format = "0.00%"
+        fml(ws.cell(r, 6), f"F{ord_row}")
+        fml(ws.cell(r, 7), f"G{ord_row}")
+        r += 1
+        ws.cell(r, 2, "Approved %")
+        ws.cell(r, 8, "Type 10% here if the meeting wants 10%. The yearly amount follows. Or use the rand box instead.")
+        ws.cell(r, 8).font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
+        ws.cell(r, 8).alignment = Alignment(wrap_text=True)
+        pct_cell = ws.cell(r, 5)
+        mode = state.get("levy_approve_mode") or "costs"
+        if mode == "pct":
+            inp(pct_cell, float(state.get("levy_approved_pct") or 0) / 100.0, "0.00%")
+        else:
+            pct_cell.value = f"=E{ord_row}"
+            pct_cell.number_format = "0.00%"
+            fill(pct_cell, YELLOW)
+            pct_cell.font = Font(name="Calibri", color=BLUE, size=10)
+            pct_cell.border = THIN
+        pct_row = r
+        r += 1
+        ws.cell(r, 2, "Or type the rand for the year")
+        ws.cell(r, 8, "Leave 0 to use the %. Type a rand amount here if the meeting names a figure instead of a %.")
+        ws.cell(r, 8).font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
+        ws.cell(r, 8).alignment = Alignment(wrap_text=True)
+        rand_amt = float(state.get("levy_approved_amount") or 0) if mode == "amount" else 0.0
+        inp(ws.cell(r, 6), rand_amt, MONEY)
+        rand_row = r
+        r += 1
+        ws.cell(r, 2, "Approved budget for the year").font = Font(bold=True)
+        fml(ws.cell(r, 6), f"IF(F{rand_row}>0,F{rand_row},D{ord_row}*(1+E{pct_row}))", "C6EFCE")
+        fml(ws.cell(r, 7), f"F{r}/12", "C6EFCE")
+        approved_row = r
+        r += 1
+        ws.cell(r, 2, "Gap — costs minus approved. Above zero means the costs are still higher.")
+        ws.cell(r, 2).font = Font(italic=True, size=9, color="9C0006")
+        fml(ws.cell(r, 6), f"F{ord_row}-F{approved_row}", RED)
+        fml(ws.cell(r, 7), f"F{r}/12", RED)
+        r += 2
     inc_tot = tot("TOTAL INCOME", a, b)
     bar("OTHER INCOME")
     hdr()
@@ -2243,7 +2318,7 @@ def generate_excel(state: dict) -> BytesIO:
     bills = pq_bill_lines(state)
     pq["B3"] = "Monthly"
     name_to_budget = {
-        "Levies": f"BUDGET!G{levy_rows['ordinary']}" if levy_rows.get("ordinary") else None,
+        "Levies": f"BUDGET!G{approved_row}" if approved_row else (f"BUDGET!G{levy_rows['ordinary']}" if levy_rows.get("ordinary") else None),
         "CSOS": f"BUDGET!G{levy_rows['csos']}" if levy_rows.get("csos") else None,
         "Reserve Fund": f"BUDGET!G{levy_rows['reserve']}" if levy_rows.get("reserve") else None,
         "Insurance": f"BUDGET!G{levy_rows['insurance']}" if levy_rows.get("insurance") else None,
@@ -2369,7 +2444,9 @@ def generate_excel(state: dict) -> BytesIO:
         "scheme_type": state.get("scheme_type") or "bc",
         "special_in_ordinary": bool(state.get("special_in_ordinary")),
         "current_monthly_levy": float(state.get("current_monthly_levy") or 0),
-        "actual_months": int(state.get("actual_months") or 12),
+        "levy_approved_pct": float(state.get("levy_approved_pct") or 0),
+        "levy_approved_amount": float(state.get("levy_approved_amount") or 0),
+        "levy_approve_mode": state.get("levy_approve_mode") or "costs",
     }
     blob = json.dumps(payload, ensure_ascii=False)
     # Excel cell cap is 32767; split across rows if needed.
@@ -2403,6 +2480,34 @@ RESTORE_BARS = [
     ("levy income", "levy"),
     ("income", "levy"),
 ]
+
+
+def _read_meeting_from_sheet(wb, data: dict) -> None:
+    """A % or rand typed in the meeting wins over the saved choice."""
+    if "BUDGET" not in getattr(wb, "sheetnames", []):
+        return
+    ws = wb["BUDGET"]
+    pct_v = None
+    rand_v = None
+    for r in range(1, min(int(ws.max_row or 1), 160) + 1):
+        label = str(ws.cell(r, 2).value or "")
+        if label.startswith("Approved %"):
+            pct_v = ws.cell(r, 5).value
+        elif label.startswith("Or type the rand"):
+            rand_v = ws.cell(r, 6).value
+    if isinstance(rand_v, (int, float)) and float(rand_v) > 0.5:
+        data["levy_approve_mode"] = "amount"
+        data["levy_approved_amount"] = float(rand_v)
+        return
+    if isinstance(pct_v, str) and pct_v.startswith("="):
+        data["levy_approve_mode"] = "costs"
+        return
+    if isinstance(pct_v, (int, float)):
+        pct = float(pct_v)
+        if abs(pct) <= 2:
+            pct *= 100.0
+        data["levy_approve_mode"] = "pct"
+        data["levy_approved_pct"] = pct
 
 
 def _restore_from_domus_sheet(wb) -> dict | None:
@@ -2439,6 +2544,7 @@ def restore_from_app_excel(uploaded) -> dict:
         wb = load_workbook(bio, data_only=False, read_only=False)
         packed = _restore_from_domus_sheet(wb)
         if packed:
+            _read_meeting_from_sheet(wb, packed)
             try:
                 recs, _msg = parse_pq_upload(BytesIO(raw))
                 if recs:
@@ -2491,6 +2597,11 @@ def restore_from_app_excel(uploaded) -> dict:
                 current = mapped
                 continue
             if current is None:
+                continue
+            if low.startswith((
+                "meeting decision", "what the costs", "approved %", "approved budget",
+                "approved monthly", "or type the rand", "gap",
+            )):
                 continue
             if re.match(r"^(description|total |net |ordinary levy|current reserve|this year’s|projected)", desc, re.I):
                 continue
@@ -2598,6 +2709,9 @@ def init():
     ss.setdefault("msg", "")
     ss.setdefault("current_monthly_levy", 0.0)
     ss.setdefault("actual_months", 12)
+    ss.setdefault("levy_approve_mode", "costs")
+    ss.setdefault("levy_approved_pct", 0.0)
+    ss.setdefault("levy_approved_amount", 0.0)
     ss.setdefault("estate_levy_yearly", 0.0)
     ss.setdefault("estate_levy_name", "Estate / master HOA levy")
     ss.setdefault("estate_levy_mode", "separate")
@@ -2685,7 +2799,8 @@ def main():
     current_m = float(st.session_state.get("current_monthly_levy") or 0)
     if current_m <= 0 and actual_year_full > 0:
         current_m = actual_year_full / 12
-    new_m = ord_amt / 12
+    approved = approved_ordinary(st.session_state)
+    new_m = approved / 12
     levy_pct = 0.0 if current_m == 0 else (new_m / current_m) * 100 - 100
 
     if actual_year > 0 and ord_amt > 0 and 8 <= (ord_amt / actual_year) <= 15:
@@ -2700,7 +2815,7 @@ def main():
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("What owners pay now (monthly)", money(current_m))
     m2.metric("What owners will pay (monthly)", money(new_m), delta=f"{levy_pct:+.1f}%")
-    m3.metric("Ordinary levies for the year", money(ord_amt))
+    m3.metric("Approved ordinary levy", money(approved))
     m4.metric("Reserve for the year", money(float(reserve["yearly"]) if reserve else 0))
     xanadu_left = 0.0
     for r in (s.get("expenditure") or []) + (s.get("hoa_expense") or []):
@@ -2735,7 +2850,14 @@ def main():
         for label, amt in levy_pieces(st.session_state):
             if amt or "Special" not in label:
                 st.write(f"- {label}: **{money(amt)}**")
-        st.write(f"- **Ordinary levies for the year: {money(ord_amt)}**  →  monthly **{money(ord_amt/12)}**")
+        st.write(f"- **What the costs need: {money(ord_amt)}** for the year ({money(ord_amt / 12)} a month).")
+        if abs(ord_amt - approved) > 1:
+            st.write(
+                f"- **What the meeting approves: {money(approved)}** "
+                f"({money(approved / 12)} a month). "
+                f"Gap **{money(ord_amt - approved)}**. "
+                "A gap above zero means a cost must come down, or the reserve covers it."
+            )
         flags = odd_budget_lines(st.session_state)
         if flags:
             st.warning("These lines are making the levy jump. Fix them on the tabs, then Save — you do not need to start over.")
@@ -2838,6 +2960,7 @@ def main():
                     "has_master_hoa", "insurance_mode", "insurance_bill_yearly", "auto_csos",
                     "reserve_mode", "reserve_amount", "reserve_balance", "scheme_type", "special_in_ordinary",
                     "current_monthly_levy", "actual_months",
+                    "levy_approve_mode", "levy_approved_pct", "levy_approved_amount",
                 ):
                     if k in data and data[k] is not None:
                         st.session_state[k] = data[k]
@@ -3101,10 +3224,58 @@ Download Excel for the meeting. Yellow cells can be changed in the meeting. To c
             help="2% of (monthly admin levy minus R500), maximum R40 per unit per month. CSOS is its own column, not inside ordinary levies.",
         )
         if st.session_state.auto_csos and st.session_state.pq:
-            own = scheme_csos_yearly(st.session_state, ordinary_total(st.session_state))
+            own = scheme_csos_yearly(st.session_state, approved_ordinary(st.session_state))
             st.caption(f"This scheme’s CSOS = {money(own)} a year ({money(own/12)} / month for the complex). It is a PQ column, not part of ordinary levies.")
         st.divider()
-        section_form("levy", "Levy Income", "Ordinary, Reserve and CSOS. CSOS income = CSOS expense (we collect it and pay it on). Add boathouse / extra levy types with a new row, then Save.")
+        st.divider()
+        st.subheader("Meeting decision — Levies received")
+        st.caption(
+            "The % on the Levies received line is only the result of the costs. It will not move if you type over it. "
+            "Choose here what the trustees approve. The PQ schedule uses this amount. The cost total stays on the sheet as the reference."
+        )
+        _mode = st.radio(
+            "What should owners be charged?",
+            ["costs", "pct", "amount"],
+            format_func=lambda x: {
+                "costs": "What the costs need",
+                "pct": "A % on last year’s levies",
+                "amount": "A rand amount for the year",
+            }[x],
+            index=["costs", "pct", "amount"].index(st.session_state.get("levy_approve_mode") or "costs"),
+            key="levy_approve_mode",
+        )
+        _costs_now = ordinary_total(st.session_state)
+        _actual_now = ordinary_actual(st.session_state)
+        if _mode == "pct":
+            st.number_input(
+                "Approved % (type 10 for 10%)",
+                step=0.5,
+                key="levy_approved_pct",
+                help="10 means last year’s levies plus 10%.",
+            )
+        elif _mode == "amount":
+            st.number_input(
+                "Approved amount for the year",
+                min_value=0.0,
+                step=1000.0,
+                key="levy_approved_amount",
+            )
+        _approved_now = approved_ordinary(st.session_state)
+        _gap_now = _costs_now - _approved_now
+        st.write(
+            f"Costs need **{money(_costs_now)}** ({money(_costs_now / 12)} a month). "
+            f"Approved **{money(_approved_now)}** ({money(_approved_now / 12)} a month)."
+        )
+        if _actual_now > 0.5 and _mode == "pct":
+            st.caption(f"Last year’s levies on the line: {money(_actual_now)}.")
+        if _gap_now > 1:
+            st.warning(
+                f"Gap {money(_gap_now)}. The costs are still higher than the approved levy. "
+                "Cut a cost, or the meeting must take this from the reserve."
+            )
+        elif _gap_now < -1:
+            st.info(f"The approved levy is {money(-_gap_now)} more than the costs. That extra stays in the funds.")
+        section_form("levy", "Levy Income", "Ordinary, Reserve and CSOS. The ordinary levy line shows what the costs need. The meeting decision above is what the PQ uses. CSOS income = CSOS expense. Add a row if you need another levy, then Save.")
         st.session_state.has_master_hoa = st.checkbox(
             "We still bill an estate levy to owners (they pay it through us).",
             value=bool(st.session_state.get("has_master_hoa")),
