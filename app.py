@@ -1483,31 +1483,35 @@ def generate_pptx(state: dict) -> BytesIO:
     logo = Path(__file__).parent / "domus_logo.jpeg"
     INK, MINT, CREAM, WHITE, MUTED, SOFT = "111111", "70F8C8", "F6F6F4", "FFFFFF", "6B6B6B", "F3F3F1"
 
-    def morph(sld):
+    def morph(sld, ms=1600):
         el = sld._element
         for child in list(el):
             if child.tag.endswith("transition"):
                 el.remove(child)
         el.append(etree.fromstring(
             '<p:transition xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
-            'xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" spd="slow" p14:dur="1600">'
+            'xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" spd="slow" p14:dur="%d">'
             '<p159:morph xmlns:p159="http://schemas.microsoft.com/office/powerpoint/2015/09/main" option="byObject"/>'
-            '</p:transition>'
+            '</p:transition>' % ms
         ))
 
-    def slide(dark=False, hero=False):
+    def slide(dark=False, hero=False, full=False, dur=1600):
         s = prs.slides.add_slide(blank)
         fill = s.background.fill
         fill.solid()
         fill.fore_color.rgb = _rgb(INK if dark else CREAM)
-        morph(s)
+        morph(s, dur)
         if logo.exists():
-            if hero:
+            if full:
+                pic = s.shapes.add_picture(str(logo), Inches(-2.1), Inches(-0.08), width=Inches(17.55))
+            elif hero:
                 pic = s.shapes.add_picture(str(logo), Inches(0.5), Inches(2.05), width=Inches(4.7))
             else:
                 pic = s.shapes.add_picture(str(logo), Inches(0.38), Inches(0.16), width=Inches(3.15))
             pic.name = "!!logo"
-        if hero:
+        if full:
+            rule = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(1.2), Inches(3.7), Inches(10.9), Inches(0.08))
+        elif hero:
             rule = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.5), Inches(4.25), Inches(4.7), Inches(0.07))
         else:
             rule = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.38), Inches(1.68), Inches(12.55), Inches(0.045))
@@ -1515,9 +1519,9 @@ def generate_pptx(state: dict) -> BytesIO:
         rule.fill.fore_color.rgb = _rgb(MINT)
         rule.line.fill.background()
         rule.name = "!!rule"
-        if pack.get("year") and not hero:
+        if pack.get("year") and not hero and not full:
             text(s, 6.4, 0.55, 6.4, 0.35, [(pack["year"], 13, False, WHITE if dark else INK)], align="right")
-        if not hero:
+        if not hero and not full:
             text(s, 0.4, 7.08, 8, 0.28, [(f"Domus  ·  {pack['name']}", 11, False, MINT if dark else MUTED)])
         return s
 
@@ -1556,8 +1560,9 @@ def generate_pptx(state: dict) -> BytesIO:
     def kicker(s, msg, dark=False):
         text(s, 0.45, 1.82, 12, 0.32, [(msg.upper(), 12, True, MINT if dark else INK)])
 
-    # 1 Cover — logo starts large, then Morph carries it up into the corner
-    s = slide(True, hero=True)
+    # Opening: the logo fills the screen, then zooms out onto the first page
+    slide(True, full=True)
+    s = slide(True, hero=True, dur=2600)
     text(s, 5.6, 2.15, 7.2, 1.15, [(pack["name"], 36, True, WHITE, 0)])
     text(s, 5.6, 3.35, 7.2, 0.9, [(pack.get("year") or "", 16, False, MINT, 6), ("Prepared by Domus, so every owner can see what the year will cost.", 16, False, "E4E4E4", 0)])
     tiles = [
@@ -3449,7 +3454,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 file_name=f"Budget_presentation_{name}.pptx",
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
             )
-            st.caption("Open it in PowerPoint and press F5. The Domus logo glides, the way the Morph tutorials do. It will not move if you only scroll the slides in edit view.")
+            st.caption("Open it in PowerPoint and press F5. The logo fills the first screen, then zooms out onto the budget. The last page is unchanged. It only moves in the slideshow, not while you scroll in edit view.")
 
     with tabs[11]:
         st.subheader("Download Excel")
