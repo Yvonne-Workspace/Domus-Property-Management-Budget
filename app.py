@@ -3212,6 +3212,8 @@ Ordinary levies are **not** last year’s levy plus a %.
 
 **Net municipal** = what the city bills us, minus what owners pay back (electricity, water, sewer, refuse).
 
+The **% on Levies received** is only the result of those costs. Do not type over it. It will not stick.
+
 **Left out of ordinary** (they have their own columns, or they are R0):
 
 - Reserve fund
@@ -3227,6 +3229,10 @@ Pick one, for a body corporate **or** an HOA:
 - 15% of last year’s ordinary levy (Actual)
 - 25% of last year’s ordinary levy (Actual)
 - 100% of this year’s repairs and maintenance
+
+The amount shows on the **Reserve Fund Contribution** line (yearly and monthly), and in the box at the top of the Excel sheet. Those two are the same figure.
+
+If last year had no reserve contribution, Actual on that line stays 0. That is fine. The budgeted amount is still this year’s contribution.
 
 An HOA uses whichever option the MOI or the members approved. A body corporate also sees the Act’s minimum as a note. The note does not override your choice.
 
@@ -3251,8 +3257,25 @@ Levies are not taxed. Interest, investment income and rent above **R50,000** can
 Upload the unit PQ file. Each owner’s levy = their PQ × the monthly total.
 On the 10-year plan, **Year 1 is this budget year**. Paste or upload the plan, then **Copy Year 1 into Special Projects** only if levies must pay for that work this year. If the reserve pays for it, leave the special-projects tick off.
 
-### 11. Download
-Download Excel for the meeting. Yellow cells can be changed in the meeting. To carry on later, **Restore** that file. Do not use Erase everything unless you mean to wipe the screen.
+### 11. The meeting sheet
+You do not set the levy % in the app. Set up the budget, then **Download Excel**. The trustees work on that sheet and send it back.
+
+On the sheet, under Levies received, there is one yellow line: **Approved — type a % or a rand**.
+
+- They type the % the meeting agrees (10 means plus 10% on last year’s levies).
+- Or they type a rand amount over the yearly figure and leave the %.
+- **What the costs need** stays as it is. That is the reference.
+- **Gap** is the costs minus the approved amount. Above zero means the costs are still higher. They cut a cost, or they take the gap from the reserve.
+- The PQ sheet uses the **approved** amount, not the cost total.
+
+They can also change the other yellow cells (a cost, a note, the reserve if it is an own amount).
+
+Do **not** type on the % next to Levies received. That % is worked out from the costs. It jumps back.
+
+### 12. When the sheet comes back
+**Restore my budget** and choose the file they sent. Their approved levy, the other yellow cells, and the notes come back into the app. Then download again if you need a clean sheet.
+
+Do not use Erase everything unless you mean to wipe the screen.
             """
         )
 
