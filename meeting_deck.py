@@ -339,7 +339,11 @@ def _ten(p):
 
 def _ask(p):
     items = [
-        ("1", "Approve the budget", f"Ordinary levies of {_r(p['ordinary'])} for the year."),
+        ("1", "Approve the budget", (
+            f"Trustees approve {_r(p.get('approved', p['ordinary']))}. The costs need {_r(p['ordinary'])}. The gap is {_r(p.get('levy_gap') or 0)}."
+            if (p.get("levy_gap") or 0) > 1
+            else f"Ordinary levies of {_r(p['ordinary'])} for the year."
+        )),
         ("2", f"Approve what {_e(p['who'])} pays", f"{_r(p['owner_month'])} a month, levy plus reserve plus CSOS."),
         ("3", "Approve the reserve", f"{_r(p['reserve'])} added to the reserve this year."),
     ]
