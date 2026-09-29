@@ -2115,7 +2115,10 @@ def generate_excel(state: dict) -> BytesIO:
                 scale = f"*12/{months}" if months < 12 else ""
                 fml(ws.cell(r, 6), f"0.25*D{levy_rows['ordinary']}{scale}")
             elif fam == "reserve" and state.get("reserve_mode") == "rm100":
-                pass  # filled once the R&M total row exists
+                # Number first so the line is never blank. Linked to the R&M total once that row exists.
+                inp(ws.cell(r, 6), float(reserve_contribution(state) or y or 0), MONEY)
+            elif fam == "reserve":
+                inp(ws.cell(r, 6), float(reserve_contribution(state) or y or 0), MONEY)
             elif is_own_scheme_csos(desc) and fam == "csos_exp" and levy_rows.get("csos"):
                 fml(ws.cell(r, 6), f"F{levy_rows['csos']}")
             elif rec and not recovery_as_income:
@@ -2732,7 +2735,15 @@ def apply_falcon_view_notes(state: dict) -> None:
         return
     notes = {
         "levies received": "Ordinary levy for the year, worked out from the costs. The 27.42% is the change from last year’s R1,259,000. It was not typed in as an increase.",
-        "reserve fund contribution": "R539,604.12, equal to 100% of this year’s repairs and maintenance. Collected so the reserve can pay the 10-year plan. Interest is already in the opening balance and is not added again.",
+        "reserve fund contribution": (
+            f"{money(reserve_contribution(state))} this year. "
+            + (
+                "Equal to 100% of this year’s repairs and maintenance. "
+                if state.get("reserve_mode") == "rm100"
+                else "Collected for the reserve. "
+            )
+            + "Interest is already in the opening balance and is not added again."
+        ),
         "csos levy recovered": "R18,763.91. Owners pay this on its own column. It is not part of the ordinary levy. The expense is the same amount.",
         "csos levy": "R18,763.91, the same as CSOS income. Left out of the ordinary levy so owners are not charged twice.",
         "investment income": "7% on last year’s R85,615.96 = R91,609.08. Already inside the reserve balance, so it is not added to the reserve again and it does not reduce the levy. Kept here only for the tax estimate.",
