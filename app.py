@@ -1483,30 +1483,42 @@ def generate_pptx(state: dict) -> BytesIO:
     logo = Path(__file__).parent / "domus_logo.jpeg"
     INK, MINT, CREAM, WHITE, MUTED, SOFT = "111111", "70F8C8", "F6F6F4", "FFFFFF", "6B6B6B", "F3F3F1"
 
-    def fade(sld):
+    def morph(sld):
         el = sld._element
         for child in list(el):
             if child.tag.endswith("transition"):
                 el.remove(child)
         el.append(etree.fromstring(
-            '<p:transition xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" spd="slow"><p:fade/></p:transition>'
+            '<p:transition xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+            'xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" spd="slow" p14:dur="1600">'
+            '<p159:morph xmlns:p159="http://schemas.microsoft.com/office/powerpoint/2015/09/main" option="byObject"/>'
+            '</p:transition>'
         ))
 
-    def slide(dark=False):
+    def slide(dark=False, hero=False):
         s = prs.slides.add_slide(blank)
         fill = s.background.fill
         fill.solid()
         fill.fore_color.rgb = _rgb(INK if dark else CREAM)
-        fade(s)
+        morph(s)
         if logo.exists():
-            s.shapes.add_picture(str(logo), Inches(0.38), Inches(0.16), width=Inches(3.15))
-        rule = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.38), Inches(1.68), Inches(12.55), Inches(0.045))
+            if hero:
+                pic = s.shapes.add_picture(str(logo), Inches(0.5), Inches(2.05), width=Inches(4.7))
+            else:
+                pic = s.shapes.add_picture(str(logo), Inches(0.38), Inches(0.16), width=Inches(3.15))
+            pic.name = "!!logo"
+        if hero:
+            rule = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.5), Inches(4.25), Inches(4.7), Inches(0.07))
+        else:
+            rule = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.38), Inches(1.68), Inches(12.55), Inches(0.045))
         rule.fill.solid()
         rule.fill.fore_color.rgb = _rgb(MINT)
         rule.line.fill.background()
-        if pack.get("year"):
+        rule.name = "!!rule"
+        if pack.get("year") and not hero:
             text(s, 6.4, 0.55, 6.4, 0.35, [(pack["year"], 13, False, WHITE if dark else INK)], align="right")
-        text(s, 0.4, 7.08, 8, 0.28, [(f"Domus  ·  {pack['name']}", 11, False, MINT if dark else MUTED)])
+        if not hero:
+            text(s, 0.4, 7.08, 8, 0.28, [(f"Domus  ·  {pack['name']}", 11, False, MINT if dark else MUTED)])
         return s
 
     def rect(s, l, t, w, h, color, radius=0.08):
@@ -1544,11 +1556,10 @@ def generate_pptx(state: dict) -> BytesIO:
     def kicker(s, msg, dark=False):
         text(s, 0.45, 1.82, 12, 0.32, [(msg.upper(), 12, True, MINT if dark else INK)])
 
-    # 1 Cover
-    s = slide(True)
-    kicker(s, "Proposed budget", True)
-    text(s, 0.45, 2.15, 12.2, 1.3, [(pack["name"], 40, True, WHITE, 0)])
-    text(s, 0.45, 3.5, 10, 0.7, [("Prepared by Domus, so every owner can see what the year will cost.", 18, False, "E4E4E4")])
+    # 1 Cover — logo starts large, then Morph carries it up into the corner
+    s = slide(True, hero=True)
+    text(s, 5.6, 2.15, 7.2, 1.15, [(pack["name"], 36, True, WHITE, 0)])
+    text(s, 5.6, 3.35, 7.2, 0.9, [(pack.get("year") or "", 16, False, MINT, 6), ("Prepared by Domus, so every owner can see what the year will cost.", 16, False, "E4E4E4", 0)])
     tiles = [
         (str(int(pack["units"])), "owners sharing the cost"),
         (_r0(pack["owner_month"]), f"a month for {pack['who']}"),
@@ -1730,12 +1741,10 @@ def generate_pptx(state: dict) -> BytesIO:
         text(s, 0.7, y + 0.12, 1, 0.6, [(n, 22, True, MINT)])
         text(s, 1.6, y + 0.1, 10.8, 0.65, [(title, 18, True, WHITE, 0), (body, 13, False, "CFCFCF", 0)])
 
-    # 13 Close
-    s = slide(True)
-    if logo.exists():
-        s.shapes.add_picture(str(logo), Inches(0.45), Inches(2.15), width=Inches(4.4))
-    text(s, 0.45, 4.55, 12, 1.1, [("Thank you.", 48, True, WHITE, 8)])
-    text(s, 0.45, 5.8, 10, 0.9, [("Questions are welcome. Domus will walk through any line with you.", 18, False, "E4E4E4")])
+    # 13 Close — Morph grows the logo back out
+    s = slide(True, hero=True)
+    text(s, 5.6, 2.3, 7, 1.3, [("Thank you.", 44, True, WHITE, 8)])
+    text(s, 5.6, 3.7, 7, 1.1, [("Questions are welcome. Domus will walk through any line with you.", 18, False, "E4E4E4")])
 
     buf = BytesIO()
     prs.save(buf)
@@ -3440,7 +3449,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 file_name=f"Budget_presentation_{name}.pptx",
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
             )
-            st.caption("Same story, Domus logo, black and mint. The slides fade as you click through. It cannot glide the logo the way the browser file does.")
+            st.caption("Open it in PowerPoint and press F5. The Domus logo glides, the way the Morph tutorials do. It will not move if you only scroll the slides in edit view.")
 
     with tabs[11]:
         st.subheader("Download Excel")
