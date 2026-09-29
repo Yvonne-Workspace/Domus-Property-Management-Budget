@@ -2166,10 +2166,10 @@ def generate_excel(state: dict) -> BytesIO:
         fml(ws.cell(r, 6), f"F{ord_row}")
         fml(ws.cell(r, 7), f"G{ord_row}")
         r += 1
-        ws.cell(r, 2, "Approved %")
-        ws.cell(r, 8, "Trustees: type the % the meeting agrees, for example 10%. Do not type on the Levies received % — that one will not stick.")
+        ws.cell(r, 2, "Approved — type a % or a rand")
+        ws.cell(r, 8, "Type the % the meeting agrees, for example 10%. Or type a rand over the yearly amount and leave the %.")
         ws.cell(r, 8).font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
-        ws.cell(r, 8).alignment = Alignment(wrap_text=True)
+        ws.cell(r, 8).alignment = Alignment(wrap_text=True, vertical="center")
         pct_cell = ws.cell(r, 5)
         mode = state.get("levy_approve_mode") or "costs"
         if mode == "pct":
@@ -2180,18 +2180,15 @@ def generate_excel(state: dict) -> BytesIO:
             fill(pct_cell, YELLOW)
             pct_cell.font = Font(name="Calibri", color=BLUE, size=10)
             pct_cell.border = THIN
-        pct_row = r
-        r += 1
-        ws.cell(r, 2, "Or type the rand for the year")
-        ws.cell(r, 8, "Leave 0 to use the %. Type a rand amount here if the meeting names a figure instead of a %.")
-        ws.cell(r, 8).font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
-        ws.cell(r, 8).alignment = Alignment(wrap_text=True)
-        rand_amt = float(state.get("levy_approved_amount") or 0) if mode == "amount" else 0.0
-        inp(ws.cell(r, 6), rand_amt, MONEY)
-        rand_row = r
-        r += 1
-        ws.cell(r, 2, "Approved budget for the year").font = Font(bold=True)
-        fml(ws.cell(r, 6), f"IF(F{rand_row}>0,F{rand_row},D{ord_row}*(1+E{pct_row}))", "C6EFCE")
+        year_cell = ws.cell(r, 6)
+        if mode == "amount" and float(state.get("levy_approved_amount") or 0) > 0.5:
+            inp(year_cell, float(state.get("levy_approved_amount") or 0), MONEY)
+        else:
+            year_cell.value = f"=D{ord_row}*(1+E{r})"
+            year_cell.number_format = MONEY
+            fill(year_cell, YELLOW)
+            year_cell.font = Font(name="Calibri", color=BLUE, size=10)
+            year_cell.border = THIN
         fml(ws.cell(r, 7), f"F{r}/12", "C6EFCE")
         approved_row = r
         r += 1
@@ -2497,7 +2494,7 @@ def _apply_budget_sheet(wb, data: dict) -> None:
         if low in ("description", "gl code"):
             continue
         if low.startswith((
-            "meeting decision", "what the costs", "approved %", "approved budget",
+            "meeting decision", "what the costs", "approved —", "approved %", "approved budget",
             "approved monthly", "or type the rand", "gap", "total", "under-recovery",
             "under recovery", "ordinary levies =",
         )):
@@ -2559,23 +2556,23 @@ def _read_meeting_from_sheet(wb, data: dict) -> None:
     rand_v = None
     for r in range(1, int(ws.max_row or 1) + 1):
         label = str(ws.cell(r, 2).value or "")
-        if label.startswith("Approved %"):
+        if label.startswith("Approved"):
             pct_v = ws.cell(r, 5).value
-        elif label.startswith("Or type the rand"):
-            rand_v = ws.cell(r, 6).value
-    if isinstance(rand_v, (int, float)) and float(rand_v) > 0.5:
-        data["levy_approve_mode"] = "amount"
-        data["levy_approved_amount"] = float(rand_v)
-        return
-    if isinstance(pct_v, str) and pct_v.startswith("="):
-        data["levy_approve_mode"] = "costs"
-        return
-    if isinstance(pct_v, (int, float)):
-        pct = float(pct_v)
-        if abs(pct) <= 2:
-            pct *= 100.0
-        data["levy_approve_mode"] = "pct"
-        data["levy_approved_pct"] = pct
+            year_v = ws.cell(r, 6).value
+            if isinstance(year_v, (int, float)) and float(year_v) > 0.5:
+                data["levy_approve_mode"] = "amount"
+                data["levy_approved_amount"] = float(year_v)
+                return
+            if isinstance(pct_v, str) and str(pct_v).startswith("="):
+                data["levy_approve_mode"] = "costs"
+                return
+            if isinstance(pct_v, (int, float)):
+                pct = float(pct_v)
+                if abs(pct) <= 2:
+                    pct *= 100.0
+                data["levy_approve_mode"] = "pct"
+                data["levy_approved_pct"] = pct
+            return
 
 
 def _restore_from_domus_sheet(wb) -> dict | None:
@@ -3300,7 +3297,8 @@ Download Excel for the meeting. Yellow cells can be changed in the meeting. To c
         st.subheader("Meeting decision — Levies received")
         st.caption(
             "You do not set this before the meeting. Download the sheet. "
-            "In the meeting the trustees type on the yellow **Approved %**, or type a rand in **Or type the rand for the year**. "
+            "In the meeting the trustees use one yellow line, **Approved — type a % or a rand**. "
+            "They type the % in the % column, or they type a rand over the yearly amount. "
             "They can also change the other yellow cells. When they send the file back, use **Restore my budget**. "
             "The % on the Levies received line itself still will not stick."
         )
