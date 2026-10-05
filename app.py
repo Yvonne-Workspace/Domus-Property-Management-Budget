@@ -78,6 +78,7 @@ def row(desc: str, note: str = "") -> dict:
     return {
         "id": uid(), "desc": desc, "actual": 0.0, "pct": 0.0, "yearly": 0.0,
         "insurance": 0.0, "owner_recovery": 0.0, "note": note, "is_recovery": False,
+        "ytd": 0.0, "ytd_budget": 0.0, "pace": "month",
     }
 
 
@@ -767,7 +768,7 @@ def num(v):
     return 0.0 if abs(n) < 0.01 else n
 
 
-def extract_wcu(uploaded) -> list:
+def extract_wcu(uploaded, keep_zeros: bool = False) -> list:
     xl = pd.ExcelFile(uploaded)
     out = []
     for sheet in xl.sheet_names:
@@ -790,6 +791,16 @@ def extract_wcu(uploaded) -> list:
             ytd = next((i for i, t in enumerate(cur) if t == "actual"), None)
         if ytd is None:
             continue
+        budget_i = None
+        for i, t in enumerate(merged):
+            if "budget" not in t or "var" in t or "actual" in t:
+                continue
+            if "ytd" in t or "mtd" in t:
+                if budget_i is None:
+                    budget_i = i
+                continue
+            budget_i = i
+            break
         for r in range(header + 1, len(df)):
             raw = str(df.iloc[r, 0] or "").strip()
             if not raw or re.match(r"^(total|surplus|shortfall)", raw, re.I):
@@ -805,9 +816,10 @@ def extract_wcu(uploaded) -> list:
                 if len(desc) < 3:
                     continue
             actual = abs(num(df.iloc[r, ytd]) or 0.0)
-            if actual < 0.5:
+            budget = abs(num(df.iloc[r, budget_i]) or 0.0) if budget_i is not None else 0.0
+            if actual < 0.5 and (not keep_zeros or budget < 0.5):
                 continue
-            out.append({"desc": desc, "actual": actual})
+            out.append({"desc": desc, "actual": actual, "budget": budget})
     return out
 
 
@@ -1139,7 +1151,47 @@ def parse_pq_upload(uploaded):
     raise ValueError(errors[-1] if errors else "Could not find unit ratios in this file.")
 
 
-def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
+PACE_LABELS = {
+    "month": "Every month",
+    "once": "Already paid",
+    "later": "Not paid yet",
+}
+PACE_FROM = {v: k for k, v in PACE_LABELS.items()}
+
+
+def line_forecast(it: dict, state: dict) -> float:
+    """What this unfinished year will finish at. Not next year's budget."""
+    actual = abs(float(it.get("actual") or 0))
+    if not state.get("early_budget"):
+        return actual
+    months = max(1, min(11, int(state.get("early_months") or 10)))
+    pace = it.get("pace") or "month"
+    ytd = abs(float(it.get("ytd") or 0))
+    ytd_b = abs(float(it.get("ytd_budget") or 0))
+    if pace == "once":
+        return ytd
+    if pace == "later":
+        return ytd_b if ytd_b > 0.5 else actual
+    if ytd > 0.5:
+        return ytd / months * 12.0
+    return actual
+
+
+def _yearly_from_forecast(it: dict, state: dict) -> None:
+    """Move next year's amount onto the forecast when it is still just a copy of last year."""
+    if (it.get("pace") or "month") == "once":
+        return
+    fc = line_forecast(it, state)
+    if fc < 0.5:
+        return
+    pct = float(it.get("pct") or 0)
+    last = abs(float(it.get("actual") or 0)) * (1 + pct / 100.0)
+    yearly = abs(float(it.get("yearly") or 0))
+    if yearly < 0.5 or abs(yearly - last) < 1.0:
+        it["yearly"] = fc * (1 + pct / 100.0)
+
+
+def match_into(extracted: list, sections: dict, fields: str = "actual", state: dict | None = None) -> tuple[dict, int]:
     nxt = {k: [dict(x) for x in v] for k, v in sections.items()}
     used = set()
     added = 0
@@ -1175,7 +1227,7 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
                 if a and b:
                     sc = max(sc, len(a & b) / max(len(a), len(b)))
             if sc > 0.72 and sc > score:
-                if src.get("actual") and it.get("actual"):
+                if fields == "actual" and src.get("actual") and it.get("actual"):
                     a1, a2 = abs(float(src["actual"])), abs(float(it.get("actual") or 0))
                     if a2 > 1 and max(a1, a2) / max(min(a1, a2), 1) > 15 and sc < 0.98:
                         continue
@@ -1183,13 +1235,19 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
         if best:
             key, it = best
             used.add(f"{key}:{it['id']}")
-            it["actual"] = src["actual"]
-            if fam in ("hoa_levy_inc", "hoa_csos_inc", "hoa_levy_exp", "hoa_csos_exp", "ins_bill"):
-                it["desc"] = src["desc"]
-            if it.get("is_recovery"):
-                it["yearly"] = src["actual"]
+            if fields == "ytd":
+                it["ytd"] = abs(float(src.get("actual") or 0))
+                it["ytd_budget"] = abs(float(src.get("budget") or 0))
+                if state and state.get("early_budget"):
+                    _yearly_from_forecast(it, state)
             else:
-                it["yearly"] = src["actual"] * (1 + float(it.get("pct") or 0) / 100)
+                it["actual"] = src["actual"]
+                if fam in ("hoa_levy_inc", "hoa_csos_inc", "hoa_levy_exp", "hoa_csos_exp", "ins_bill"):
+                    it["desc"] = src["desc"]
+                if it.get("is_recovery"):
+                    it["yearly"] = src["actual"]
+                else:
+                    it["yearly"] = src["actual"] * (1 + float(it.get("pct") or 0) / 100)
         else:
             leftover.append(src)
     for src in leftover:
@@ -1199,29 +1257,53 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
         sec = section_for(src["desc"])
         if fam:
             existing = next((i for i in nxt[sec] if family(i["desc"]) == fam), None)
-            if existing:
+            if existing and fields == "actual":
                 existing["actual"] = float(existing["actual"] or 0) + src["actual"]
                 continue
+            if existing and fields == "ytd":
+                existing["ytd"] = float(existing.get("ytd") or 0) + abs(float(src.get("actual") or 0))
+                existing["ytd_budget"] = float(existing.get("ytd_budget") or 0) + abs(float(src.get("budget") or 0))
+                if state and state.get("early_budget"):
+                    _yearly_from_forecast(existing, state)
+                continue
         extra = row(src["desc"], "Added from WeConnectU for this complex")
-        extra["actual"] = src["actual"]
-        extra["yearly"] = src["actual"]
+        if fields == "ytd":
+            extra["actual"] = 0.0
+            extra["ytd"] = abs(float(src.get("actual") or 0))
+            extra["ytd_budget"] = abs(float(src.get("budget") or 0))
+            extra["yearly"] = 0.0
+            if state and state.get("early_budget"):
+                _yearly_from_forecast(extra, state)
+        else:
+            extra["actual"] = src["actual"]
+            extra["yearly"] = src["actual"]
         extra["is_recovery"] = "recover" in norm(src["desc"]) and sec == "municipal"
         nxt[sec].append(extra)
         added += 1
     return nxt, added
 
 
-def items_to_df(items: list, rm: bool, recover: bool = False) -> pd.DataFrame:
+def items_to_df(items: list, rm: bool, recover: bool = False, early: bool = False, state: dict | None = None) -> pd.DataFrame:
     recs = []
     show_extra = rm or recover
+    state = state or {}
     for it in items:
         actual = float(it.get("actual") or 0)
         yearly = float(it.get("yearly") or 0)
         stored = float(it.get("pct") or 0)
-        pct = pct_from_amounts(actual, yearly) if actual >= 0.5 else stored
         ins = float(it.get("insurance") or 0)
         own = float(it.get("owner_recovery") or 0)
         net = max(0.0, yearly - ins - own) if show_extra else abs(yearly)
+        pace = it.get("pace") or "month"
+        if early:
+            fc = line_forecast(it, state)
+            if pace == "once" and yearly < 0.5:
+                pct = 0.0
+            else:
+                pct = pct_from_amounts(fc, yearly) if fc >= 0.5 else stored
+        else:
+            fc = 0.0
+            pct = pct_from_amounts(actual, yearly) if actual >= 0.5 else stored
         rec = {
             "Description": it["desc"],
             "Actual": actual,
@@ -1230,26 +1312,42 @@ def items_to_df(items: list, rm: bool, recover: bool = False) -> pd.DataFrame:
             "Monthly": net / 12.0,
             "Notes": it.get("note") or "",
         }
+        if early:
+            rec["Spent so far"] = float(it.get("ytd") or 0)
+            rec["This year budget"] = float(it.get("ytd_budget") or 0)
+            rec["This line"] = PACE_LABELS.get(pace, "Every month")
+            rec["This year finishes at"] = fc
         if rm:
             rec["Insurance payout"] = ins
         if recover:
             rec["Recovered from some owners"] = own
         recs.append(rec)
     cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Notes"]
-    if rm:
-        cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Insurance payout", "Notes"]
-    if recover:
-        cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Recovered from some owners", "Monthly", "Notes"]
+    if early:
+        cols = [
+            "Description", "Actual", "Spent so far", "This year budget", "This line",
+            "This year finishes at", "% Increase", "Budgeted yearly",
+        ]
         if rm:
-            cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Insurance payout", "Recovered from some owners", "Monthly", "Notes"]
+            cols.append("Insurance payout")
+        if recover:
+            cols.append("Recovered from some owners")
+        cols += ["Monthly", "Notes"]
+    elif rm and recover:
+        cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Insurance payout", "Recovered from some owners", "Monthly", "Notes"]
+    elif rm:
+        cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Insurance payout", "Notes"]
+    elif recover:
+        cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Recovered from some owners", "Monthly", "Notes"]
     if not recs:
         return pd.DataFrame(columns=cols)
     return pd.DataFrame(recs)[cols]
 
 
-def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool = False) -> list:
+def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool = False, early: bool = False, state: dict | None = None) -> list:
     out = []
     records = edited.to_dict("records")
+    state = state or {}
     for i, rec in enumerate(records):
         desc = str(rec.get("Description") or "").strip()
         if not desc:
@@ -1263,12 +1361,47 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             own = float(rec.get("Recovered from some owners") or 0)
         else:
             own = float(prev.get("owner_recovery") or 0)
+        if "Spent so far" in rec:
+            ytd = abs(float(rec.get("Spent so far") or 0))
+        else:
+            ytd = abs(float(prev.get("ytd") or 0))
+        if "This year budget" in rec:
+            ytd_b = abs(float(rec.get("This year budget") or 0))
+        else:
+            ytd_b = abs(float(prev.get("ytd_budget") or 0))
+        pace = PACE_FROM.get(str(rec.get("This line") or ""), prev.get("pace") or "month")
         old_actual = abs(float(prev.get("actual") or 0))
         old_y = abs(float(prev.get("yearly") or 0))
-        shown_pct = pct_from_amounts(old_actual, old_y) if old_actual >= 0.5 else float(prev.get("pct") or 0)
+        draft = {
+            "actual": actual, "ytd": ytd, "ytd_budget": ytd_b, "pace": pace,
+        }
+        if early:
+            fc_old = line_forecast({**prev, "actual": old_actual}, state)
+            if (prev.get("pace") or "month") == "once" and old_y < 0.5:
+                shown_pct = 0.0
+            else:
+                shown_pct = pct_from_amounts(fc_old, old_y) if fc_old >= 0.5 else float(prev.get("pct") or 0)
+        else:
+            shown_pct = pct_from_amounts(old_actual, old_y) if old_actual >= 0.5 else float(prev.get("pct") or 0)
         pct_changed = abs(pct - shown_pct) > 0.2
         y_changed = abs(yearly - old_y) > 0.5
-        if pct_changed and not y_changed:
+        pace_changed = pace != (prev.get("pace") or "month")
+        if early:
+            fc = line_forecast(draft, state)
+            if pace == "once":
+                if pct_changed and not y_changed and fc > 0.5:
+                    yearly = fc * (1 + pct / 100.0)
+                elif y_changed and fc > 0.5:
+                    pct = pct_from_amounts(fc, yearly)
+            elif pct_changed and not y_changed:
+                yearly = fc * (1 + pct / 100.0) if fc > 0.5 else yearly
+            elif y_changed:
+                pct = pct_from_amounts(fc, yearly) if fc > 0.5 else pct
+            elif pace_changed or abs(yearly - old_actual * (1 + float(prev.get("pct") or 0) / 100.0)) < 1.0:
+                yearly = fc * (1 + pct / 100.0) if fc > 0.5 else yearly
+                if fc > 0.5:
+                    pct = pct_from_amounts(fc, yearly)
+        elif pct_changed and not y_changed:
             yearly = actual * (1 + pct / 100.0) if actual >= 0.5 else yearly
         elif y_changed:
             pct = pct_from_amounts(actual, yearly)
@@ -1289,6 +1422,9 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             "yearly": yearly,
             "insurance": ins,
             "owner_recovery": own,
+            "ytd": ytd,
+            "ytd_budget": ytd_b,
+            "pace": pace,
             "note": note,
             "is_recovery": recovery,
         })
@@ -2055,7 +2191,12 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B7"] = "This year’s projects paid from the reserve"
     ws["B8"] = "Projected reserve at year-end"
     fml(ws["D8"], "D5+D6-D7")
-    ws["B9"] = "Interest is already inside the reserve balance above. It is not added again. Yellow cells = type here. Budgeted Yearly = Actual × (1 + %). Monthly = Yearly ÷ 12."
+    ws["B9"] = (
+        "Actual is the last full year. % is next year’s budget against that full year, not against the months so far. "
+        "Spent so far is this year. This year finishes at is what the new budget was built from. Yellow cells = type here."
+        if state.get("early_budget")
+        else "Interest is already inside the reserve balance above. It is not added again. Yellow cells = type here. Budgeted Yearly = Actual × (1 + %). Monthly = Yearly ÷ 12."
+    )
     ws["B9"].font = Font(italic=True, size=9, color="666666")
 
     r = 11
@@ -2078,6 +2219,14 @@ def generate_excel(state: dict) -> BytesIO:
             fill(c, NAVY)
             c.font = Font(bold=True, color="FFFFFF", size=10)
             c.border = THIN
+        if state.get("early_budget"):
+            for col, lab in ((10, "Spent so far"), (11, "This year finishes at")):
+                c = ws.cell(r, col, lab)
+                fill(c, NAVY)
+                c.font = Font(bold=True, color="FFFFFF", size=10)
+                c.border = THIN
+            ws.column_dimensions["J"].width = 16
+            ws.column_dimensions["K"].width = 24
         r += 1
 
     levy_rows = {}
@@ -2113,7 +2262,13 @@ def generate_excel(state: dict) -> BytesIO:
                 levy_comp_rows.append(r)
             ins = float(it.get("insurance") or 0)
             rec = bool(it.get("is_recovery")) and not recovery_as_income
+            early_line = bool(state.get("early_budget")) and fam not in ("ordinary", "reserve") and not rec and not (
+                is_own_scheme_csos(desc) and fam == "csos_exp"
+            )
             inp(ws.cell(r, 4), act, MONEY)
+            if early_line:
+                inp(ws.cell(r, 10), abs(float(it.get("ytd") or 0)), MONEY)
+                inp(ws.cell(r, 11), line_forecast(it, state), MONEY)
             if fam == "ordinary":
                 # % follows the levy formula so a meeting change to costs updates the %
                 fml(ws.cell(r, 5), f'IF(D{r}=0,0,F{r}/D{r}-1)')
@@ -2152,6 +2307,11 @@ def generate_excel(state: dict) -> BytesIO:
                 inp(ws.cell(r, 6), abs(y), MONEY)
             else:
                 fml(ws.cell(r, 6), f"D{r}*(1+E{r})")
+            if early_line:
+                # % on the sheet is against the last full year. The budget is the amount from the app, not Actual × %.
+                fml(ws.cell(r, 5), f"IF(D{r}=0,0,F{r}/D{r}-1)")
+                ws.cell(r, 5).number_format = "0.00%"
+                inp(ws.cell(r, 6), max(0.0, abs(y) - ins), MONEY)
             fml(ws.cell(r, 7), f"F{r}/12")
             note = clean_note(it.get("note"))
             if ins:
@@ -2480,6 +2640,9 @@ def generate_excel(state: dict) -> BytesIO:
         "scheme_type": state.get("scheme_type") or "bc",
         "special_in_ordinary": bool(state.get("special_in_ordinary")),
         "current_monthly_levy": float(state.get("current_monthly_levy") or 0),
+        "actual_months": int(state.get("actual_months") or 12),
+        "early_budget": bool(state.get("early_budget")),
+        "early_months": int(state.get("early_months") or 10),
         "levy_approved_pct": float(state.get("levy_approved_pct") or 0),
         "levy_approved_amount": float(state.get("levy_approved_amount") or 0),
         "levy_approve_mode": state.get("levy_approve_mode") or "costs",
@@ -2825,6 +2988,8 @@ def init():
     ss.setdefault("msg", "")
     ss.setdefault("current_monthly_levy", 0.0)
     ss.setdefault("actual_months", 12)
+    ss.setdefault("early_budget", False)
+    ss.setdefault("early_months", 10)
     ss.setdefault("levy_approve_mode", "costs")
     ss.setdefault("levy_approved_pct", 0.0)
     ss.setdefault("levy_approved_amount", 0.0)
@@ -2839,7 +3004,8 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
     if help_text:
         st.caption(help_text)
     items = st.session_state.sections.get(key) or []
-    df = items_to_df(items, rm, recover)
+    early = bool(st.session_state.get("early_budget"))
+    df = items_to_df(items, rm, recover, early=early, state=st.session_state)
     with st.form(f"form_{key}"):
         edited = st.data_editor(
             df,
@@ -2848,11 +3014,27 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
             hide_index=True,
             column_config={
                 "Description": st.column_config.TextColumn("Description", width="medium"),
-                "Actual": st.column_config.NumberColumn("Actual", format="%.2f"),
+                "Actual": st.column_config.NumberColumn("Actual", format="%.2f", help="Last full year."),
+                "Spent so far": st.column_config.NumberColumn("Spent so far", format="%.2f", help="This year, the months already in the books."),
+                "This year budget": st.column_config.NumberColumn("This year budget", format="%.2f", help="This year’s approved budget. Used when the cost is not paid yet."),
+                "This line": st.column_config.SelectboxColumn(
+                    "This line",
+                    options=["Every month", "Already paid", "Not paid yet"],
+                    required=True,
+                    help="Every month is stretched to 12. Already paid is not. Not paid yet uses this year’s budget.",
+                ),
+                "This year finishes at": st.column_config.NumberColumn(
+                    "This year finishes at", format="%.2f", disabled=True,
+                    help="What this year will come to. Next year’s % is on this figure.",
+                ),
                 "% Increase": st.column_config.NumberColumn(
                     "% Increase",
                     format="%.2f",
-                    help="Type 10 for +10%, then Save. We set Budgeted yearly = Actual × 1.10",
+                    help=(
+                        "Type 5 for 5% on what this year finishes at, then Save. Not on last year’s Actual."
+                        if early
+                        else "Type 10 for +10%, then Save. We set Budgeted yearly = Actual × 1.10"
+                    ),
                 ),
                 "Budgeted yearly": st.column_config.NumberColumn(
                     "Budgeted yearly",
@@ -2868,11 +3050,15 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                 ),
                 "Notes": st.column_config.TextColumn("Notes", width="large", help="Shows on the Excel Comments / Notes column. Click Save after typing."),
             },
-            disabled=["Monthly"],
+            disabled=["Monthly", "This year finishes at"],
         )
         saved = st.form_submit_button("Save this section", type="primary")
     if saved:
-        st.session_state.sections[key] = save_editor(edited, items, rm, municipal=(key == "municipal"))
+        st.session_state.sections[key] = save_editor(
+            edited, items, rm, municipal=(key == "municipal"),
+            early=bool(st.session_state.get("early_budget")),
+            state=st.session_state,
+        )
         if key == "levy":
             for r in st.session_state.sections["levy"]:
                 if is_ins_bill_line(r.get("desc") or "") and float(r.get("yearly") or 0) > 0.5:
@@ -2991,10 +3177,28 @@ def main():
         st.session_state.fin_year = st.text_input("Financial year", st.session_state.fin_year)
 
         st.header("Load last year")
+        st.session_state.early_budget = st.checkbox(
+            "This budget is before the year has finished",
+            value=bool(st.session_state.get("early_budget")),
+            help="Leave this off for a normal complex. Turn it on when you already have some months of this year and must budget the next year.",
+        )
+        if st.session_state.early_budget:
+            st.session_state.early_months = int(st.number_input(
+                "Months already in the books",
+                min_value=1,
+                max_value=11,
+                value=int(st.session_state.get("early_months") or 10),
+                help="Usually 10. A monthly cost is divided by this and times 12. A repair is not.",
+            ))
         st.caption(
             "1. Financial statement PDF — line names. "
             "2. WeConnectU Excel — last year’s rands. "
-            "3. PQ Excel — each unit’s share."
+            + (
+                "3. This year’s WeConnectU — the months so far. "
+                "4. PQ Excel — each unit’s share."
+                if st.session_state.get("early_budget")
+                else "3. PQ Excel — each unit’s share."
+            )
         )
         pdf_up = st.file_uploader("Annual financial statement (PDF)", type=["pdf"], key="afs_pdf")
         if pdf_up and st.button("Load financial statement", type="primary"):
@@ -3047,6 +3251,29 @@ def main():
             except Exception as e:
                 st.error(f"Could not read file: {e}")
 
+        if st.session_state.get("early_budget"):
+            ytd_up = st.file_uploader(
+                "This year WeConnectU — actual vs budget",
+                type=["xlsx", "xls", "xlsm"],
+                key="wcu_ytd",
+            )
+            st.caption("The year that is not finished. This fills Spent so far. It does not replace Actual.")
+            if ytd_up and st.button("Load this year"):
+                try:
+                    rows = extract_wcu(ytd_up, keep_zeros=True)
+                    if not rows:
+                        st.error("No lines found. Export Options → Budget and Actuals.")
+                    else:
+                        secs, added = match_into(rows, st.session_state.sections, fields="ytd", state=st.session_state)
+                        st.session_state.sections = secs
+                        st.session_state.msg = (
+                            f"Loaded this year ({len(rows)} lines). Actual (last year) was left as it is. Extra lines: {added}."
+                        )
+                        apply_levy_lines(st.session_state)
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Could not read this year’s file: {e}")
+
         pq_up = st.file_uploader(
             "PQ / unit ratios (Excel or CSV)",
             type=["csv", "xlsx", "xls", "xlsm"],
@@ -3080,7 +3307,7 @@ def main():
                 for k in (
                     "has_master_hoa", "insurance_mode", "insurance_bill_yearly", "auto_csos",
                     "reserve_mode", "reserve_amount", "reserve_balance", "scheme_type", "special_in_ordinary",
-                    "current_monthly_levy", "actual_months",
+                    "current_monthly_levy", "actual_months", "early_budget", "early_months",
                     "levy_approve_mode", "levy_approved_pct", "levy_approved_amount",
                 ):
                     if k in data and data[k] is not None:
@@ -3105,8 +3332,10 @@ def main():
             min_value=1,
             max_value=12,
             value=int(st.session_state.actual_months),
-            help="12 = a full year. If WeConnectU is only 6 months, put 6 and we scale up for the %.",
+            help="12 = a full year. Leave this on 12 if you use the tick under Load last year. That tick does not stretch every line.",
         )
+        if st.session_state.get("early_budget") and int(st.session_state.get("actual_months") or 12) < 12:
+            st.warning("Set Months covered by the Actual column back to 12. The tick under Load last year handles a part year.")
         st.header("Reserve fund")
         st.session_state.scheme_type = st.radio(
             "What kind of scheme is this?",
@@ -3238,7 +3467,20 @@ Choose **body corporate** or **HOA**. That only changes the reserve note. The fo
 2. **WeConnectU Excel** — brings in last year’s rands (Actual).
 3. **PQ Excel** — each unit’s share.
 
-If Actual is only part of a year, set **Months covered by the Actual column** (7 means seven months, and we scale it to a year).
+Most complexes stop there. If Actual is only part of a year and you want every line stretched, set **Months covered by the Actual column**. Do not use that for a 10-month budget.
+
+### 2b. Only some complexes — budget before the year ends
+Tick **This budget is before the year has finished** and type the months (usually 10).
+
+Also load **This year’s WeConnectU**. Actual stays last year’s full year. Spent so far is the months already in the books.
+
+On each line, set **This line**, then Save:
+
+- **Every month** (security, salaries, management fee) — spent so far ÷ months × 12.
+- **Already paid** (a repair, a valuation) — not stretched. Type next year’s amount yourself. Often R 0.
+- **Not paid yet** (insurance, audit) — uses this year’s budget, not the months so far.
+
+Type **%** and Save to add that % onto **This year finishes at**. The % on the Excel sheet is still against last year’s full Actual, so the trustees see the real increase.
 
 ### 3. Type this year’s amounts
 On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly.
