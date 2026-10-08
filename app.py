@@ -1249,8 +1249,24 @@ PACE_LABELS = {
 PACE_FROM = {v: k for k, v in PACE_LABELS.items()}
 
 
+def edit_base(it: dict, state: dict) -> float:
+    """The figure a typed % applies to. Latest month × 12, otherwise last year."""
+    if state.get("early_budget"):
+        latest = abs(float(it.get("latest") or 0))
+        if latest > 0.5:
+            return latest * 12.0
+    actual = abs(float(it.get("actual") or 0))
+    if actual > 0.5:
+        return actual
+    if state.get("early_budget"):
+        budget = abs(float(it.get("ytd_budget") or 0))
+        if abs(float(it.get("ytd") or 0)) < 0.5 and budget > 0.5:
+            return budget
+    return 0.0
+
+
 def next_year_base(it: dict, state: dict) -> float:
-    """Today's price for a whole year. A % is added to this, not to the average of the months."""
+    """Today's price for a whole year. Used when a line is first loaded, before anyone types a %."""
     if not state.get("early_budget"):
         return abs(float(it.get("actual") or 0))
     latest = abs(float(it.get("latest") or 0))
@@ -1414,7 +1430,7 @@ def items_to_df(items: list, rm: bool, recover: bool = False, early: bool = Fals
         net = max(0.0, yearly - ins - own) if show_extra else abs(yearly)
         if early:
             fc = line_forecast(it, state)
-            base = next_year_base(it, state)
+            base = edit_base(it, state)
             pct = pct_from_amounts(base, yearly) if base >= 0.5 else stored
         else:
             fc = 0.0
@@ -1506,23 +1522,26 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             "latest": latest, "tail": tail, "months_done": done,
         }
         if early:
-            base_old = next_year_base({**prev, "actual": old_actual}, state)
+            base_old = edit_base({**prev, "actual": old_actual, "latest": old_latest}, state)
             shown_pct = pct_from_amounts(base_old, old_y) if base_old >= 0.5 else float(prev.get("pct") or 0)
         else:
             shown_pct = pct_from_amounts(old_actual, old_y) if old_actual >= 0.5 else float(prev.get("pct") or 0)
-        pct_changed = abs(pct - shown_pct) > 0.2
+        pct_changed = abs(pct - shown_pct) > 0.05
         y_changed = abs(yearly - old_y) > 0.5
         latest_changed = abs(latest - old_latest) > 0.5
         if early:
-            base = next_year_base(draft, state)
-            if y_changed:
-                pct = pct_from_amounts(base, yearly) if base > 0.5 else pct
+            base = edit_base(draft, state)
+            if pct_changed and not y_changed and base > 0.5:
+                yearly = base * (1 + pct / 100.0)
+            elif y_changed and base > 0.5:
+                pct = pct_from_amounts(base, yearly)
             elif pct_changed and base > 0.5:
                 yearly = base * (1 + pct / 100.0)
             elif latest_changed and base > 0.5:
-                yearly = base * (1 + float(prev.get("pct") or 0) / 100.0)
-                pct = float(prev.get("pct") or 0)
-            elif yearly < 0.5 and base > 0.5:
+                yearly = base * (1 + (pct if pct_changed else float(prev.get("pct") or 0)) / 100.0)
+                if not pct_changed:
+                    pct = float(prev.get("pct") or 0)
+            elif yearly < 0.5 and base > 0.5 and not pct_changed:
                 yearly = base
                 pct = 0.0
         elif pct_changed and not y_changed:
@@ -2366,8 +2385,8 @@ def generate_excel(state: dict) -> BytesIO:
         ws.row_dimensions[rr].height = 30
     ws["B9"] = (
         "Actual is last year. Spent so far is this year so far. Latest month is the last full month. "
-        "This year finishes at is spent so far plus the months still to come at that latest month. "
-        "Budgeted Yearly starts at Latest month × 12. A % is only a new increase on that. Yellow cells = type here."
+        "Budgeted Yearly follows the %. Type 10% for plus 10%. Do not type over Budgeted Yearly — the monthly, the totals and the levy all follow that %. "
+        "If Latest month is filled in, the % is on that month × 12. If Latest month is empty, the % is on Actual. Yellow cells = type here."
         if early
         else "Interest is already inside the reserve balance above. It is not added again. Yellow cells = type here. Budgeted Yearly = Actual × (1 + %). Monthly = Yearly ÷ 12."
     )
@@ -2391,7 +2410,7 @@ def generate_excel(state: dict) -> BytesIO:
         if early:
             labs = [
                 "Description", "GL Code", "Actual", "Spent so far", "Latest month", "This year finishes at",
-                "%", "Budgeted Yearly", "Monthly", "Comments / Notes",
+                "% (type 10%)", "Budgeted Yearly", "Monthly", "Comments / Notes",
             ]
         for i, lab in enumerate(labs, 2):
             c = ws.cell(r, i, lab)
@@ -2449,8 +2468,16 @@ def generate_excel(state: dict) -> BytesIO:
                 full_c = ws.cell(r, C_FULL)
                 fml(full_c, f"MAX(0,E{r}-{tail}+F{r}*{12 - done})")
                 fill(full_c, "D6EFEA")
-            base_amt = next_year_base(it, state) if early_line else act
-            rate_cell = f"{get_column_letter(C_LATEST)}{r}" if early_line and C_LATEST else f"D{r}"
+            base_amt = edit_base(it, state) if early_line else act
+            latest_now = abs(float(it.get("latest") or 0))
+            if not early_line:
+                grow = f"D{r}"
+            elif latest_now > 0.5:
+                grow = f"F{r}*12"
+            elif act >= 0.5:
+                grow = f"D{r}"
+            else:
+                grow = None
             if fam == "ordinary":
                 fml(ws.cell(r, C_PCT), f"IF(D{r}=0,0,{YL}{r}/D{r}-1)")
                 ws.cell(r, C_PCT).number_format = "0.00%"
@@ -2461,9 +2488,6 @@ def generate_excel(state: dict) -> BytesIO:
                 show_pct = pct_from_amounts(act, y) if act >= 0.5 else pct
                 inp(ws.cell(r, C_PCT), show_pct / 100.0, "0.00%")
             expected = base_amt * (1 + pct / 100.0) if base_amt >= 0.5 else y
-            grow = f"{rate_cell}*12" if early_line else rate_cell
-            if early_line and abs(float(it.get("latest") or 0)) < 0.5:
-                grow = None
             year_cell = ws.cell(r, C_YEAR)
             if fam == "ordinary":
                 pass
@@ -2486,12 +2510,6 @@ def generate_excel(state: dict) -> BytesIO:
                     fml(year_cell, f"-ABS({grow}*(1+{PL}{r}))")
                 else:
                     inp(year_cell, y if y < 0 else -abs(y), MONEY)
-            elif abs(y - expected) > 1 and abs(y) > 0.5:
-                inp(year_cell, max(0.0, abs(y) - ins), MONEY)
-            elif ins > 0.5 and grow:
-                fml(year_cell, f"MAX(0,{grow}*(1+{PL}{r})-{ins})")
-            elif act < 0.5 and abs(y) > 0.5 and not early_line:
-                inp(year_cell, abs(y), MONEY)
             elif grow:
                 fml(year_cell, f"MAX(0,{grow}*(1+{PL}{r})-{ins})")
             else:
@@ -2954,15 +2972,15 @@ def _apply_budget_sheet(wb, data: dict) -> None:
             continue
         if isinstance(year_v, (int, float)):
             found["yearly"] = abs(float(year_v))
-            a = float(found.get("actual") or 0)
-            if a > 0.5:
-                found["pct"] = (found["yearly"] / a) * 100 - 100
+            base = edit_base(found, data)
+            if base > 0.5:
+                found["pct"] = pct_from_amounts(base, found["yearly"])
         elif isinstance(pct_v, (int, float)):
             p = float(pct_v)
-            found["pct"] = p * 100 if abs(p) <= 2 else p
-            if not data.get("early_budget"):
-                a = float(found.get("actual") or 0)
-                found["yearly"] = a * (1 + float(found["pct"]) / 100.0)
+            found["pct"] = p * 100.0 if abs(p) <= 2 else p
+            base = edit_base(found, data)
+            if base > 0.5:
+                found["yearly"] = base * (1 + float(found["pct"]) / 100.0)
 
 
 def _read_meeting_from_sheet(wb, data: dict) -> None:
@@ -3275,9 +3293,9 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                 "% Increase",
                 format="%.2f",
                 help=(
-                    "A new increase on today’s price (latest month × 12). Not on last year, and not on the average."
+                    "Type 10 for plus 10%, then Save. If Latest month is filled in, this is on that month × 12. If it is empty, this is on Actual. Budgeted yearly follows. Or type the rand and Save — the % follows."
                     if early
-                    else "Type 10 for +10%, then Save. We set Budgeted yearly = Actual × 1.10"
+                    else "Type 10 for +10%, then Save. We set Budgeted yearly = Actual × 1.10. Or type the rand and Save — we fill in the %."
                 ),
             ),
             "Budgeted yearly": st.column_config.NumberColumn(
@@ -3764,8 +3782,9 @@ On each cost tab: Actual, % Increase, Budgeted yearly, Monthly.
 
 **Tick on:**
 
-- Type **%** and Save → yearly = Latest month × 12 × (1 + %).
-- Type **Budgeted yearly** if you want a different rand. The % fills in.
+- Type **10** in **%** and Save. If **Latest month** has a figure, the yearly amount becomes that month × 12 × 1.10. If **Latest month** is empty, it becomes Actual × 1.10.
+- Type **Budgeted yearly** and Save. The **%** fills in from that rand.
+- On the Excel sheet, type **10%** in the yellow **%** cell. Do not type over Budgeted Yearly. The rand, the monthly, the totals and the levy all follow the %.
 
 **Monthly** is always yearly ÷ 12. You cannot type it.
 
@@ -3881,7 +3900,7 @@ Do not type on the % next to Levies received further down. That % is worked out 
 
 They can also change the other yellow cells: a cost, a note, and the reserve if it is an own amount.
 
-If the tick was on, change **%** or **Budgeted Yearly**. The % is on Latest month × 12, not on Actual and not on the average of the months.
+If the tick was on, type the **%** on the sheet (10% means plus 10%). Do not type over Budgeted Yearly. The rand, the monthly and the levy follow. In the app you may type either the % or the rand, then Save, and the other one follows.
 
 ### 20. When the sheet comes back
 In the sidebar, **Restore my budget**, and choose the file they sent. Their approved levy, the yellow cells and the notes come back. Then download again if you need a clean sheet.
