@@ -78,7 +78,7 @@ def row(desc: str, note: str = "") -> dict:
     return {
         "id": uid(), "desc": desc, "actual": 0.0, "pct": 0.0, "yearly": 0.0,
         "insurance": 0.0, "owner_recovery": 0.0, "note": note, "is_recovery": False,
-        "reduces_levy": False, "claim_against": "",
+        "reduces_levy": False, "claim_against": "", "edit_mode": "pct",
     }
 
 
@@ -1286,20 +1286,51 @@ def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = Fal
     return pd.DataFrame(recs)[cols]
 
 
+def cell_num(v) -> float:
+    """A number from the grid. Blank, R, spaces and commas are fine."""
+    if v is None or isinstance(v, bool):
+        return 0.0
+    try:
+        if isinstance(v, float) and pd.isna(v):
+            return 0.0
+    except Exception:
+        pass
+    if isinstance(v, str):
+        s = v.strip().replace("R", "").replace("r", "").replace(" ", "").replace(",", "").replace("%", "")
+        if not s or s.lower() in ("nan", "none"):
+            return 0.0
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool = False) -> list:
     out = []
     records = edited.to_dict("records")
     for i, rec in enumerate(records):
         desc = str(rec.get("Description") or "").strip()
-        if not desc:
+        if not desc or desc.lower() in ("none", "nan"):
             continue
-        prev = previous[i] if i < len(previous) else {}
-        actual = abs(float(rec.get("Actual") or 0))
-        pct = float(rec.get("% Increase") or 0)
-        yearly = abs(float(rec.get("Budgeted yearly") or 0))
-        ins = float(rec.get("Insurance payout") or 0) if rm else float(prev.get("insurance") or 0)
+        prev = {}
+        if i < len(previous) and norm(previous[i].get("desc") or "") == norm(desc):
+            prev = previous[i]
+        else:
+            hits = [p for p in previous if norm(p.get("desc") or "") == norm(desc)]
+            if len(hits) == 1:
+                prev = hits[0]
+            elif i < len(previous):
+                prev = previous[i]
+        actual = abs(cell_num(rec.get("Actual")))
+        pct = cell_num(rec.get("% Increase"))
+        yearly = abs(cell_num(rec.get("Budgeted yearly")))
+        ins = cell_num(rec.get("Insurance payout")) if rm else float(prev.get("insurance") or 0)
         if "Recovered from some owners" in rec:
-            own = float(rec.get("Recovered from some owners") or 0)
+            own = abs(cell_num(rec.get("Recovered from some owners")))
         else:
             own = float(prev.get("owner_recovery") or 0)
         if "Lower the levies" in rec:
@@ -1315,15 +1346,19 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             against = prev.get("claim_against") or ""
         old_actual = abs(float(prev.get("actual") or 0))
         old_y = abs(float(prev.get("yearly") or 0))
-        shown_pct = pct_from_amounts(old_actual, old_y) if old_actual >= 0.5 else float(prev.get("pct") or 0)
-        pct_changed = abs(pct - shown_pct) > 0.2
+        shown_pct = round(pct_from_amounts(old_actual, old_y), 2) if old_actual >= 0.5 else round(float(prev.get("pct") or 0), 2)
+        pct_changed = abs(round(pct, 2) - shown_pct) > 0.05
         y_changed = abs(yearly - old_y) > 0.5
-        if pct_changed and not y_changed:
-            yearly = actual * (1 + pct / 100.0) if actual >= 0.5 else yearly
+        if pct_changed and actual >= 0.5:
+            yearly = round(actual * (1 + pct / 100.0), 2)
+            edit_mode = "pct"
         elif y_changed:
-            pct = pct_from_amounts(actual, yearly)
-        else:
             pct = pct_from_amounts(actual, yearly) if actual >= 0.5 else pct
+            edit_mode = "amount"
+        else:
+            edit_mode = prev.get("edit_mode") or "pct"
+            if actual >= 0.5 and edit_mode != "amount":
+                pct = pct_from_amounts(actual, yearly)
         if "Notes" not in rec or rec.get("Notes") is None or (
             isinstance(rec.get("Notes"), float) and pd.isna(rec.get("Notes"))
         ):
@@ -1343,6 +1378,7 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             "is_recovery": recovery,
             "reduces_levy": reduces,
             "claim_against": against,
+            "edit_mode": edit_mode,
         })
     return out
 
@@ -2107,7 +2143,7 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B7"] = "This year’s projects paid from the reserve"
     ws["B8"] = "Projected reserve at year-end"
     fml(ws["D8"], "D5+D6-D7")
-    ws["B9"] = "Interest is already inside the reserve balance above. It is not added again. Yellow cells = type here. Budgeted Yearly = Actual × (1 + %). Monthly = Yearly ÷ 12."
+    ws["B9"] = "Yellow cell = the one you type. If the % is yellow, Budgeted Yearly = Actual × (1 + %). If Budgeted Yearly is yellow, the % = Yearly ÷ Actual − 1. Monthly = Yearly ÷ 12."
     ws["B9"].font = Font(italic=True, size=9, color="666666")
 
     r = 11
@@ -2178,14 +2214,27 @@ def generate_excel(state: dict) -> BytesIO:
             ins = float(it.get("insurance") or 0)
             rec = bool(it.get("is_recovery")) and not recovery_as_income
             inp(ws.cell(r, 4), act, MONEY)
+            ins = float(it.get("insurance") or 0)
+            has_claim = False
+            for claim in (state.get("sections") or {}).get("recoveries_other") or []:
+                if norm(claim.get("claim_against") or "") == norm(desc) and abs(float(claim.get("yearly") or 0)) > 0.5 and named_rows.get(claim.get("desc") or ""):
+                    has_claim = True
+                    break
+            use_amount = (
+                it.get("edit_mode") == "amount"
+                and fam not in ("ordinary", "reserve", "csos_inc", "csos_exp")
+                and not rec
+                and ins < 0.5
+                and not owner_box
+                and not has_claim
+                and act >= 0.5
+            )
             if fam == "ordinary":
-                # % follows the levy formula so a meeting change to costs updates the %
-                fml(ws.cell(r, 5), f'IF(D{r}=0,0,F{r}/D{r}-1)')
+                fml(ws.cell(r, 5), f"IF(D{r}=0,0,F{r}/D{r}-1)")
                 ws.cell(r, 5).number_format = "0.00%"
-            else:
+            elif not use_amount:
                 show_pct = pct_from_amounts(act, y) if act >= 0.5 else pct
                 inp(ws.cell(r, 5), show_pct / 100.0, "0.00%")
-            expected = act * (1 + pct / 100.0)
             if fam == "ordinary":
                 pass  # F filled after totals
             elif fam == "reserve" and state.get("reserve_mode") in ("pct15", "15pct", "legal") and levy_rows.get("ordinary"):
@@ -2197,23 +2246,21 @@ def generate_excel(state: dict) -> BytesIO:
                 scale = f"*12/{months}" if months < 12 else ""
                 fml(ws.cell(r, 6), f"0.25*D{levy_rows['ordinary']}{scale}")
             elif fam == "reserve" and state.get("reserve_mode") == "rm100":
-                # Number first so the line is never blank. Linked to the R&M total once that row exists.
                 inp(ws.cell(r, 6), float(reserve_contribution(state) or y or 0), MONEY)
             elif fam == "reserve":
                 inp(ws.cell(r, 6), float(reserve_contribution(state) or y or 0), MONEY)
             elif is_own_scheme_csos(desc) and fam == "csos_exp" and levy_rows.get("csos"):
                 fml(ws.cell(r, 6), f"F{levy_rows['csos']}")
+            elif use_amount:
+                inp(ws.cell(r, 6), abs(y), MONEY)
+                fml(ws.cell(r, 5), f"IF(D{r}=0,0,F{r}/D{r}-1)")
+                ws.cell(r, 5).number_format = "0.00%"
+            elif act < 0.5 and abs(y) > 0.5 and not rec:
+                inp(ws.cell(r, 6), abs(y), MONEY)
             elif rec and not recovery_as_income:
                 fml(ws.cell(r, 6), f"-ABS(D{r}*(1+E{r}))")
             elif ins > 0.5:
-                if abs(y - expected) > 1 and abs(y) > 0.5:
-                    inp(ws.cell(r, 6), max(0.0, abs(y) - ins), MONEY)
-                else:
-                    fml(ws.cell(r, 6), f"MAX(0,D{r}*(1+E{r})-{ins})")
-            elif act < 0.5 and abs(y) > 0.5:
-                inp(ws.cell(r, 6), abs(y) if recovery_as_income or not rec else (y if y < 0 else abs(y)), MONEY)
-            elif abs(y - expected) > 1 and y > 0:
-                inp(ws.cell(r, 6), abs(y), MONEY)
+                fml(ws.cell(r, 6), f"MAX(0,D{r}*(1+E{r})-{ins})")
             else:
                 fml(ws.cell(r, 6), f"D{r}*(1+E{r})")
             fml(ws.cell(r, 7), f"F{r}/12")
@@ -2956,13 +3003,14 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
             if name and name not in cost_names:
                 cost_names.append(name)
     df = items_to_df(items, rm, recover, income=income, claims=claims, claim_map=claim_map)
-    with st.form(f"form_{key}"):
-        edited = st.data_editor(
-            df,
-            num_rows="dynamic",
-            use_container_width=True,
-            hide_index=True,
-            column_config={
+    nonce = int(st.session_state.get(f"_nonce_{key}") or 0)
+    edited = st.data_editor(
+        df,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key=f"grid_{key}_{nonce}",
+        column_config={
                 "Description": st.column_config.TextColumn("Description", width="medium"),
                 "Actual": st.column_config.NumberColumn("Actual", format="%.2f"),
                 "% Increase": st.column_config.NumberColumn(
@@ -2995,16 +3043,17 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
             },
             disabled=["Monthly"],
         )
-        saved = st.form_submit_button("Save this section", type="primary")
+    saved = st.button("Save this section", type="primary", key=f"save_{key}")
     if saved:
         st.session_state.sections[key] = save_editor(edited, items, rm, municipal=(key == "municipal"))
+        st.session_state[f"_nonce_{key}"] = nonce + 1
         if key == "levy":
             for r in st.session_state.sections["levy"]:
                 if is_ins_bill_line(r.get("desc") or "") and float(r.get("yearly") or 0) > 0.5:
                     st.session_state["_pending_insurance_bill"] = float(r["yearly"])
                     break
         apply_levy_lines(st.session_state)
-        st.success("Saved. If you typed %, yearly = actual × (1 + %). If you typed the rand amount, % = (yearly ÷ actual) × 100 − 100.")
+        st.success("Saved. A new % sets Budgeted yearly = Actual × (1 + %). A new yearly amount sets the %.")
         st.rerun()
     if key == "municipal":
         g, rec = municipal_gross_and_rec(st.session_state)
@@ -3387,8 +3436,10 @@ If the WeConnectU file only covers part of the year, set **Months covered by the
 ### 3. Type this year’s amounts
 On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly, and Notes.
 
-- Type **%** and Save → yearly = Actual × (1 + %). Example: 10 means plus 10%.
-- Type **Budgeted yearly** and Save → the % fills in by itself. % = (yearly ÷ actual) × 100 − 100.
+- Press **Enter** in the cell (so the number is kept), then **Save this section**.
+- Type **%** and Save → Budgeted yearly = Actual × (1 + %). Example: 10 means plus 10%.
+- Type **Budgeted yearly** and Save → the % fills in. % = (yearly ÷ actual) × 100 − 100.
+- If Actual is 0, a % cannot make a rand. Type the **Budgeted yearly** instead.
 - **Monthly** is always yearly ÷ 12. You cannot type it.
 - **Notes** go to the Comments column on the Excel sheet. Save after you type them.
 - A new line: type it on the blank row at the bottom, then Save.
@@ -3545,7 +3596,13 @@ Under Levies received there is one yellow line: **Approved — type a % or a ran
 - **Gap** is the costs minus the approved amount. Above zero means the costs are still higher. They cut a cost, or they take the gap from the reserve.
 - The PQ uses the **approved** amount.
 
-They can also change other yellow cells: a cost, a %, a note, **Lowers the levy** (Yes or No), **Comes off this cost**, a claim amount, and the reserve if it is an own amount.
+On a normal cost line, the **yellow** cell is the one you type. The other one calculates, and Monthly follows.
+
+- If you set that line with a **%**, the % is yellow. Budgeted yearly = Actual × (1 + %). Change the % and the yearly amount moves.
+- If you set that line with a **rand**, Budgeted yearly is yellow. The % = yearly ÷ Actual − 1. Change the rand and the % moves.
+- A line with an insurance payout, a claim, or “recovered from some owners” always keeps the % yellow, so the yearly amount stays a formula.
+
+They can also change notes, **Lowers the levy** (Yes or No), **Comes off this cost**, and the reserve when it is an own amount.
 
 Do **not** type on the % next to Levies received itself. That % is worked out from the costs. It jumps back.
 
