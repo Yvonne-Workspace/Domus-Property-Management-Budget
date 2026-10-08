@@ -430,14 +430,10 @@ def is_own_scheme_csos(desc: str) -> bool:
 
 
 def prev_admin_contributions(state: dict) -> float:
-    """Last year’s administrative (ordinary) levies. Scaled to 12 months if Actual is part-year."""
+    """Last year’s administrative (ordinary) levies, as typed. Not stretched to 12 months."""
     for r in state["sections"].get("levy") or []:
         if family(r.get("desc") or "") == "ordinary":
-            a = float(r.get("actual") or 0)
-            months = max(1, int(state.get("actual_months") or 12))
-            if 0 < months < 12 and a > 0:
-                return a / months * 12.0
-            return a
+            return float(r.get("actual") or 0)
     return 0.0
 
 
@@ -2125,13 +2121,9 @@ def generate_excel(state: dict) -> BytesIO:
             if fam == "ordinary":
                 pass  # F filled after totals
             elif fam == "reserve" and state.get("reserve_mode") in ("pct15", "15pct", "legal") and levy_rows.get("ordinary"):
-                months = max(1, int(state.get("actual_months") or 12))
-                scale = f"*12/{months}" if months < 12 else ""
-                fml(ws.cell(r, 6), f"0.15*D{levy_rows['ordinary']}{scale}")
+                fml(ws.cell(r, 6), f"0.15*D{levy_rows['ordinary']}")
             elif fam == "reserve" and state.get("reserve_mode") == "pct25" and levy_rows.get("ordinary"):
-                months = max(1, int(state.get("actual_months") or 12))
-                scale = f"*12/{months}" if months < 12 else ""
-                fml(ws.cell(r, 6), f"0.25*D{levy_rows['ordinary']}{scale}")
+                fml(ws.cell(r, 6), f"0.25*D{levy_rows['ordinary']}")
             elif fam == "reserve" and state.get("reserve_mode") == "rm100":
                 # Number first so the line is never blank. Linked to the R&M total once that row exists.
                 inp(ws.cell(r, 6), float(reserve_contribution(state) or y or 0), MONEY)
@@ -2824,7 +2816,6 @@ def init():
     ss.setdefault("ymp", [{"desc": "", "years": [0.0] * 10}])
     ss.setdefault("msg", "")
     ss.setdefault("current_monthly_levy", 0.0)
-    ss.setdefault("actual_months", 12)
     ss.setdefault("levy_approve_mode", "costs")
     ss.setdefault("levy_approved_pct", 0.0)
     ss.setdefault("levy_approved_amount", 0.0)
@@ -2912,14 +2903,9 @@ def main():
     reserve = next((r for r in s["levy"] if "reserve" in r["desc"].lower()), None)
     ordinary_row = next((r for r in s["levy"] if "ordinary" in r["desc"].lower()), None)
     actual_year = float(ordinary_row["actual"]) if ordinary_row else 0.0
-    months = max(1, int(st.session_state.get("actual_months") or 12))
-    if months < 12 and actual_year > 0:
-        actual_year_full = actual_year / months * 12
-    else:
-        actual_year_full = actual_year
     current_m = float(st.session_state.get("current_monthly_levy") or 0)
-    if current_m <= 0 and actual_year_full > 0:
-        current_m = actual_year_full / 12
+    if current_m <= 0 and actual_year > 0:
+        current_m = actual_year / 12
     approved = approved_ordinary(st.session_state)
     new_m = approved / 12
     levy_pct = 0.0 if current_m == 0 else (new_m / current_m) * 100 - 100
@@ -3080,7 +3066,7 @@ def main():
                 for k in (
                     "has_master_hoa", "insurance_mode", "insurance_bill_yearly", "auto_csos",
                     "reserve_mode", "reserve_amount", "reserve_balance", "scheme_type", "special_in_ordinary",
-                    "current_monthly_levy", "actual_months",
+                    "current_monthly_levy",
                     "levy_approve_mode", "levy_approved_pct", "levy_approved_amount",
                 ):
                     if k in data and data[k] is not None:
@@ -3099,13 +3085,6 @@ def main():
             min_value=0.0,
             step=100.0,
             help="Example: R26 400 per month for the whole complex. Not the yearly total.",
-        )
-        st.session_state.actual_months = st.number_input(
-            "Months covered by the Actual column",
-            min_value=1,
-            max_value=12,
-            value=int(st.session_state.actual_months),
-            help="12 = a full year. If WeConnectU is only 6 months, put 6 and we scale up for the %.",
         )
         st.header("Reserve fund")
         st.session_state.scheme_type = st.radio(
@@ -3238,7 +3217,7 @@ Choose **body corporate** or **HOA**. That only changes the reserve note. The fo
 2. **WeConnectU Excel** — brings in last year’s rands (Actual).
 3. **PQ Excel** — each unit’s share.
 
-If Actual is only part of a year, set **Months covered by the Actual column** (7 means seven months, and we scale it to a year).
+Actual is always a full year. Do not stretch it. If WeConnectU is only part of a year, type the full-year figure yourself.
 
 ### 3. Type this year’s amounts
 On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly.
