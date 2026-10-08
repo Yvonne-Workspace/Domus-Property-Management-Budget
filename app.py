@@ -108,6 +108,7 @@ def row(desc: str, note: str = "") -> dict:
         "id": uid(), "desc": desc, "actual": 0.0, "pct": 0.0, "yearly": 0.0,
         "insurance": 0.0, "owner_recovery": 0.0, "note": note, "is_recovery": False,
         "ytd": 0.0, "ytd_budget": 0.0, "pace": "month",
+        "latest": 0.0, "tail": 0.0, "months_done": 0,
     }
 
 
@@ -838,6 +839,7 @@ def num(v):
 def extract_wcu(uploaded, keep_zeros: bool = False) -> list:
     xl = pd.ExcelFile(uploaded)
     out = []
+    month_names = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
     for sheet in xl.sheet_names:
         df = pd.read_excel(xl, sheet_name=sheet, header=None)
         if df.empty or df.shape[1] < 4:
@@ -850,9 +852,17 @@ def extract_wcu(uploaded, keep_zeros: bool = False) -> list:
                 break
         if header is None:
             continue
+        partial_last = False
+        for i in range(header):
+            blob = " ".join(str(v) for v in df.iloc[i].tolist())
+            m = re.search(r"to\s+(\d{4})-(\d{2})-(\d{2})", blob)
+            if m and int(m.group(3)) < 28:
+                partial_last = True
+                break
         prev = [str(v).strip().lower() for v in df.iloc[header - 1].tolist()] if header else [""] * df.shape[1]
         cur = [str(v).strip().lower() for v in df.iloc[header].tolist()]
         merged = [(prev[i] if i < len(prev) else "") + " " + (cur[i] if i < len(cur) else "") for i in range(df.shape[1])]
+        month_cols = [i for i, t in enumerate(prev) if t[:3] in month_names]
         ytd = next((i for i, t in enumerate(merged) if "ytd" in t and "actual" in t and "var" not in t), None)
         if ytd is None:
             ytd = next((i for i, t in enumerate(cur) if t == "actual"), None)
@@ -868,6 +878,7 @@ def extract_wcu(uploaded, keep_zeros: bool = False) -> list:
                 continue
             budget_i = i
             break
+        n_months = len(month_cols)
         for r in range(header + 1, len(df)):
             raw = str(df.iloc[r, 0] or "").strip()
             if not raw or re.match(r"^(total|surplus|shortfall)", raw, re.I):
@@ -884,9 +895,21 @@ def extract_wcu(uploaded, keep_zeros: bool = False) -> list:
                     continue
             actual = abs(num(df.iloc[r, ytd]) or 0.0)
             budget = abs(num(df.iloc[r, budget_i]) or 0.0) if budget_i is not None else 0.0
-            if actual < 0.5 and (not keep_zeros or budget < 0.5):
+            latest, tail, done = 0.0, 0.0, n_months
+            if month_cols:
+                vals = [abs(num(df.iloc[r, c]) or 0.0) for c in month_cols]
+                last = vals[-1]
+                prev_m = vals[-2] if len(vals) > 1 else 0.0
+                if partial_last and len(vals) > 1 and (last < 0.5 or (prev_m > 50 and last < prev_m * 0.65)):
+                    latest, tail, done = prev_m, last, len(vals) - 1
+                else:
+                    latest, tail, done = last, 0.0, len(vals)
+            if actual < 0.5 and latest < 0.5 and (not keep_zeros or budget < 0.5):
                 continue
-            out.append({"desc": desc, "actual": actual, "budget": budget})
+            out.append({
+                "desc": desc, "actual": actual, "budget": budget,
+                "latest": latest, "tail": tail, "months_done": done, "months_in_file": n_months,
+            })
     return out
 
 
@@ -1226,36 +1249,53 @@ PACE_LABELS = {
 PACE_FROM = {v: k for k, v in PACE_LABELS.items()}
 
 
+def next_year_base(it: dict, state: dict) -> float:
+    """Today's price for a whole year. A % is added to this, not to the average of the months."""
+    if not state.get("early_budget"):
+        return abs(float(it.get("actual") or 0))
+    latest = abs(float(it.get("latest") or 0))
+    if latest > 0.5:
+        return latest * 12.0
+    ytd = abs(float(it.get("ytd") or 0))
+    if ytd < 0.5:
+        budget = abs(float(it.get("ytd_budget") or 0))
+        if budget > 0.5:
+            return budget
+        return abs(float(it.get("actual") or 0))
+    return 0.0
+
+
 def line_forecast(it: dict, state: dict) -> float:
-    """What this unfinished year will finish at. Not next year's budget."""
+    """What this unfinished year will finish at. Already billed, plus the months still to come at the latest month."""
     actual = abs(float(it.get("actual") or 0))
     if not state.get("early_budget"):
         return actual
-    months = max(1, min(11, int(state.get("early_months") or 10)))
-    pace = it.get("pace") or "month"
     ytd = abs(float(it.get("ytd") or 0))
-    ytd_b = abs(float(it.get("ytd_budget") or 0))
-    if pace == "once":
-        return ytd
-    if pace == "later":
-        return ytd_b if ytd_b > 0.5 else actual
-    if ytd > 0.5:
-        return ytd / months * 12.0
-    return actual
+    latest = abs(float(it.get("latest") or 0))
+    tail = abs(float(it.get("tail") or 0))
+    if ytd < 0.5 and latest < 0.5:
+        budget = abs(float(it.get("ytd_budget") or 0))
+        return budget if budget > 0.5 else actual
+    if latest < 0.5:
+        return max(0.0, ytd - tail)
+    done = int(it.get("months_done") or state.get("early_months") or 10)
+    done = max(0, min(12, done))
+    return max(0.0, ytd - tail) + latest * (12 - done)
 
 
 def _yearly_from_forecast(it: dict, state: dict) -> None:
-    """Move next year's amount onto the forecast when it is still just a copy of last year."""
-    if (it.get("pace") or "month") == "once":
+    """Set next year from today's monthly price, unless a yearly amount was already chosen."""
+    fam = family(it.get("desc") or "")
+    if fam in ("ordinary", "reserve", "csos_inc", "csos_exp", "int_arr", "invest"):
         return
-    fc = line_forecast(it, state)
-    if fc < 0.5:
+    base = next_year_base(it, state)
+    if base < 0.5:
         return
     pct = float(it.get("pct") or 0)
     last = abs(float(it.get("actual") or 0)) * (1 + pct / 100.0)
     yearly = abs(float(it.get("yearly") or 0))
     if yearly < 0.5 or abs(yearly - last) < 1.0:
-        it["yearly"] = fc * (1 + pct / 100.0)
+        it["yearly"] = base * (1 + pct / 100.0)
 
 
 def match_into(extracted: list, sections: dict, fields: str = "actual", state: dict | None = None) -> tuple[dict, int]:
@@ -1305,6 +1345,9 @@ def match_into(extracted: list, sections: dict, fields: str = "actual", state: d
             if fields == "ytd":
                 it["ytd"] = abs(float(src.get("actual") or 0))
                 it["ytd_budget"] = abs(float(src.get("budget") or 0))
+                it["latest"] = abs(float(src.get("latest") or 0))
+                it["tail"] = abs(float(src.get("tail") or 0))
+                it["months_done"] = int(src.get("months_done") or 0)
                 if state and state.get("early_budget"):
                     _yearly_from_forecast(it, state)
             else:
@@ -1333,6 +1376,8 @@ def match_into(extracted: list, sections: dict, fields: str = "actual", state: d
             if existing and fields == "ytd":
                 existing["ytd"] = float(existing.get("ytd") or 0) + abs(float(src.get("actual") or 0))
                 existing["ytd_budget"] = float(existing.get("ytd_budget") or 0) + abs(float(src.get("budget") or 0))
+                existing["latest"] = float(existing.get("latest") or 0) + abs(float(src.get("latest") or 0))
+                existing["tail"] = float(existing.get("tail") or 0) + abs(float(src.get("tail") or 0))
                 if state and state.get("early_budget"):
                     _yearly_from_forecast(existing, state)
                 continue
@@ -1341,6 +1386,9 @@ def match_into(extracted: list, sections: dict, fields: str = "actual", state: d
             extra["actual"] = 0.0
             extra["ytd"] = abs(float(src.get("actual") or 0))
             extra["ytd_budget"] = abs(float(src.get("budget") or 0))
+            extra["latest"] = abs(float(src.get("latest") or 0))
+            extra["tail"] = abs(float(src.get("tail") or 0))
+            extra["months_done"] = int(src.get("months_done") or 0)
             extra["yearly"] = 0.0
             if state and state.get("early_budget"):
                 _yearly_from_forecast(extra, state)
@@ -1364,13 +1412,10 @@ def items_to_df(items: list, rm: bool, recover: bool = False, early: bool = Fals
         ins = float(it.get("insurance") or 0)
         own = float(it.get("owner_recovery") or 0)
         net = max(0.0, yearly - ins - own) if show_extra else abs(yearly)
-        pace = it.get("pace") or "month"
         if early:
             fc = line_forecast(it, state)
-            if pace == "once" and yearly < 0.5:
-                pct = 0.0
-            else:
-                pct = pct_from_amounts(fc, yearly) if fc >= 0.5 else stored
+            base = next_year_base(it, state)
+            pct = pct_from_amounts(base, yearly) if base >= 0.5 else stored
         else:
             fc = 0.0
             pct = pct_from_amounts(actual, yearly) if actual >= 0.5 else stored
@@ -1384,8 +1429,8 @@ def items_to_df(items: list, rm: bool, recover: bool = False, early: bool = Fals
         }
         if early:
             rec["Spent so far"] = float(it.get("ytd") or 0)
+            rec["Latest month"] = float(it.get("latest") or 0)
             rec["This year budget"] = float(it.get("ytd_budget") or 0)
-            rec["This line"] = PACE_LABELS.get(pace, "Every month")
             rec["This year finishes at"] = fc
         if rm:
             rec["Insurance payout"] = ins
@@ -1397,7 +1442,7 @@ def items_to_df(items: list, rm: bool, recover: bool = False, early: bool = Fals
     cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Notes"]
     if early:
         cols = [
-            "Description", "Actual", "Spent so far", "This year budget", "This line",
+            "Description", "Actual", "Spent so far", "Latest month", "This year budget",
             "This year finishes at", "% Increase", "Budgeted yearly",
         ]
         if rm:
@@ -1447,31 +1492,38 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             ytd_b = abs(cell_num(rec.get("This year budget")))
         else:
             ytd_b = abs(float(prev.get("ytd_budget") or 0))
-        pace = PACE_FROM.get(str(rec.get("This line") or ""), prev.get("pace") or "month")
+        if "Latest month" in rec:
+            latest = abs(cell_num(rec.get("Latest month")))
+        else:
+            latest = abs(float(prev.get("latest") or 0))
+        tail = abs(float(prev.get("tail") or 0))
+        done = int(prev.get("months_done") or 0)
         old_actual = abs(float(prev.get("actual") or 0))
         old_y = abs(float(prev.get("yearly") or 0))
+        old_latest = abs(float(prev.get("latest") or 0))
         draft = {
-            "actual": actual, "ytd": ytd, "ytd_budget": ytd_b, "pace": pace,
+            "actual": actual, "ytd": ytd, "ytd_budget": ytd_b,
+            "latest": latest, "tail": tail, "months_done": done,
         }
         if early:
-            fc_old = line_forecast({**prev, "actual": old_actual}, state)
-            if (prev.get("pace") or "month") == "once" and old_y < 0.5:
-                shown_pct = 0.0
-            else:
-                shown_pct = pct_from_amounts(fc_old, old_y) if fc_old >= 0.5 else float(prev.get("pct") or 0)
+            base_old = next_year_base({**prev, "actual": old_actual}, state)
+            shown_pct = pct_from_amounts(base_old, old_y) if base_old >= 0.5 else float(prev.get("pct") or 0)
         else:
             shown_pct = pct_from_amounts(old_actual, old_y) if old_actual >= 0.5 else float(prev.get("pct") or 0)
         pct_changed = abs(pct - shown_pct) > 0.2
         y_changed = abs(yearly - old_y) > 0.5
-        pace_changed = pace != (prev.get("pace") or "month")
+        latest_changed = abs(latest - old_latest) > 0.5
         if early:
-            fc = line_forecast(draft, state)
+            base = next_year_base(draft, state)
             if y_changed:
-                pct = pct_from_amounts(fc, yearly) if fc > 0.5 else pct
-            elif pct_changed and fc > 0.5:
-                yearly = fc * (1 + pct / 100.0)
-            elif (pace_changed or not y_changed) and fc > 0.5 and yearly < 0.5 and pace != "once":
-                yearly = fc
+                pct = pct_from_amounts(base, yearly) if base > 0.5 else pct
+            elif pct_changed and base > 0.5:
+                yearly = base * (1 + pct / 100.0)
+            elif latest_changed and base > 0.5:
+                yearly = base * (1 + float(prev.get("pct") or 0) / 100.0)
+                pct = float(prev.get("pct") or 0)
+            elif yearly < 0.5 and base > 0.5:
+                yearly = base
                 pct = 0.0
         elif pct_changed and not y_changed:
             yearly = actual * (1 + pct / 100.0) if actual >= 0.5 else yearly
@@ -1496,7 +1548,10 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             "owner_recovery": own,
             "ytd": ytd,
             "ytd_budget": ytd_b,
-            "pace": pace,
+            "latest": latest,
+            "tail": tail,
+            "months_done": done,
+            "pace": prev.get("pace") or "month",
             "note": note,
             "is_recovery": recovery,
             "levy_use": (
@@ -2243,10 +2298,11 @@ def generate_excel(state: dict) -> BytesIO:
     # Normal sheet: Actual, %, Budgeted Yearly, Monthly, Notes.
     # Early sheet: Actual, the months so far, the full year, then the same % and Budgeted Yearly.
     C_ACT, C_PCT, C_YEAR, C_MON, C_NOTE, C_OWN = 4, 5, 6, 7, 8, 9
-    C_SPENT = C_FULL = None
+    C_SPENT = C_LATEST = C_FULL = None
     if early:
-        C_SPENT, C_FULL, C_PCT, C_YEAR, C_MON, C_NOTE, C_OWN = 5, 6, 7, 8, 9, 10, 11
-        for i, w in enumerate([3, 42, 14, 16, 16, 16, 12, 18, 14, 40, 22], 1):
+        C_SPENT, C_LATEST, C_FULL = 5, 6, 7
+        C_PCT, C_YEAR, C_MON, C_NOTE, C_OWN = 8, 9, 10, 11, 12
+        for i, w in enumerate([3, 36, 12, 16, 16, 16, 18, 12, 18, 14, 36, 22], 1):
             ws.column_dimensions[get_column_letter(i)].width = w
     YL = get_column_letter(C_YEAR)
     PL = get_column_letter(C_PCT)
@@ -2309,9 +2365,9 @@ def generate_excel(state: dict) -> BytesIO:
         lab.border = THIN
         ws.row_dimensions[rr].height = 30
     ws["B9"] = (
-        "Actual is the last full year. The next column is the months already in the books. "
-        "Full year turns those months into 12. A bill that is not paid yet uses this year’s budget instead. "
-        "% and Budgeted Yearly work like the normal sheet, on that full year. Yellow cells = type here."
+        "Actual is last year. Spent so far is this year so far. Latest month is the last full month. "
+        "This year finishes at is spent so far plus the months still to come at that latest month. "
+        "Budgeted Yearly starts at Latest month × 12. A % is only a new increase on that. Yellow cells = type here."
         if early
         else "Interest is already inside the reserve balance above. It is not added again. Yellow cells = type here. Budgeted Yearly = Actual × (1 + %). Monthly = Yearly ÷ 12."
     )
@@ -2334,7 +2390,7 @@ def generate_excel(state: dict) -> BytesIO:
         labs = ["Description", "GL Code", "Actual", "%", "Budgeted Yearly", "Monthly", "Comments / Notes"]
         if early:
             labs = [
-                "Description", "GL Code", "Actual", f"{n_months} months", "Full year",
+                "Description", "GL Code", "Actual", "Spent so far", "Latest month", "This year finishes at",
                 "%", "Budgeted Yearly", "Monthly", "Comments / Notes",
             ]
         for i, lab in enumerate(labs, 2):
@@ -2381,32 +2437,33 @@ def generate_excel(state: dict) -> BytesIO:
                 is_own_scheme_csos(desc)
             )
             inp(ws.cell(r, C_ACT), act, MONEY)
-            pace = it.get("pace") or "month"
             if early_line and C_SPENT:
                 spent_c = ws.cell(r, C_SPENT)
                 inp(spent_c, abs(float(it.get("ytd") or 0)), MONEY)
                 fill(spent_c, "D6EFEA")
+                latest_c = ws.cell(r, C_LATEST)
+                inp(latest_c, abs(float(it.get("latest") or 0)), MONEY)
+                done = int(it.get("months_done") or n_months or 0)
+                done = max(0, min(12, done))
+                tail = abs(float(it.get("tail") or 0))
                 full_c = ws.cell(r, C_FULL)
-                if pace == "once":
-                    fml(full_c, f"E{r}")
-                elif pace == "later":
-                    inp(full_c, abs(float(it.get("ytd_budget") or 0)), MONEY)
-                else:
-                    fml(full_c, f"IF(E{r}=0,0,E{r}/{n_months}*12)")
+                fml(full_c, f"MAX(0,E{r}-{tail}+F{r}*{12 - done})")
                 fill(full_c, "D6EFEA")
-            base = f"{get_column_letter(C_FULL)}{r}" if early_line and C_FULL else f"D{r}"
+            base_amt = next_year_base(it, state) if early_line else act
+            rate_cell = f"{get_column_letter(C_LATEST)}{r}" if early_line and C_LATEST else f"D{r}"
             if fam == "ordinary":
                 fml(ws.cell(r, C_PCT), f"IF(D{r}=0,0,{YL}{r}/D{r}-1)")
                 ws.cell(r, C_PCT).number_format = "0.00%"
             elif early_line:
-                fc = line_forecast(it, state)
-                show_pct = pct_from_amounts(fc, abs(y)) if fc >= 0.5 else pct
+                show_pct = pct_from_amounts(base_amt, abs(y)) if base_amt >= 0.5 else pct
                 inp(ws.cell(r, C_PCT), show_pct / 100.0, "0.00%")
             else:
                 show_pct = pct_from_amounts(act, y) if act >= 0.5 else pct
                 inp(ws.cell(r, C_PCT), show_pct / 100.0, "0.00%")
-            fc_now = line_forecast(it, state) if early_line else act
-            expected = fc_now * (1 + pct / 100.0) if fc_now >= 0.5 else y
+            expected = base_amt * (1 + pct / 100.0) if base_amt >= 0.5 else y
+            grow = f"{rate_cell}*12" if early_line else rate_cell
+            if early_line and abs(float(it.get("latest") or 0)) < 0.5:
+                grow = None
             year_cell = ws.cell(r, C_YEAR)
             if fam == "ordinary":
                 pass
@@ -2425,15 +2482,20 @@ def generate_excel(state: dict) -> BytesIO:
             elif is_own_scheme_csos(desc) and fam == "csos_exp" and levy_rows.get("csos"):
                 fml(year_cell, f"{YL}{levy_rows['csos']}")
             elif rec and not recovery_as_income:
-                fml(year_cell, f"-ABS({base}*(1+{PL}{r}))")
+                if grow:
+                    fml(year_cell, f"-ABS({grow}*(1+{PL}{r}))")
+                else:
+                    inp(year_cell, y if y < 0 else -abs(y), MONEY)
             elif abs(y - expected) > 1 and abs(y) > 0.5:
                 inp(year_cell, max(0.0, abs(y) - ins), MONEY)
-            elif ins > 0.5:
-                fml(year_cell, f"MAX(0,{base}*(1+{PL}{r})-{ins})")
+            elif ins > 0.5 and grow:
+                fml(year_cell, f"MAX(0,{grow}*(1+{PL}{r})-{ins})")
             elif act < 0.5 and abs(y) > 0.5 and not early_line:
                 inp(year_cell, abs(y), MONEY)
+            elif grow:
+                fml(year_cell, f"MAX(0,{grow}*(1+{PL}{r})-{ins})")
             else:
-                fml(year_cell, f"MAX(0,{base}*(1+{PL}{r})-{ins})")
+                inp(year_cell, max(0.0, abs(y) - ins), MONEY)
             fml(ws.cell(r, C_MON), f"{YL}{r}/12")
             note = clean_note(it.get("note"))
             if ins:
@@ -2471,7 +2533,8 @@ def generate_excel(state: dict) -> BytesIO:
         fml(ws.cell(r, C_ACT), f"SUM(D{start}:D{end})", TOTAL)
         if early and C_SPENT:
             fml(ws.cell(r, C_SPENT), f"SUM(E{start}:E{end})", TOTAL)
-            fml(ws.cell(r, C_FULL), f"SUM(F{start}:F{end})", TOTAL)
+            fml(ws.cell(r, C_LATEST), f"SUM(F{start}:F{end})", TOTAL)
+            fml(ws.cell(r, C_FULL), f"SUM(G{start}:G{end})", TOTAL)
         fml(ws.cell(r, C_YEAR), f"SUM({YL}{start}:{YL}{end})", TOTAL)
         fml(ws.cell(r, C_MON), f"{YL}{r}/12", TOTAL)
         row_n = r
@@ -2811,6 +2874,8 @@ def _budget_cols(ws) -> dict:
         headers = [str(ws.cell(r, c).value or "").strip().lower() for c in range(2, 13)]
         if not headers or headers[0] != "description":
             continue
+        if any("latest month" in h for h in headers):
+            return {"pct": 8, "year": 9, "note": 11, "own": 12, "spent": 5}
         if any(h == "full year" or h.endswith("months") or h.endswith("month") for h in headers):
             return {"pct": 7, "year": 8, "note": 10, "own": 11, "spent": 5}
         if any("spent so far" in h for h in headers):
@@ -2868,6 +2933,10 @@ def _apply_budget_sheet(wb, data: dict) -> None:
             spent_v = ws.cell(r, cols["spent"]).value
             if isinstance(spent_v, (int, float)):
                 found["ytd"] = abs(float(spent_v))
+        if cols.get("pct") == 8:
+            lat = ws.cell(r, 6).value
+            if isinstance(lat, (int, float)):
+                found["latest"] = abs(float(lat))
         if fam == "ordinary":
             continue
         if fam == "reserve" and isinstance(year_v, (int, float)):
@@ -3159,7 +3228,8 @@ def _grid_fp(items: list) -> str:
             f"{float(it.get('actual') or 0):.2f}",
             f"{float(it.get('ytd') or 0):.2f}",
             f"{float(it.get('ytd_budget') or 0):.2f}",
-            str(it.get("pace") or ""),
+            f"{float(it.get('latest') or 0):.2f}",
+            str(it.get("months_done") or ""),
             f"{float(it.get('insurance') or 0):.2f}",
             f"{float(it.get('owner_recovery') or 0):.2f}",
             str(it.get("levy_use") or ""),
@@ -3195,21 +3265,17 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
             "Description": st.column_config.TextColumn("Description", width="medium"),
             "Actual": st.column_config.NumberColumn("Actual", format="%.2f", help="Last full year."),
             "Spent so far": st.column_config.NumberColumn("Spent so far", format="%.2f", help="This year, the months already in the books."),
-            "This year budget": st.column_config.NumberColumn("This year budget", format="%.2f", help="This year’s approved budget. Used when the cost is not paid yet."),
-            "This line": st.column_config.SelectboxColumn(
-                "This line",
-                options=["Every month", "Already paid", "Not paid yet"],
-                help="Every month is stretched to 12. Already paid is not. Not paid yet uses this year’s budget.",
-            ),
+            "Latest month": st.column_config.NumberColumn("Latest month", format="%.2f", help="The last full month. Next year starts from this × 12. An increase already in this month is not added again."),
+            "This year budget": st.column_config.NumberColumn("This year budget", format="%.2f", help="Only used when nothing has been spent yet."),
             "This year finishes at": st.column_config.NumberColumn(
                 "This year finishes at", format="%.2f", disabled=True,
-                help="What this year will come to. Next year’s % is on this figure.",
+                help="Spent so far, plus the months still to come at the latest month. You do not type this.",
             ),
             "% Increase": st.column_config.NumberColumn(
                 "% Increase",
                 format="%.2f",
                 help=(
-                    "Type 5 for 5% on what this year finishes at, then Save. Not on last year’s Actual."
+                    "A new increase on today’s price (latest month × 12). Not on last year, and not on the average."
                     if early
                     else "Type 10 for +10%, then Save. We set Budgeted yearly = Actual × 1.10"
                 ),
@@ -3443,13 +3509,16 @@ def main():
                 type=["xlsx", "xls", "xlsm"],
                 key="wcu_ytd",
             )
-            st.caption("The year that is not finished. This fills Spent so far. It does not replace Actual.")
+            st.caption("The year that is not finished. This fills Spent so far and Latest month. It does not replace Actual.")
             if ytd_up and st.button("Load this year"):
                 try:
                     rows = extract_wcu(ytd_up, keep_zeros=True)
                     if not rows:
                         st.error("No lines found. Export Options → Budget and Actuals.")
                     else:
+                        nfile = next((int(x.get("months_in_file") or 0) for x in rows if int(x.get("months_in_file") or 0)), 0)
+                        if 1 <= nfile <= 11:
+                            st.session_state.early_months = nfile
                         secs, added = match_into(rows, st.session_state.sections, fields="ytd", state=st.session_state)
                         st.session_state.sections = secs
                         st.session_state.msg = (
@@ -3662,38 +3731,25 @@ If this budget is for a year that has not finished, tick **This budget is before
 Most complexes stop there. If Actual is only part of a year and you want every line stretched the same way, set **Months covered by the Actual column**. Do not use that for a 10-month budget. Use the tick instead, and leave Months on **12**.
 
 ### 3. Only some complexes — the year has not finished
-Also load **This year’s WeConnectU**, then click **Load this year**. That fills **Spent so far**. It does not replace Actual.
+Also load **This year’s WeConnectU**, then click **Load this year**. That fills **Spent so far** and **Latest month**. It does not replace Actual.
 
-| Column in the app | What it is |
+| Column | What you do |
 |---|---|
-| **Actual** | The last full year. The comparison. Do not build the new budget from this. |
-| **Spent so far** | This year, the months already in the books. |
-| **This year budget** | This year’s own budget, from the same WeConnectU file. |
-| **This line** | How to turn the months into a full year. |
-| **This year finishes at** | **Budget on this.** |
+| **Actual** | Last full year. Do not build the new budget from this. |
+| **Spent so far** | Already filled in. The months in the file. |
+| **Latest month** | Already filled in. The last full month. If the file stops on 8 October, a tiny October is ignored and September is used. A full levy for October is kept. |
+| **This year budget** | Only if nothing has been spent yet. |
+| **This year finishes at** | Worked out for you. Spent so far, plus the months still to come at the latest month. |
+| **%** | Only a new increase. Today’s price is Latest month × 12. Do not type 2%, 8% or 10% again if that increase is already in the latest month. |
+| **Budgeted yearly** | Latest month × 12, plus the new %. Or type a rand. |
 
-Set **This line**, then Save:
+The levy in the example finishes at the ten months already billed, plus November and December at the October levy. Next year starts at that October levy × 12.
 
-- **Every month** (security, salaries, the management fee) — spent so far ÷ months × 12.
-- **Already paid** (a repair that will not happen again) — not stretched. Next year is often **0**.
-- **Not paid yet** (insurance, the audit) — uses this year’s budget, not the months so far.
+**On the Excel sheet**, a normal budget stays: Actual, %, Budgeted Yearly, Monthly, Notes.
 
-Type **%** and Save. That % is added onto **This year finishes at**, not onto Actual.
+When the tick is on, the columns after Actual are **Spent so far**, **Latest month**, **This year finishes at**, then **%**, **Budgeted Yearly**, **Monthly** and **Notes**.
 
-**On the Excel sheet**, a normal budget stays exactly as it was: Actual, %, Budgeted Yearly, Monthly, Notes.
-
-When the tick is on, two columns are inserted after Actual. The rest of the sheet is the same.
-
-| Column | What it is |
-|---|---|
-| **Actual** | The last full year |
-| **9 months** or **10 months** | This year, the months already in the books. Next to Actual. |
-| **Full year** | Those months turned into 12. **Budget on this.** A bill that is not paid yet uses this year’s budget instead. |
-| **%** | The increase on Full year. Type 10 for plus 10%. |
-| **Budgeted Yearly** | Next year. Full year × (1 + %). |
-| **Monthly** | Budgeted Yearly ÷ 12 |
-
-The levy line itself still compares with the last full year, because that is what the owners paid.
+The levy you charge is still worked out from the costs. It is not this stretch.
 
 ### 4. What owners pay now
 In the sidebar, **Current ordinary levy — all units, one month** is the rand the whole complex pays today. Example: R 26 400 a month, not the yearly total. The top of the screen uses this to show the increase. If you leave it at 0, the app uses last year’s levy ÷ 12.
@@ -3708,8 +3764,8 @@ On each cost tab: Actual, % Increase, Budgeted yearly, Monthly.
 
 **Tick on:**
 
-- Type **%** and Save → yearly = This year finishes at × (1 + %).
-- On the Excel sheet that same % sits in the normal **%** column, and it is applied to **Full year**.
+- Type **%** and Save → yearly = Latest month × 12 × (1 + %).
+- Type **Budgeted yearly** if you want a different rand. The % fills in.
 
 **Monthly** is always yearly ÷ 12. You cannot type it.
 
@@ -3825,7 +3881,7 @@ Do not type on the % next to Levies received further down. That % is worked out 
 
 They can also change the other yellow cells: a cost, a note, and the reserve if it is an own amount.
 
-If the tick was on, the cost lines also show **9 months** or **10 months**, then **Full year**. Change **%** or **Budgeted Yearly** the same way as on a normal sheet. The % is on Full year, not on Actual.
+If the tick was on, change **%** or **Budgeted Yearly**. The % is on Latest month × 12, not on Actual and not on the average of the months.
 
 ### 20. When the sheet comes back
 In the sidebar, **Restore my budget**, and choose the file they sent. Their approved levy, the yellow cells and the notes come back. Then download again if you need a clean sheet.
