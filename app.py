@@ -3366,107 +3366,203 @@ def main():
         st.subheader("How to use this budget")
         st.markdown(
             """
-**Do this in order.** Click **Save this section** after every tab you change. Nothing is kept until Save.
+**Do this in order.** Click **Save this section** after every tab you change. Nothing is kept until Save. You can add a row at the bottom of any table if this complex has a line that is not listed.
 
 ### 1. Name the complex
 In the sidebar, type the **complex name** and the **financial year** (for example 1 March 2027 – 28 February 2028).
-Choose **body corporate** or **HOA**. That only changes the reserve note. The four reserve choices work for both.
+
+Choose **body corporate** or **HOA**. The four reserve choices work for both. The note under the reserve box changes: a body corporate also sees the Act’s minimum, an HOA follows its MOI or constitution. The note does not change the amount. You do.
 
 ### 2. Load last year
-1. **Financial statement PDF** — brings in the line names.
-2. **WeConnectU Excel** — brings in last year’s rands (Actual).
-3. **PQ Excel** — each unit’s share.
+On the left, in this order:
 
-If Actual is only part of a year, set **Months covered by the Actual column** (7 means seven months, and we scale it to a year).
+1. **Annual financial statement (PDF)** — brings in the line names, so the budget reads like the financial statements.
+2. **WeConnectU Actual vs Budget (Excel)** — brings in last year’s rands (the Actual column). Click **Load Excel**.
+3. **PQ / unit ratios** — each unit’s share. Click **Load PQs**. You can also upload the same file on the **PQ / Levies** tab.
+
+If the WeConnectU file only covers part of the year, set **Months covered by the Actual column**. 12 means a full year and nothing is stretched. 7 means seven months, and the levy comparison is scaled up to a year. Leave it on **12** unless you mean to stretch.
+
+**Current ordinary levy — all units, one month** is what owners pay now, for the whole complex, for one month. It is only for the comparison at the top. It is not the new budget.
 
 ### 3. Type this year’s amounts
-On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly.
+On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly, and Notes.
 
 - Type **%** and Save → yearly = Actual × (1 + %). Example: 10 means plus 10%.
-- Type **Budgeted yearly** and Save → we fill in the %.
+- Type **Budgeted yearly** and Save → the % fills in by itself. % = (yearly ÷ actual) × 100 − 100.
 - **Monthly** is always yearly ÷ 12. You cannot type it.
+- **Notes** go to the Comments column on the Excel sheet. Save after you type them.
+- A new line: type it on the blank row at the bottom, then Save.
 
 ### 4. What ordinary levies are
 Ordinary levies are **not** last year’s levy plus a %.
 
 **Ordinary = net municipal + expenditure + repairs and maintenance + personnel + tax − only the other income you tick**
 
-(and special projects only if you tick that box).
+Special projects are added only if you tick **Add Special Projects into ordinary levies**.
 
-On **Other Income**, tick **Lower the levies** on a line only if this complex uses that money to pay the bills. Nothing is ticked for you. Unticked income stays on the sheet and does not change the levy. Do not tick bank interest if it already sits in the reserve.
+The **% on Levies received** is the result of that sum. Do not type over it. It will not stick.
 
-**Claims** (legal fees recovered, insurance claim, or a repair invoiced to an owner) are not income. Type the amount, then pick **Comes off this cost**. Example: legal recovery comes off Legal Expense. A broken window comes off the repair line. The cost stays, and the claim comes off it. Do not also type the same insurance payout on the repair line.
+The box **Why is the levy this amount?** at the top lists each piece in rand.
 
-**Net municipal** = what the city bills us, minus what owners pay back (electricity, water, sewer, refuse).
-
-The **% on Levies received** is only the result of those costs. Do not type over it. It will not stick.
-
-**Left out of ordinary** (they have their own columns, or they are R0):
+**Left out of ordinary** (own column, or R0):
 
 - Reserve fund
 - CSOS
-- Insurance, if owners pay it on its own invoice line
-- A master-estate levy, if owners pay another estate through us
-- Garden service, if owners pay the gardener themselves (set that line to R0)
+- Insurance, when owners pay it on its own invoice line
+- A master-estate levy, when owners pay another estate through us
+- Garden service, when owners pay the gardener themselves (set that Expenditure line to R0)
+- Income you did **not** tick
 
-Some owners may pay part of one bill, for example a private refuse company. That is not income and not municipal.
-On **Expenditure** or **Repair & Maintenance**, type the full bill in Budgeted yearly, and what those owners pay in **Recovered from some owners**.
-The levy carries the bill minus that amount. There is no extra column on the PQ sheet.
+### 5. Other income — you tick it
+On **Income → Other Income** each line has **Lower the levies**.
 
-### 5. Reserve fund
-Pick one, for a body corporate **or** an HOA:
+- Tick a line only if **this** complex uses that money to pay the running costs. Rental is the usual one.
+- Nothing is ticked for you. Complexes are not the same.
+- Unticked income stays on the sheet and does **not** change the levy.
+- Do **not** tick bank interest if that interest is already inside the reserve balance. Using it again would spend it twice. Leave it for the tax estimate.
+- Do **not** tick interest on arrears or penalties unless you are sure that money will come in. You cannot count on owners paying late.
+- Save. The caption under the table shows how much is coming off the levy.
+
+On the Excel sheet the same choice is the column **Lowers the levy** (Yes or No). The ordinary-levy formula subtracts only the Yes lines. If the meeting changes a Yes amount, the levy moves with it.
+
+### 6. Claims — money that pays a cost
+**Income → Claims** is not income and not a levy column.
+
+Type the amount, then under **Comes off this cost** pick the expense or repair it pays. The cost stays on the books. The claim comes off that cost, never below R0.
+
+- **Legal fees recovered:** pick **Legal Expense**. If the bill and the recovery are the same, legal adds nothing to the levy.
+- **A repair invoiced to an owner** (a broken window): use **Charged to an owner**, or add a row. Pick the repair line, for example General Building.
+- **Insurance claim:** either type the payout on the repair line, **or** put it here and pick that repair. Do not do both, or it comes off twice. The app warns you if both are filled in.
+
+Until you pick a cost, the claim does not change the levy.
+
+On the Excel sheet this block is **CLAIMS**. Column **Comes off this cost** names the line, and that line’s yearly formula subtracts the claim.
+
+### 7. Municipal
+On **Municipal**, the city bill and the recovery are separate lines.
+
+- Type the city bill as a positive amount (electricity, water, sewerage, refuse, rates).
+- Type what owners pay back as a positive amount on the **Less: … recovered** line. Do not type a minus. Any line with the word **recovered** in the name is subtracted, including a sewer-plant recovery.
+- **Net municipal** = city bill minus recovered. That net is what goes into the levy.
+- If recovered is less than the city bill, the difference is an **under-recovery**. It is already inside the net. Do not add it again. The sheet lists it so the trustees can see it and attend to it.
+
+### 8. Expenditure and repairs
+**Expenditure** is the operating costs (accounting, audit, security, legal, garden contract, and so on). Not repairs, not salaries, not tax.
+
+**Repair and Maintenance** is the repair lines.
+
+On both:
+
+- **Budgeted yearly** is the full bill.
+- **Recovered from some owners** is what only some owners pay towards that same bill (for example a private refuse company for a few units). It is not income, not municipal, and not a column on the PQ. The levy carries the bill minus that amount.
+- On repairs, **Insurance payout** is what the insurer pays towards that job. It is a deduction. Do not type the new budget in the payout column.
+
+### 9. Garden and other equal charges
+If owners pay the gardener themselves, set **Garden service** on Expenditure to **R0**. Do not also put it under Fixed monthly charges. **Garden Expenses** on Repair and Maintenance stays in the levy (small garden repairs).
+
+**Fixed monthly charges** on the Income tab are extras that are the **same rand for every unit** (prepaid meters, an Eskom fixed charge, a communal charge). Type the **yearly total for the whole complex**. Each owner pays that total ÷ 12 ÷ number of units, not by PQ. Do not put insurance or garden here.
+
+### 10. Reserve fund
+Type **How much is already in the reserve fund?** That is the bank balance now, not this year’s contribution.
+
+Then pick one. It works for a body corporate and an HOA:
 
 - Own amount
-- 15% of last year’s ordinary levy (Actual)
-- 25% of last year’s ordinary levy (Actual)
-- 100% of this year’s repairs and maintenance
+- 15% of last year’s ordinary levy (the Actual on Levies received)
+- 25% of last year’s ordinary levy (that same Actual)
+- 100% of this year’s Repairs and Maintenance (after claims and payouts)
 
-The amount shows on the **Reserve Fund Contribution** line (yearly and monthly), and in the box at the top of the Excel sheet. Those two are the same figure.
+The amount shows on **Reserve Fund Contribution** (yearly and monthly) and in the box at the top of the Excel sheet. Those two are the same figure.
 
-If last year had no reserve contribution, Actual on that line stays 0. That is fine. The budgeted amount is still this year’s contribution.
+If last year had no reserve contribution, Actual on that line stays 0. That is fine.
 
-An HOA uses whichever option the MOI or the members approved. A body corporate also sees the Act’s minimum as a note. The note does not override your choice.
+**Projection** = already in reserve + this year’s contribution − this year’s special projects (only if the reserve pays them).
 
-### 6. Insurance
-- **Inside the ordinary levy** — owners do not get a separate insurance line. The premium is part of the levy.
-- **Extra on the owner invoice** — owners pay insurance on its own column. Keep the premium on Expenditure. It is **not** inside ordinary levies.
+Interest already sits inside the opening balance. It is not added again. Leave the interest line under Other Income for the tax estimate, and leave **Lower the levies** off.
 
-On Repair & Maintenance, an **insurance payout** is a deduction on that repair line (yearly minus payout). Do not type the new budget in the payout column.
+The body-corporate minimum on the side is guidance only, not legal advice. It does not override the option you picked.
 
-### 7. Master estate
-Tick **We still bill an estate levy** only if owners pay another estate **through us**. Those amounts are extra PQ columns, not part of ordinary levies.
-If owners pay that estate themselves, leave the tick off and set that expense to R0.
+### 11. Insurance
+On the Income tab, choose one:
 
-### 8. CSOS
-We collect CSOS from owners and pay the same amount to CSOS. Income and expense match.
-The formula is 2% of (monthly admin levy − R500), maximum R40 per unit per month. It is its own PQ column.
+- **Inside the ordinary levy** — no extra column. The premium on Expenditure is part of the levy.
+- **Extra on the owner invoice** — owners pay it on its own PQ column. Keep the premium on Expenditure. It is **not** inside ordinary levies. Type the yearly amount to bill, or leave 0 to use the premium.
 
-### 9. Income tax
-Levies are not taxed. Interest, investment income and rent above **R50,000** can be. Use the **Tax** tab to estimate it, or type the auditor’s figure. See that tab for when it is paid.
+### 12. Master estate
+Tick **We still bill an estate levy to owners** only if owners pay another estate **through us**. Those amounts are extra PQ columns, not part of ordinary levies.
 
-### 10. PQ and 10-year plan
-Upload the unit PQ file. Each owner’s levy = their PQ × the monthly total.
-On the 10-year plan, **Year 1 is this budget year**. Paste or upload the plan, then **Copy Year 1 into Special Projects** only if levies must pay for that work this year. If the reserve pays for it, leave the special-projects tick off.
+If owners pay that estate themselves, leave the tick off and set that expense to R0. It must not sit in our levy.
 
-### 11. The meeting sheet
-You do not set the levy % in the app. Set up the budget, then **Download Excel**. The trustees work on that sheet and send it back.
+In the sidebar you can also name that levy, type the yearly total, and split it **the same rand each unit** or **by PQ**.
 
-On the sheet, under Levies received, there is one yellow line: **Approved — type a % or a rand**.
+### 13. CSOS
+We collect CSOS from owners and pay the same amount to CSOS. Income and expense are the same rand, so owners are not charged twice. It is its own PQ column, not inside ordinary levies.
+
+Leave **Calculate CSOS** ticked. The formula is 2% of (monthly admin levy − R500), maximum R40 per unit per month. It follows the **approved** levy, not only the cost total.
+
+Untick it only if you must type a different CSOS figure yourself.
+
+### 14. Income tax
+Levies are not taxed. Interest, investment income and rent can be.
+
+On the **Tax** tab, **Put this estimate on the tax line** uses Other Income: the first R50,000 is exempt, the rest × 27%. Or type the auditor’s yearly figure and Save. That tax is a cost inside the ordinary levy.
+
+Owners do not pay SARS every month. The monthly column is only so the levy can fund one yearly amount.
+
+If the estimate is R0, nothing is paid. If tax is payable, SARS usually wants provisional tax: one payment six months into the year, and one at year-end. A top-up can be due a few months after year-end. A February year-end is often 31 August, 28 February, and a top-up by 30 September if needed. The return is filed after year-end. Confirm the dates and the amount with the auditor.
+
+### 15. Personnel and special projects
+**Personnel** is salaries, casuals, PAYE / UIF, travel, bonuses and the like.
+
+**Special Projects** is Year 1 of the 10-year plan. Tick **Add Special Projects into ordinary levies** only if the levy must pay for that work this year. If the reserve pays it, leave the tick off. It then comes off the reserve projection, not the levy.
+
+### 16. PQ / what each owner pays
+Upload the unit file in the sidebar or on **PQ / Levies**. If the PQ column is 0, the app uses **Ratio 1**. The ratios must add up to about 1.000.
+
+Each owner’s share of a levy column = their PQ × that column’s monthly total.
+
+Equal charges (and an estate levy set to “same amount”) are split by the number of units, not by PQ.
+
+The schedule uses the **approved** ordinary levy once the meeting has set one. Until then it uses what the costs need.
+
+### 17. 10-year plan
+Year 1 is **this budget year** (2026 while we are in 2026), not last year’s first column.
+
+Upload the plan, or paste the whole block from Excel, including the year headings. An older sheet that starts in 2025 is rolled forward: last year’s next year becomes this Year 1.
+
+**Copy Year 1 into Special Projects** only when the levy must pay those jobs this year. Then go back and tick the special-projects box if that is the decision. Save the plan after you edit it.
+
+### 18. The meeting
+You prepare the budget. The trustees decide in the meeting.
+
+**Download Excel** on the Download tab. Yellow cells are the ones they may type in. The sheet has formulas, so a change to a % or a rand updates the yearly amount, the monthly amount, the levy and the PQ.
+
+Under Levies received there is one yellow line: **Approved — type a % or a rand**.
 
 - They type the % the meeting agrees (10 means plus 10% on last year’s levies).
 - Or they type a rand amount over the yearly figure and leave the %.
-- **What the costs need** stays as it is. That is the reference.
+- **What the costs need** stays as the reference.
 - **Gap** is the costs minus the approved amount. Above zero means the costs are still higher. They cut a cost, or they take the gap from the reserve.
-- The PQ sheet uses the **approved** amount, not the cost total.
+- The PQ uses the **approved** amount.
 
-They can also change the other yellow cells (a cost, a note, the reserve if it is an own amount).
+They can also change other yellow cells: a cost, a %, a note, **Lowers the levy** (Yes or No), **Comes off this cost**, a claim amount, and the reserve if it is an own amount.
 
-Do **not** type on the % next to Levies received. That % is worked out from the costs. It jumps back.
+Do **not** type on the % next to Levies received itself. That % is worked out from the costs. It jumps back.
 
-### 12. When the sheet comes back
-**Restore my budget** and choose the file they sent. Their approved levy, the other yellow cells, and the notes come back into the app. Then download again if you need a clean sheet.
+If you already know the decision before you download, you can set the same choice on the Income tab under **Meeting decision**. The sheet still shows it, so the meeting can change it.
 
-Do not use Erase everything unless you mean to wipe the screen.
+### 19. When the sheet comes back
+**Restore my budget** on the left, and choose their file. Their approved levy, yellow cells, notes, which income lowers the levy, and which claim comes off which cost, come back. Then download again if you need a clean sheet.
+
+Do not use **Erase everything** unless you mean to wipe the screen. Download first if you still need the numbers.
+
+### 20. The owner presentation
+On **For the meeting**, type the complex name, then **Build the presentation**.
+
+- **Download the presentation** is the full-screen version. Open it in Chrome. Arrow keys move on. F is full screen. The Domus logo comes in at the start and leaves at the end.
+- **Download the PowerPoint** is the same story. Open it and press F5. The logo fills the first screen, then zooms out onto the budget.
+
+It uses this complex’s own numbers, in plain words, so owners can see what the levy pays for. Build it again after you change figures, so the slides match the sheet.
             """
         )
 
