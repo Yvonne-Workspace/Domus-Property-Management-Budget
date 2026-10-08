@@ -44,6 +44,35 @@ def money(n: float) -> str:
     return f"R {n:,.2f}"
 
 
+def cell_num(v) -> float:
+    """A number typed or pasted into the grid. Blank, R, spaces and commas are fine."""
+    if v is None:
+        return 0.0
+    try:
+        if isinstance(v, float) and pd.isna(v):
+            return 0.0
+    except Exception:
+        pass
+    if isinstance(v, str):
+        s = v.strip().replace("R", "").replace("r", "").replace(" ", "").replace(",", "")
+        if not s or s in ("-", "–", "None", "none"):
+            return 0.0
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    try:
+        if pd.isna(n):
+            return 0.0
+    except Exception:
+        pass
+    return n
+
+
 def pct_from_amounts(actual: float, yearly: float) -> float:
     """% increase from last year’s actual to this year’s budgeted yearly."""
     a = float(actual or 0)
@@ -1396,23 +1425,26 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
     state = state or {}
     for i, rec in enumerate(records):
         desc = str(rec.get("Description") or "").strip()
-        if not desc:
+        if not desc or desc.lower() in ("none", "nan"):
             continue
-        prev = previous[i] if i < len(previous) else {}
-        actual = abs(float(rec.get("Actual") or 0))
-        pct = float(rec.get("% Increase") or 0)
-        yearly = abs(float(rec.get("Budgeted yearly") or 0))
-        ins = float(rec.get("Insurance payout") or 0) if rm else float(prev.get("insurance") or 0)
+        prev = previous[i] if i < len(previous) and norm(previous[i].get("desc") or "") == norm(desc) else {}
+        if not prev:
+            hits = [p for p in previous if norm(p.get("desc") or "") == norm(desc)]
+            prev = hits[0] if len(hits) == 1 else (previous[i] if i < len(previous) else {})
+        actual = abs(cell_num(rec.get("Actual")))
+        pct = cell_num(rec.get("% Increase"))
+        yearly = abs(cell_num(rec.get("Budgeted yearly")))
+        ins = cell_num(rec.get("Insurance payout")) if rm else float(prev.get("insurance") or 0)
         if "Recovered from some owners" in rec:
-            own = float(rec.get("Recovered from some owners") or 0)
+            own = abs(cell_num(rec.get("Recovered from some owners")))
         else:
             own = float(prev.get("owner_recovery") or 0)
         if "Spent so far" in rec:
-            ytd = abs(float(rec.get("Spent so far") or 0))
+            ytd = abs(cell_num(rec.get("Spent so far")))
         else:
             ytd = abs(float(prev.get("ytd") or 0))
         if "This year budget" in rec:
-            ytd_b = abs(float(rec.get("This year budget") or 0))
+            ytd_b = abs(cell_num(rec.get("This year budget")))
         else:
             ytd_b = abs(float(prev.get("ytd_budget") or 0))
         pace = PACE_FROM.get(str(rec.get("This line") or ""), prev.get("pace") or "month")
@@ -1434,19 +1466,13 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
         pace_changed = pace != (prev.get("pace") or "month")
         if early:
             fc = line_forecast(draft, state)
-            if pace == "once":
-                if pct_changed and not y_changed and fc > 0.5:
-                    yearly = fc * (1 + pct / 100.0)
-                elif y_changed and fc > 0.5:
-                    pct = pct_from_amounts(fc, yearly)
-            elif pct_changed and not y_changed:
-                yearly = fc * (1 + pct / 100.0) if fc > 0.5 else yearly
-            elif y_changed:
+            if y_changed:
                 pct = pct_from_amounts(fc, yearly) if fc > 0.5 else pct
-            elif pace_changed or abs(yearly - old_actual * (1 + float(prev.get("pct") or 0) / 100.0)) < 1.0:
-                yearly = fc * (1 + pct / 100.0) if fc > 0.5 else yearly
-                if fc > 0.5:
-                    pct = pct_from_amounts(fc, yearly)
+            elif pct_changed and fc > 0.5:
+                yearly = fc * (1 + pct / 100.0)
+            elif (pace_changed or not y_changed) and fc > 0.5 and yearly < 0.5 and pace != "once":
+                yearly = fc
+                pct = 0.0
         elif pct_changed and not y_changed:
             yearly = actual * (1 + pct / 100.0) if actual >= 0.5 else yearly
         elif y_changed:
@@ -3082,66 +3108,94 @@ def init():
     ss.setdefault("estate_split", "equal")
 
 
+def _grid_fp(items: list) -> str:
+    """What was loaded or last saved. Calculated levy totals are not included, so the grid is not wiped."""
+    parts = []
+    for it in items or []:
+        parts.append("|".join([
+            str(it.get("id") or ""),
+            str(it.get("desc") or ""),
+            f"{float(it.get('actual') or 0):.2f}",
+            f"{float(it.get('ytd') or 0):.2f}",
+            f"{float(it.get('ytd_budget') or 0):.2f}",
+            str(it.get("pace") or ""),
+            f"{float(it.get('insurance') or 0):.2f}",
+            f"{float(it.get('owner_recovery') or 0):.2f}",
+            str(it.get("levy_use") or ""),
+            str(it.get("note") or ""),
+        ]))
+    return "\n".join(parts)
+
+
 def section_form(key: str, title: str, help_text: str, rm: bool = False, recover: bool = False):
     st.subheader(title)
     if help_text:
         st.caption(help_text)
     items = st.session_state.sections.get(key) or []
     early = bool(st.session_state.get("early_budget"))
-    df = items_to_df(items, rm, recover, early=early, state=st.session_state, relief=(key in ("other", "levy")))
-    with st.form(f"form_{key}"):
-        edited = st.data_editor(
-            df,
-            num_rows="dynamic",
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Description": st.column_config.TextColumn("Description", width="medium"),
-                "Actual": st.column_config.NumberColumn("Actual", format="%.2f", help="Last full year."),
-                "Spent so far": st.column_config.NumberColumn("Spent so far", format="%.2f", help="This year, the months already in the books."),
-                "This year budget": st.column_config.NumberColumn("This year budget", format="%.2f", help="This year’s approved budget. Used when the cost is not paid yet."),
-                "This line": st.column_config.SelectboxColumn(
-                    "This line",
-                    options=["Every month", "Already paid", "Not paid yet"],
-                    required=True,
-                    help="Every month is stretched to 12. Already paid is not. Not paid yet uses this year’s budget.",
+    hold = f"_hold_{key}"
+    fp_key = f"_fp_{key}"
+    fp = _grid_fp(items)
+    if (
+        st.session_state.pop(f"_reload_{key}", False)
+        or st.session_state.get(fp_key) != fp
+        or hold not in st.session_state
+    ):
+        st.session_state[hold] = items_to_df(items, rm, recover, early=early, state=st.session_state, relief=(key in ("other", "levy")))
+        st.session_state[fp_key] = fp
+        st.session_state.pop(f"grid_{key}", None)
+    edited = st.data_editor(
+        st.session_state[hold].copy(),
+        key=f"grid_{key}",
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Description": st.column_config.TextColumn("Description", width="medium"),
+            "Actual": st.column_config.NumberColumn("Actual", format="%.2f", help="Last full year."),
+            "Spent so far": st.column_config.NumberColumn("Spent so far", format="%.2f", help="This year, the months already in the books."),
+            "This year budget": st.column_config.NumberColumn("This year budget", format="%.2f", help="This year’s approved budget. Used when the cost is not paid yet."),
+            "This line": st.column_config.SelectboxColumn(
+                "This line",
+                options=["Every month", "Already paid", "Not paid yet"],
+                help="Every month is stretched to 12. Already paid is not. Not paid yet uses this year’s budget.",
+            ),
+            "This year finishes at": st.column_config.NumberColumn(
+                "This year finishes at", format="%.2f", disabled=True,
+                help="What this year will come to. Next year’s % is on this figure.",
+            ),
+            "% Increase": st.column_config.NumberColumn(
+                "% Increase",
+                format="%.2f",
+                help=(
+                    "Type 5 for 5% on what this year finishes at, then Save. Not on last year’s Actual."
+                    if early
+                    else "Type 10 for +10%, then Save. We set Budgeted yearly = Actual × 1.10"
                 ),
-                "This year finishes at": st.column_config.NumberColumn(
-                    "This year finishes at", format="%.2f", disabled=True,
-                    help="What this year will come to. Next year’s % is on this figure.",
-                ),
-                "% Increase": st.column_config.NumberColumn(
-                    "% Increase",
-                    format="%.2f",
-                    help=(
-                        "Type 5 for 5% on what this year finishes at, then Save. Not on last year’s Actual."
-                        if early
-                        else "Type 10 for +10%, then Save. We set Budgeted yearly = Actual × 1.10"
-                    ),
-                ),
-                "Budgeted yearly": st.column_config.NumberColumn(
-                    "Budgeted yearly",
-                    format="%.2f",
-                    help="The full bill. Or type the rand amount then Save. We fill in the %.",
-                ),
-                "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="What goes into the levy, per month. Owner recoveries and insurance payouts are already taken off."),
-                "Insurance payout": st.column_config.NumberColumn("Insurance payout", format="%.2f"),
-                "Recovered from some owners": st.column_config.NumberColumn(
-                    "Recovered from some owners",
-                    format="%.2f",
-                    help="What some owners pay towards this same bill. Not income. Not a levy column. The levy carries the bill minus this.",
-                ),
-                "Notes": st.column_config.TextColumn("Notes", width="large", help="Shows on the Excel Comments / Notes column. Click Save after typing."),
-                "Use": st.column_config.SelectboxColumn(
-                    "Use",
-                    options=["Reduces the levy", "Leave it"],
-                    required=True,
-                    help="Reduces the levy = rent or boat income, taken off the costs. Leave it = interest. Interest is not used.",
-                ),
-            },
-            disabled=["Monthly", "This year finishes at"],
-        )
-        saved = st.form_submit_button("Save this section", type="primary")
+            ),
+            "Budgeted yearly": st.column_config.NumberColumn(
+                "Budgeted yearly",
+                format="%.2f",
+                help="The full bill. Or type the rand amount then Save. We fill in the %.",
+            ),
+            "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="What goes into the levy, per month. Owner recoveries and insurance payouts are already taken off."),
+            "Insurance payout": st.column_config.NumberColumn("Insurance payout", format="%.2f"),
+            "Recovered from some owners": st.column_config.NumberColumn(
+                "Recovered from some owners",
+                format="%.2f",
+                help="What some owners pay towards this same bill. Not income. Not a levy column. The levy carries the bill minus this.",
+            ),
+            "Notes": st.column_config.TextColumn("Notes", width="large", help="Shows on the Excel Comments / Notes column. Click Save after typing."),
+            "Use": st.column_config.SelectboxColumn(
+                "Use",
+                options=["Reduces the levy", "Leave it"],
+                help="Reduces the levy = rent or boat income, taken off the costs. Leave it = interest. Interest is not used.",
+            ),
+        },
+        disabled=["Monthly", "This year finishes at"],
+    )
+    st.caption("Type the whole batch. Click another cell so the last number is finished, then Save. It will not jump back to 0.")
+    saved = st.button("Save this section", key=f"save_{key}", type="primary")
     if saved:
         st.session_state.sections[key] = save_editor(
             edited, items, rm, municipal=(key == "municipal"),
@@ -3154,7 +3208,9 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                     st.session_state["_pending_insurance_bill"] = float(r["yearly"])
                     break
         apply_levy_lines(st.session_state)
-        st.success("Saved. If you typed %, yearly = actual × (1 + %). If you typed the rand amount, % = (yearly ÷ actual) × 100 − 100.")
+        for sec in list(st.session_state.sections):
+            st.session_state[f"_reload_{sec}"] = True
+        st.success("Saved.")
         st.rerun()
     if key == "municipal":
         g, rec = municipal_gross_and_rec(st.session_state)
@@ -3546,6 +3602,8 @@ def main():
         st.markdown(
             """
 **Do this in order.** Click **Save this section** after every tab you change. Nothing is kept until Save.
+
+Type the whole batch in one go. Click another cell so the last number is finished, then Save. The numbers will not jump back to 0. You do not have to save one line at a time.
 
 To add a line, type it in the empty row at the bottom of that table, then Save. A **Note** on a line is printed on the Excel sheet.
 
