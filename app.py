@@ -2282,6 +2282,32 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B7"] = "This year’s projects paid from the reserve"
     ws["B8"] = "Projected reserve at year-end"
     fml(ws["D8"], "D5+D6-D7")
+    # Meeting box sits beside the reserve so the trustees see it first.
+    MEET_L, MEET_P, MEET_Y, MEET_M = 6, 7, 8, 9
+    for col, lab in ((7, "%  — type here"), (8, "Rand for the year"), (9, "Per month")):
+        c = ws.cell(4, col, lab)
+        c.font = Font(name="Calibri", bold=True, size=9, color="C65911")
+        c.alignment = Alignment(horizontal="center")
+    meet_title = ws.cell(5, MEET_L, "TRUSTEES DECIDE THE LEVY")
+    ws.merge_cells(start_row=5, start_column=MEET_L, end_row=5, end_column=MEET_M)
+    for col in range(MEET_L, MEET_M + 1):
+        c = ws.cell(5, col)
+        fill(c, "C65911")
+        c.border = THIN
+        c.font = Font(name="Calibri", bold=True, color="FFFFFF", size=12)
+    meet_title.alignment = Alignment(horizontal="left", vertical="center")
+    ws.row_dimensions[5].height = 22
+    for rr, label in (
+        (6, "What the costs need"),
+        (7, "APPROVED — type % or rand"),
+        (8, "Gap — costs still higher"),
+    ):
+        lab = ws.cell(rr, MEET_L, label)
+        lab.font = Font(name="Calibri", bold=True, size=10, color="FFFFFF" if rr == 7 else "1F4E79")
+        lab.alignment = Alignment(wrap_text=True, vertical="center")
+        fill(lab, "C65911" if rr == 7 else "FCE4D6")
+        lab.border = THIN
+        ws.row_dimensions[rr].height = 30
     ws["B9"] = (
         "Actual is the last full year. The next column is the months already in the books. "
         "Full year turns those months into 12. A bill that is not paid yet uses this year’s budget instead. "
@@ -2455,21 +2481,14 @@ def generate_excel(state: dict) -> BytesIO:
     bar("INCOME")
     hdr()
     a, b = write(s["levy"])
-    approved_row = None
+    approved_row = 7
     if levy_rows.get("ordinary"):
         ord_row = levy_rows["ordinary"]
-        bar("MEETING DECISION — Levies received")
-        ws.cell(r, 2, "What the costs need").font = Font(bold=True)
-        fml(ws.cell(r, C_PCT), f"{PL}{ord_row}")
-        ws.cell(r, C_PCT).number_format = "0.00%"
-        fml(ws.cell(r, C_YEAR), f"{YL}{ord_row}")
-        fml(ws.cell(r, C_MON), f"{ML}{ord_row}")
-        r += 1
-        ws.cell(r, 2, "Approved — type a % or a rand")
-        ws.cell(r, C_NOTE, "Type the % the meeting agrees, for example 10%. Or type a rand over the yearly amount and leave the %.")
-        ws.cell(r, C_NOTE).font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
-        ws.cell(r, C_NOTE).alignment = Alignment(wrap_text=True, vertical="center")
-        pct_cell = ws.cell(r, C_PCT)
+        fml(ws.cell(6, MEET_P), f"{PL}{ord_row}")
+        ws.cell(6, MEET_P).number_format = "0.00%"
+        fml(ws.cell(6, MEET_Y), f"{YL}{ord_row}")
+        fml(ws.cell(6, MEET_M), f"{ML}{ord_row}")
+        pct_cell = ws.cell(7, MEET_P)
         mode = state.get("levy_approve_mode") or "costs"
         if mode == "pct":
             inp(pct_cell, float(state.get("levy_approved_pct") or 0) / 100.0, "0.00%")
@@ -2477,25 +2496,21 @@ def generate_excel(state: dict) -> BytesIO:
             pct_cell.value = f"={PL}{ord_row}"
             pct_cell.number_format = "0.00%"
             fill(pct_cell, YELLOW)
-            pct_cell.font = Font(name="Calibri", color=BLUE, size=10)
+            pct_cell.font = Font(name="Calibri", color=BLUE, size=12, bold=True)
             pct_cell.border = THIN
-        year_cell = ws.cell(r, C_YEAR)
+        year_cell = ws.cell(7, MEET_Y)
         if mode == "amount" and float(state.get("levy_approved_amount") or 0) > 0.5:
             inp(year_cell, float(state.get("levy_approved_amount") or 0), MONEY)
         else:
-            year_cell.value = f"=D{ord_row}*(1+{PL}{r})"
+            year_cell.value = f"=D{ord_row}*(1+G7)"
             year_cell.number_format = MONEY
             fill(year_cell, YELLOW)
-            year_cell.font = Font(name="Calibri", color=BLUE, size=10)
+            year_cell.font = Font(name="Calibri", color=BLUE, size=12, bold=True)
             year_cell.border = THIN
-        fml(ws.cell(r, C_MON), f"{YL}{r}/12", "C6EFCE")
-        approved_row = r
-        r += 1
-        ws.cell(r, 2, "Gap — costs minus approved. Above zero means the costs are still higher.")
-        ws.cell(r, 2).font = Font(italic=True, size=9, color="9C0006")
-        fml(ws.cell(r, C_YEAR), f"{YL}{ord_row}-{YL}{approved_row}", RED)
-        fml(ws.cell(r, C_MON), f"{YL}{r}/12", RED)
-        r += 2
+        fml(ws.cell(7, MEET_M), f"H7/12", "C6EFCE")
+        ws.cell(7, MEET_M).font = Font(name="Calibri", bold=True, size=12)
+        fml(ws.cell(8, MEET_Y), f"{YL}{ord_row}-H7", RED)
+        fml(ws.cell(8, MEET_M), f"H8/12", RED)
     inc_tot = tot("TOTAL INCOME", a, b)
     bar("OTHER INCOME")
     hdr()
@@ -2622,7 +2637,7 @@ def generate_excel(state: dict) -> BytesIO:
     bills = pq_bill_lines(state)
     pq["B3"] = "Monthly"
     name_to_budget = {
-        "Levies": f"BUDGET!{ML}{approved_row}" if approved_row else (f"BUDGET!{ML}{levy_rows['ordinary']}" if levy_rows.get("ordinary") else None),
+        "Levies": "BUDGET!I7" if levy_rows.get("ordinary") else (f"BUDGET!{ML}{levy_rows['ordinary']}" if levy_rows.get("ordinary") else None),
         "CSOS": f"BUDGET!{ML}{levy_rows['csos']}" if levy_rows.get("csos") else None,
         "Reserve Fund": f"BUDGET!{ML}{levy_rows['reserve']}" if levy_rows.get("reserve") else None,
         "Insurance": f"BUDGET!{ML}{levy_rows['insurance']}" if levy_rows.get("insurance") else None,
@@ -2886,28 +2901,33 @@ def _read_meeting_from_sheet(wb, data: dict) -> None:
     if "BUDGET" not in getattr(wb, "sheetnames", []):
         return
     ws = wb["BUDGET"]
-    cols = _budget_cols(ws)
     pct_v = None
-    rand_v = None
     for r in range(1, int(ws.max_row or 1) + 1):
-        label = str(ws.cell(r, 2).value or "")
-        if label.startswith("Approved"):
+        label_b = str(ws.cell(r, 2).value or "")
+        label_f = str(ws.cell(r, 6).value or "")
+        if label_f.startswith("APPROVED") or label_f.startswith("Approved"):
+            pct_v = ws.cell(r, 7).value
+            year_v = ws.cell(r, 8).value
+        elif label_b.startswith("Approved"):
+            cols = _budget_cols(ws)
             pct_v = ws.cell(r, cols["pct"]).value
             year_v = ws.cell(r, cols["year"]).value
-            if isinstance(year_v, (int, float)) and float(year_v) > 0.5:
-                data["levy_approve_mode"] = "amount"
-                data["levy_approved_amount"] = float(year_v)
-                return
-            if isinstance(pct_v, str) and str(pct_v).startswith("="):
-                data["levy_approve_mode"] = "costs"
-                return
-            if isinstance(pct_v, (int, float)):
-                pct = float(pct_v)
-                if abs(pct) <= 2:
-                    pct *= 100.0
-                data["levy_approve_mode"] = "pct"
-                data["levy_approved_pct"] = pct
+        else:
+            continue
+        if isinstance(year_v, (int, float)) and float(year_v) > 0.5:
+            data["levy_approve_mode"] = "amount"
+            data["levy_approved_amount"] = float(year_v)
             return
+        if isinstance(pct_v, str) and str(pct_v).startswith("="):
+            data["levy_approve_mode"] = "costs"
+            return
+        if isinstance(pct_v, (int, float)):
+            pct = float(pct_v)
+            if abs(pct) <= 2:
+                pct *= 100.0
+            data["levy_approve_mode"] = "pct"
+            data["levy_approved_pct"] = pct
+        return
 
 
 def _restore_from_domus_sheet(wb) -> dict | None:
@@ -3794,15 +3814,14 @@ On **For the meeting**, click **Build the presentation**. Download the file and 
 ### 19. The Excel sheet
 On **Download**, click **Build Excel file**. The file has the budget, the PQ schedule and the 10-year plan. Yellow cells are the ones the trustees may type in.
 
-Under Levies received there is one yellow line: **Approved — type a % or a rand**.
+Under the complex name, next to the reserve fund, is an orange block: **Trustees decide the levy**.
 
-- They type the % the meeting agrees (10 means plus 10% on last year’s levies).
-- Or they type a rand amount over the yearly figure and leave the %.
-- **What the costs need** stays as the reference.
-- **Gap** is the costs minus the approved amount.
+- **What the costs need** is the reference. Do not type on it.
+- **APPROVED** is the yellow row. Type the % the meeting agrees (10 means plus 10% on last year’s levies). Or type a rand over **Rand for the year** and leave the %.
+- **Gap** is the costs minus the approved amount. Above zero means the costs are still higher.
 - The PQ sheet uses the approved amount.
 
-Do not type on the % next to Levies received. That % is worked out from the costs. It jumps back.
+Do not type on the % next to Levies received further down. That % is worked out from the costs. It jumps back.
 
 They can also change the other yellow cells: a cost, a note, and the reserve if it is an own amount.
 
