@@ -3552,40 +3552,59 @@ In the sidebar, type the **complex name** and the **financial year** (for exampl
 Choose **body corporate** or **HOA**. That only changes the reserve note. The four reserve choices work for both.
 
 ### 2. Load last year
+If this budget is for a year that has not finished, tick **This budget is before the year has finished** first, and type the months (9 or 10). Then load the files. The tick stays off for every other complex.
+
 1. **Financial statement PDF** — brings in the line names.
-2. **WeConnectU Excel** — brings in last year’s rands (Actual).
+2. **WeConnectU Excel** — last full year. This becomes **Actual**.
 3. **PQ Excel** — each unit’s share.
 
-Most complexes stop there. If Actual is only part of a year and you want every line stretched, set **Months covered by the Actual column**. Do not use that for a 10-month budget.
+Most complexes stop there. If Actual is only part of a year and you want every line stretched, set **Months covered by the Actual column**. Do not use that for a 10-month budget. Use the tick instead.
 
 ### 2b. Only some complexes — budget before the year ends
-Tick **This budget is before the year has finished** and type the months (usually 10).
+Also load **This year’s WeConnectU**, then **Load this year**.
 
-Also load **This year’s WeConnectU**. Actual stays last year’s full year. Spent so far is the months already in the books.
+| Column | What it is |
+|---|---|
+| **Actual** | The last full year. The comparison. Do not build the new budget from this. |
+| **Spent so far** | This year, the months already in the books. |
+| **This year finishes at** | **Budget on this.** |
 
 On each line, set **This line**, then Save:
 
 - **Every month** (security, salaries, management fee) — spent so far ÷ months × 12.
-- **Already paid** (a repair, a valuation) — not stretched. Type next year’s amount yourself. Often R 0.
-- **Not paid yet** (insurance, audit) — uses this year’s budget, not the months so far.
+- **Already paid** (a repair that will not happen again) — not stretched. Next year is often **0**.
+- **Not paid yet** (insurance, the audit) — uses this year’s budget, not the months so far.
 
-Type **%** and Save to add that % onto **This year finishes at**.
+Type **%** and Save. That % is added onto **This year finishes at**, not onto Actual.
 
-On the Excel sheet, only when this tick is on, each cost line shows:
+**On the Excel sheet** these extra columns appear only when the tick is on. A normal budget keeps the old columns.
 
-- **Actual (last full year)**
-- **Spent so far (this year)** and **This year finishes at**
-- **% we are asking** — next year against this year
-- **Since last full year** — the bigger jump. Do not use this one as the increase.
+| Column on the sheet | What the trustees should look at |
+|---|---|
+| **Actual (last full year)** | What last year really was |
+| **Spent so far (this year)** | The months so far |
+| **This year finishes at** | The full year the budget was built from |
+| **% we are asking** | Next year against this year. **This is the increase.** |
+| **Budget next year** | What goes into the levy. Type here if the meeting wants a different figure. |
+| **Since last full year** | The bigger jump, for example 2025 to 2027. Do not use this one as the increase. |
 
-A normal budget, with the tick off, keeps the old columns. Change **Budget next year** in the meeting if they want a different figure. The % updates.
+The levy line itself still compares with the last full year, because that is what the owners paid.
 
-### 3. Type this year’s amounts
+### 3. Type the budget amounts
 On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly.
+
+**Tick off** (a normal complex):
 
 - Type **%** and Save → yearly = Actual × (1 + %). Example: 10 means plus 10%.
 - Type **Budgeted yearly** and Save → we fill in the %.
-- **Monthly** is always yearly ÷ 12. You cannot type it.
+
+**Tick on** (the year has not finished):
+
+- Type **%** and Save → yearly = This year finishes at × (1 + %).
+- The % on the sheet called **% we are asking** is that same increase.
+- **Since last full year** is only there so the two-year jump is not hidden.
+
+**Monthly** is always yearly ÷ 12. You cannot type it.
 
 ### 4. What ordinary levies are
 Ordinary levies are **not** last year’s levy plus a %.
@@ -3659,6 +3678,8 @@ On the sheet, under Levies received, there is one yellow line: **Approved — ty
 They can also change the other yellow cells (a cost, a note, the reserve if it is an own amount).
 
 Do **not** type on the % next to Levies received. That % is worked out from the costs. It jumps back.
+
+If the tick **before the year has finished** was on, the cost lines also show **Spent so far**, **This year finishes at**, **% we are asking**, and **Since last full year**. Change **Budget next year** if they want a different increase. Do not type on **Since last full year**.
 
 ### 12. When the sheet comes back
 **Restore my budget** and choose the file they sent. Their approved levy, the other yellow cells, and the notes come back into the app. Then download again if you need a clean sheet.
