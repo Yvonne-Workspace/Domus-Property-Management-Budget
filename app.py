@@ -337,6 +337,37 @@ def municipal_net(state: dict) -> float:
     return g - rec
 
 
+_NO_RELIEF = ("ordinary", "reserve", "csos_inc", "csos_exp", "ins_bill", "special_levy", "int_arr", "invest")
+USE_LABELS = {"reduce": "Reduces the levy", "leave": "Leave it"}
+USE_FROM = {v: k for k, v in USE_LABELS.items()}
+
+
+def levy_use_of(r: dict) -> str:
+    """Rent and boat income reduce the levy. Interest never does."""
+    desc = r.get("desc") or ""
+    f = family(desc)
+    if f in _NO_RELIEF or "interest" in desc.lower() or "arrear" in desc.lower():
+        return "leave"
+    choice = r.get("levy_use")
+    if choice in ("reduce", "leave"):
+        return choice
+    d = desc.lower()
+    if any(k in d for k in ("rent", "rental", "boat", "clubhouse")):
+        return "reduce"
+    return "leave"
+
+
+def levy_relief(state: dict) -> float:
+    """Income that pays communal costs, so ordinary levies can be lower."""
+    total = 0.0
+    for key in ("other", "levy"):
+        for r in state.get("sections", {}).get(key) or []:
+            if levy_use_of(r) != "reduce":
+                continue
+            total += abs(float(r.get("yearly") or 0))
+    return total
+
+
 def ordinary_total(state: dict) -> float:
     s = state["sections"]
     total = municipal_net(state)
@@ -345,7 +376,8 @@ def ordinary_total(state: dict) -> float:
     total += sum(net_of(r) for r in s["expenditure"] if not skip_from_ordinary(r, state))
     if state.get("special_in_ordinary"):
         total += sum_net(s["special"])
-    return total
+    total -= levy_relief(state)
+    return max(0.0, total)
 
 
 def ordinary_actual(state: dict) -> float:
@@ -371,7 +403,7 @@ def approved_ordinary(state: dict) -> float:
 
 def levy_pieces(state: dict) -> list:
     s = state["sections"]
-    return [
+    pieces = [
         ("Net municipal (gross minus recoveries)", municipal_net(state)),
         ("Expenditure", sum(net_of(r) for r in s["expenditure"] if not skip_from_ordinary(r, state))),
         ("R&M after insurance", sum(net_of(r) for r in s["rm"] if not skip_from_ordinary(r, state))),
@@ -380,6 +412,10 @@ def levy_pieces(state: dict) -> list:
         ("Special (only if ticked)", sum_net(s["special"]) if state.get("special_in_ordinary") else 0.0),
         ("Insurance premium (billed on PQ, not in levy)", insurance_expense_amount(state) if insurance_on_pq(state) else 0.0),
     ]
+    relief = levy_relief(state)
+    if relief > 0.5:
+        pieces.append(("Less: rent and boat income", -relief))
+    return pieces
 
 
 def estimate_income_tax(state: dict) -> tuple[float, float]:
@@ -387,7 +423,11 @@ def estimate_income_tax(state: dict) -> tuple[float, float]:
     other = 0.0
     for r in state["sections"].get("other") or []:
         d = (r.get("desc") or "").lower()
-        if any(k in d for k in ("interest", "invest", "rental", "rent", "penalty", "garage", "clubhouse")):
+        if any(k in d for k in ("interest", "invest", "rental", "rent", "penalty", "garage", "clubhouse", "boat")):
+            other += max(0.0, float(r.get("yearly") or 0))
+    for r in state["sections"].get("levy") or []:
+        d = (r.get("desc") or "").lower()
+        if "boat" in d:
             other += max(0.0, float(r.get("yearly") or 0))
     taxable = max(0.0, other - 50000.0)
     return other, round(taxable * 0.27, 2)
@@ -608,7 +648,7 @@ def pq_bill_lines(state: dict) -> list:
             break
     for r in s.get("levy", []):
         d = r["desc"].lower()
-        if any(x in d for x in ("boathouse", "boatport", "special levy")) and (
+        if any(x in d for x in ("boathouse", "boatport", "boat house", "boat port", "boat yard", "boatyard", "special levy")) and (
             float(r.get("yearly") or 0) or float(r.get("actual") or 0)
         ):
             add(r["desc"], r.get("yearly"))
@@ -660,9 +700,7 @@ def family(desc: str) -> str | None:
         if re.search(r"paid|expense|^csos levy$|^csos levies$", d):
             return "csos_exp"
         return "csos_inc"
-    if "boathouse" in d:
-        return "boathouse"
-    if "boatport" in d:
+    if "boathouse" in d or "boatport" in d or "boat house" in d or "boat port" in d or "boat yard" in d or "boatyard" in d:
         return "boatport"
     if d in ("levies", "levy") or "ordinary" in d or re.search(r"^levies?\b", d):
         return "ordinary"
@@ -994,7 +1032,7 @@ def sections_from_afs(rows: list) -> dict:
             else "Line name from this complex’s financial statements.",
         )
         item["actual"] = actual
-        item["yearly"] = 0.0 if non_cash else actual
+        item["yearly"] = 0.0 if non_cash or family(desc) == "int_arr" else actual
         item["pct"] = 0.0
         item["is_recovery"] = "recover" in norm(desc) and sec == "municipal"
         if fam == "ins_claim":
@@ -1246,6 +1284,9 @@ def match_into(extracted: list, sections: dict, fields: str = "actual", state: d
                     it["desc"] = src["desc"]
                 if it.get("is_recovery"):
                     it["yearly"] = src["actual"]
+                elif family(it.get("desc") or "") == "int_arr" or family(src.get("desc") or "") == "int_arr":
+                    it["yearly"] = 0.0
+                    it["levy_use"] = "leave"
                 else:
                     it["yearly"] = src["actual"] * (1 + float(it.get("pct") or 0) / 100)
         else:
@@ -1283,7 +1324,7 @@ def match_into(extracted: list, sections: dict, fields: str = "actual", state: d
     return nxt, added
 
 
-def items_to_df(items: list, rm: bool, recover: bool = False, early: bool = False, state: dict | None = None) -> pd.DataFrame:
+def items_to_df(items: list, rm: bool, recover: bool = False, early: bool = False, state: dict | None = None, relief: bool = False) -> pd.DataFrame:
     recs = []
     show_extra = rm or recover
     state = state or {}
@@ -1321,6 +1362,8 @@ def items_to_df(items: list, rm: bool, recover: bool = False, early: bool = Fals
             rec["Insurance payout"] = ins
         if recover:
             rec["Recovered from some owners"] = own
+        if relief:
+            rec["Use"] = USE_LABELS[levy_use_of(it)]
         recs.append(rec)
     cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Notes"]
     if early:
@@ -1339,6 +1382,9 @@ def items_to_df(items: list, rm: bool, recover: bool = False, early: bool = Fals
         cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Insurance payout", "Notes"]
     elif recover:
         cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Recovered from some owners", "Monthly", "Notes"]
+    if relief:
+        cols = [c for c in cols if c != "Use"]
+        cols = cols[:-1] + ["Use", "Notes"] if cols and cols[-1] == "Notes" else cols + ["Use"]
     if not recs:
         return pd.DataFrame(columns=cols)
     return pd.DataFrame(recs)[cols]
@@ -1427,6 +1473,11 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             "pace": pace,
             "note": note,
             "is_recovery": recovery,
+            "levy_use": (
+                "leave"
+                if family(desc) in _NO_RELIEF or "interest" in desc.lower()
+                else USE_FROM.get(str(rec.get("Use") or ""), prev.get("levy_use") or levy_use_of({"desc": desc, "levy_use": prev.get("levy_use")}))
+            ),
         })
     return out
 
@@ -2482,12 +2533,20 @@ def generate_excel(state: dict) -> BytesIO:
         a, b = write(charged)
         tot("TOTAL EQUAL CHARGES", a, b)
 
-    # Ordinary = net municipal + each cost line that is not billed separately (estate / insurance / garden / CSOS)
+    # Ordinary = costs minus rent and boat income. Interest is not subtracted.
     bits = f"F{net_muni}"
     if levy_comp_rows:
         bits += "+" + "+".join(f"F{n}" for n in levy_comp_rows)
+    relief_refs = []
+    for key in ("other", "levy"):
+        for it in s.get(key) or []:
+            desc = it.get("desc") or ""
+            if levy_use_of(it) == "reduce" and desc in named_rows and abs(float(it.get("yearly") or 0)) > 0.5:
+                relief_refs.append(f"F{named_rows[desc]}")
+    if relief_refs:
+        bits += "-(" + "+".join(relief_refs) + ")"
     bar("ORDINARY LEVY (what we charge)")
-    ws.cell(r, 2, "Ordinary levies = net municipal + expenditure + R&M + personnel + tax (not estate, CSOS, extra insurance, or equal garden charges)")
+    ws.cell(r, 2, "Ordinary levies = costs minus rent and boat income. Interest is not taken off. Not estate, CSOS, extra insurance, or equal charges.")
     fml(ws.cell(r, 6), bits, RED)
     fml(ws.cell(r, 7), f"F{r}/12", RED)
     ord_check = r
@@ -3005,7 +3064,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
         st.caption(help_text)
     items = st.session_state.sections.get(key) or []
     early = bool(st.session_state.get("early_budget"))
-    df = items_to_df(items, rm, recover, early=early, state=st.session_state)
+    df = items_to_df(items, rm, recover, early=early, state=st.session_state, relief=(key in ("other", "levy")))
     with st.form(f"form_{key}"):
         edited = st.data_editor(
             df,
@@ -3049,6 +3108,12 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                     help="What some owners pay towards this same bill. Not income. Not a levy column. The levy carries the bill minus this.",
                 ),
                 "Notes": st.column_config.TextColumn("Notes", width="large", help="Shows on the Excel Comments / Notes column. Click Save after typing."),
+                "Use": st.column_config.SelectboxColumn(
+                    "Use",
+                    options=["Reduces the levy", "Leave it"],
+                    required=True,
+                    help="Reduces the levy = rent or boat income, taken off the costs. Leave it = interest. Interest is not used.",
+                ),
             },
             disabled=["Monthly", "This year finishes at"],
         )
@@ -3147,8 +3212,8 @@ def main():
             "It is **not** last year’s levy plus a %."
         )
         st.write(
-            "**Ordinary = net municipal + expenditure + R&M + personnel + tax** "
-            "(and special projects only if that box is ticked)."
+            "**Ordinary = costs minus rent and boat income.** "
+            "Interest is not taken off. Special projects only if that box is ticked."
         )
         st.write(
             "**Left out of ordinary:** estate pass-through, CSOS (own PQ column), "
@@ -3492,13 +3557,13 @@ On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly.
 ### 4. What ordinary levies are
 Ordinary levies are **not** last year’s levy plus a %.
 
-**Ordinary = net municipal + expenditure + repairs and maintenance + personnel + tax**
-
-(and special projects only if you tick that box).
+**Ordinary = those costs, minus rent and boat income.** Interest is not taken off.
 
 **Net municipal** = what the city bills us, minus what owners pay back (electricity, water, sewer, refuse).
 
 The **% on Levies received** is only the result of those costs. Do not type over it. It will not stick.
+
+Rent, a boat port and a boat yard are communal income. On that line set **Use** to **Reduces the levy**, then Save. The ordinary levy drops by that amount. The boat levy still has its own column on the PQ, so it is still collected. Interest and interest on arrears stay on **Leave it**. Type **0** for interest on arrears. You cannot count on it. A complex with no extra income leaves the lines at 0 and the sheet does not change.
 
 **Left out of ordinary** (they have their own columns, or they are R0):
 
@@ -3690,7 +3755,7 @@ Do not use Erase everything unless you mean to wipe the screen.
         else:
             st.caption("Estate lines are hidden. Owners pay that estate directly — it does not go through this budget.")
         st.divider()
-        section_form("other", "Other Income", "Fixed Eskom / rental / interest live here. Leave unused lines at 0.")
+        section_form("other", "Other Income", "Rent and boat income reduce the levy. Interest does not. Set Use, then Save. A complex with no extra income leaves these at 0 and nothing changes.")
         st.divider()
         section_form("recoveries_other", "Other recoveries", "Insurance / legal recoveries. Utility recoveries sit under Municipal.")
         st.divider()
