@@ -402,7 +402,7 @@ def levy_pieces(state: dict) -> list:
     return [
         ("Net municipal (gross minus recoveries)", municipal_net(state)),
         ("Expenditure", sum(cost_net(state, r) for r in s["expenditure"] if not skip_from_ordinary(r, state))),
-        ("R&M after insurance and claims", sum(cost_net(state, r) for r in s["rm"] if not skip_from_ordinary(r, state))),
+        ("R&M after insurance and recovery income", sum(cost_net(state, r) for r in s["rm"] if not skip_from_ordinary(r, state))),
         ("Personnel", sum_net(s["personnel"])),
         ("Tax", sum_net(s["tax"])),
         ("Special (only if ticked)", sum_net(s["special"]) if state.get("special_in_ordinary") else 0.0),
@@ -1016,7 +1016,7 @@ def sections_from_afs(rows: list) -> dict:
         item["pct"] = 0.0
         item["is_recovery"] = "recover" in norm(desc) and sec == "municipal"
         if fam == "ins_claim":
-            item["note"] = "Insurance claim. Deduct on the matching R&M line. Do not budget as normal income."
+            item["note"] = "Put this on Recovery income and pick the repair, or type the payout on the repair line. Do not do both."
             item["yearly"] = 0.0
             sec = "recoveries_other"
         secs[sec].append(item)
@@ -2373,10 +2373,10 @@ def generate_excel(state: dict) -> BytesIO:
     hdr()
     a, b = write(list(s.get("other") or []), levy_tick=True)
     tot("TOTAL OTHER INCOME", a, b)
-    bar("CLAIMS — money that pays a cost")
+    bar("RECOVERY INCOME")
     hdr()
     a, b = write(list(s.get("recoveries_other") or []), claim_col=True)
-    tot("TOTAL CLAIMS", a, b)
+    tot("TOTAL RECOVERY INCOME", a, b)
     hoa_tot = None
     if state.get("has_master_hoa"):
         bar("Recoveries on HOA Costs")
@@ -2642,6 +2642,7 @@ def generate_excel(state: dict) -> BytesIO:
 
 
 RESTORE_BARS = [
+    ("recovery income", "recoveries_other"),
     ("claims", "recoveries_other"),
     ("other income", "other"),
     ("recoveries on hoa", "hoa_income"),
@@ -3023,7 +3024,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                     format="%.2f",
                     help="The full bill. Or type the rand amount then Save. We fill in the %.",
                 ),
-                "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="What goes into the levy, per month. Owner recoveries, insurance payouts and claims are already taken off."),
+                "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="What goes into the levy, per month. Owner recoveries, insurance payouts and recovery income are already taken off."),
                 "Insurance payout": st.column_config.NumberColumn("Insurance payout", format="%.2f"),
                 "Recovered from some owners": st.column_config.NumberColumn(
                     "Recovered from some owners",
@@ -3074,7 +3075,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
             bits = [f"{r.get('desc')} {money(float(r.get('yearly') or 0))} comes off {r.get('claim_against')}" for r in linked]
             st.caption(" · ".join(bits))
         else:
-            st.caption("Pick the cost each claim pays, then Save. Until you pick one, the claim does not change the levy.")
+            st.caption("Pick the cost each recovery pays, then Save. Until you pick one, it does not change the levy.")
     else:
         st.caption(f"Section net total: {money(sum_net(st.session_state.sections[key]))}  ·  Monthly total: {money(sum_net(st.session_state.sections[key]) / 12)}")
 
@@ -3476,18 +3477,18 @@ On **Income → Other Income** each line has **Lower the levies**.
 
 On the Excel sheet the same choice is the column **Lowers the levy** (Yes or No). The ordinary-levy formula subtracts only the Yes lines. If the meeting changes a Yes amount, the levy moves with it.
 
-### 6. Claims — money that pays a cost
-**Income → Claims** is not income and not a levy column.
+### 6. Recovery income — money that pays a cost
+**Income → Recovery income** is money that pays a cost we already have. It is not added on top of the levy.
 
-Type the amount, then under **Comes off this cost** pick the expense or repair it pays. The cost stays on the books. The claim comes off that cost, never below R0.
+Type the amount, then under **Comes off this cost** pick the expense or repair it pays. The cost stays on the books. The recovery comes off that cost, never below R0.
 
 - **Legal fees recovered:** pick **Legal Expense**. If the bill and the recovery are the same, legal adds nothing to the levy.
 - **A repair invoiced to an owner** (a broken window): use **Charged to an owner**, or add a row. Pick the repair line, for example General Building.
-- **Insurance claim:** either type the payout on the repair line, **or** put it here and pick that repair. Do not do both, or it comes off twice. The app warns you if both are filled in.
+- **Insurance:** either type the payout on the repair line, **or** put the recovery here and pick that repair. Do not do both, or it comes off twice. The app warns you if both are filled in.
 
-Until you pick a cost, the claim does not change the levy.
+Until you pick a cost, the recovery does not change the levy.
 
-On the Excel sheet this block is **CLAIMS**. Column **Comes off this cost** names the line, and that line’s yearly formula subtracts the claim.
+On the Excel sheet this block is **RECOVERY INCOME**. Column **Comes off this cost** names the line, and that line’s yearly formula subtracts the recovery.
 
 ### 7. Municipal
 On **Municipal**, the city bill and the recovery are separate lines.
@@ -3521,7 +3522,7 @@ Then pick one. It works for a body corporate and an HOA:
 - Own amount
 - 15% of last year’s ordinary levy (the Actual on Levies received)
 - 25% of last year’s ordinary levy (that same Actual)
-- 100% of this year’s Repairs and Maintenance (after claims and payouts)
+- 100% of this year’s Repairs and Maintenance (after recovery income and payouts)
 
 The amount shows on **Reserve Fund Contribution** (yearly and monthly) and in the box at the top of the Excel sheet. Those two are the same figure.
 
@@ -3600,7 +3601,7 @@ On a normal cost line, the **yellow** cell is the one you type. The other one ca
 
 - If you set that line with a **%**, the % is yellow. Budgeted yearly = Actual × (1 + %). Change the % and the yearly amount moves.
 - If you set that line with a **rand**, Budgeted yearly is yellow. The % = yearly ÷ Actual − 1. Change the rand and the % moves.
-- A line with an insurance payout, a claim, or “recovered from some owners” always keeps the % yellow, so the yearly amount stays a formula.
+- A line with an insurance payout, recovery income, or “recovered from some owners” always keeps the % yellow, so the yearly amount stays a formula.
 
 They can also change notes, **Lowers the levy** (Yes or No), **Comes off this cost**, and the reserve when it is an own amount.
 
@@ -3609,7 +3610,7 @@ Do **not** type on the % next to Levies received itself. That % is worked out fr
 If you already know the decision before you download, you can set the same choice on the Income tab under **Meeting decision**. The sheet still shows it, so the meeting can change it.
 
 ### 19. When the sheet comes back
-**Restore my budget** on the left, and choose their file. Their approved levy, yellow cells, notes, which income lowers the levy, and which claim comes off which cost, come back. Then download again if you need a clean sheet.
+**Restore my budget** on the left, and choose their file. Their approved levy, yellow cells, notes, which income lowers the levy, and which recovery comes off which cost, come back. Then download again if you need a clean sheet.
 
 Do not use **Erase everything** unless you mean to wipe the screen. Download first if you still need the numbers.
 
@@ -3753,10 +3754,10 @@ It uses this complex’s own numbers, in plain words, so owners can see what the
         st.divider()
         section_form(
             "recoveries_other",
-            "Claims",
-            "Money that pays a cost we already have. Legal fees recovered comes off Legal Expense. "
-            "A repair we paid and then invoiced to the owner (a broken window) comes off that repair line. "
-            "Type the amount, pick Comes off this cost, then Save. This is not income and it is not a levy column.",
+            "Recovery income",
+            "Legal fees recovered, an insurance recovery, or a repair invoiced to an owner. "
+            "The cost stays. This amount comes off the cost you pick. "
+            "Type the amount, pick Comes off this cost, then Save.",
             claims=True,
         )
         st.divider()
@@ -3880,7 +3881,7 @@ It uses this complex’s own numbers, in plain words, so owners can see what the
                 both.append(it.get("desc") or "")
         if both:
             st.warning(
-                "These repairs have an insurance payout and a claim: "
+                "These repairs have an insurance payout and recovery income: "
                 + ", ".join(both)
                 + ". Use only one, or the levy is reduced twice."
             )
