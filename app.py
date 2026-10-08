@@ -2238,6 +2238,20 @@ def generate_excel(state: dict) -> BytesIO:
     for i, w in enumerate([3, 42, 12, 14, 10, 16, 14, 36], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
+    early = bool(state.get("early_budget"))
+    n_months = max(1, min(11, int(state.get("early_months") or 10)))
+    # Normal sheet: Actual, %, Budgeted Yearly, Monthly, Notes.
+    # Early sheet: Actual, the months so far, the full year, then the same % and Budgeted Yearly.
+    C_ACT, C_PCT, C_YEAR, C_MON, C_NOTE, C_OWN = 4, 5, 6, 7, 8, 9
+    C_SPENT = C_FULL = None
+    if early:
+        C_SPENT, C_FULL, C_PCT, C_YEAR, C_MON, C_NOTE, C_OWN = 5, 6, 7, 8, 9, 10, 11
+        for i, w in enumerate([3, 42, 14, 16, 16, 16, 12, 18, 14, 40, 22], 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+    YL = get_column_letter(C_YEAR)
+    PL = get_column_letter(C_PCT)
+    ML = get_column_letter(C_MON)
+
     def fill(c, color):
         c.fill = PatternFill("solid", fgColor=color)
 
@@ -2269,12 +2283,10 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B8"] = "Projected reserve at year-end"
     fml(ws["D8"], "D5+D6-D7")
     ws["B9"] = (
-        "Actual is the last full year. Spent so far and This year finishes at are the year you are in now. "
-        "% we are asking is next year against This year finishes at. "
-        "Since last full year is the bigger jump over two years — do not use that one as the increase. "
-        "Change Budget next year if the meeting wants a different figure. The % updates. "
-        "The levy line itself stays against the last full year, because that is what owners paid."
-        if state.get("early_budget")
+        "Actual is the last full year. The next column is the months already in the books. "
+        "Full year turns those months into 12. A bill that is not paid yet uses this year’s budget instead. "
+        "% and Budgeted Yearly work like the normal sheet, on that full year. Yellow cells = type here."
+        if early
         else "Interest is already inside the reserve balance above. It is not added again. Yellow cells = type here. Budgeted Yearly = Actual × (1 + %). Monthly = Yearly ÷ 12."
     )
     ws["B9"].font = Font(italic=True, size=9, color="666666")
@@ -2283,8 +2295,8 @@ def generate_excel(state: dict) -> BytesIO:
 
     def bar(title):
         nonlocal r
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=12 if state.get("early_budget") else 8)
-        for col in range(2, (13 if state.get("early_budget") else 9)):
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=C_NOTE)
+        for col in range(2, C_NOTE + 1):
             fill(ws.cell(r, col), SECTION)
             ws.cell(r, col).border = THIN
         ws.cell(r, 2).value = title
@@ -2294,29 +2306,16 @@ def generate_excel(state: dict) -> BytesIO:
     def hdr():
         nonlocal r
         labs = ["Description", "GL Code", "Actual", "%", "Budgeted Yearly", "Monthly", "Comments / Notes"]
-        if state.get("early_budget"):
+        if early:
             labs = [
-                "Description", "GL Code", "Actual (last full year)", "% we are asking",
-                "Budget next year", "Monthly", "Comments / Notes",
+                "Description", "GL Code", "Actual", f"{n_months} months", "Full year",
+                "%", "Budgeted Yearly", "Monthly", "Comments / Notes",
             ]
         for i, lab in enumerate(labs, 2):
             c = ws.cell(r, i, lab)
             fill(c, NAVY)
             c.font = Font(bold=True, color="FFFFFF", size=10)
             c.border = THIN
-        if state.get("early_budget"):
-            for col, lab in (
-                (10, "Spent so far (this year)"),
-                (11, "This year finishes at"),
-                (12, "Since last full year"),
-            ):
-                c = ws.cell(r, col, lab)
-                fill(c, "0D7377" if col < 12 else "7F8C8D")
-                c.font = Font(bold=True, color="FFFFFF", size=10)
-                c.border = THIN
-            ws.column_dimensions["J"].width = 24
-            ws.column_dimensions["K"].width = 26
-            ws.column_dimensions["L"].width = 22
         r += 1
 
     levy_rows = {}
@@ -2352,65 +2351,64 @@ def generate_excel(state: dict) -> BytesIO:
                 levy_comp_rows.append(r)
             ins = float(it.get("insurance") or 0)
             rec = bool(it.get("is_recovery")) and not recovery_as_income
-            early_line = bool(state.get("early_budget")) and fam not in ("ordinary", "reserve") and not rec and not (
-                is_own_scheme_csos(desc) and fam == "csos_exp"
+            early_line = early and fam not in ("ordinary", "reserve", "csos_inc", "csos_exp") and not (
+                is_own_scheme_csos(desc)
             )
-            inp(ws.cell(r, 4), act, MONEY)
-            if early_line:
-                spent = ws.cell(r, 10)
-                inp(spent, abs(float(it.get("ytd") or 0)), MONEY)
-                fill(spent, "D6EFEA")
-                finishes = ws.cell(r, 11)
-                inp(finishes, line_forecast(it, state), MONEY)
-                fill(finishes, "D6EFEA")
+            inp(ws.cell(r, C_ACT), act, MONEY)
+            pace = it.get("pace") or "month"
+            if early_line and C_SPENT:
+                spent_c = ws.cell(r, C_SPENT)
+                inp(spent_c, abs(float(it.get("ytd") or 0)), MONEY)
+                fill(spent_c, "D6EFEA")
+                full_c = ws.cell(r, C_FULL)
+                if pace == "once":
+                    fml(full_c, f"E{r}")
+                elif pace == "later":
+                    inp(full_c, abs(float(it.get("ytd_budget") or 0)), MONEY)
+                else:
+                    fml(full_c, f"IF(E{r}=0,0,E{r}/{n_months}*12)")
+                fill(full_c, "D6EFEA")
+            base = f"{get_column_letter(C_FULL)}{r}" if early_line and C_FULL else f"D{r}"
             if fam == "ordinary":
-                # % follows the levy formula so a meeting change to costs updates the %
-                fml(ws.cell(r, 5), f'IF(D{r}=0,0,F{r}/D{r}-1)')
-                ws.cell(r, 5).number_format = "0.00%"
+                fml(ws.cell(r, C_PCT), f"IF(D{r}=0,0,{YL}{r}/D{r}-1)")
+                ws.cell(r, C_PCT).number_format = "0.00%"
+            elif early_line:
+                fc = line_forecast(it, state)
+                show_pct = pct_from_amounts(fc, abs(y)) if fc >= 0.5 else pct
+                inp(ws.cell(r, C_PCT), show_pct / 100.0, "0.00%")
             else:
                 show_pct = pct_from_amounts(act, y) if act >= 0.5 else pct
-                inp(ws.cell(r, 5), show_pct / 100.0, "0.00%")
-            expected = act * (1 + pct / 100.0)
+                inp(ws.cell(r, C_PCT), show_pct / 100.0, "0.00%")
+            fc_now = line_forecast(it, state) if early_line else act
+            expected = fc_now * (1 + pct / 100.0) if fc_now >= 0.5 else y
+            year_cell = ws.cell(r, C_YEAR)
             if fam == "ordinary":
-                pass  # F filled after totals
+                pass
             elif fam == "reserve" and state.get("reserve_mode") in ("pct15", "15pct", "legal") and levy_rows.get("ordinary"):
                 months = max(1, int(state.get("actual_months") or 12))
                 scale = f"*12/{months}" if months < 12 else ""
-                fml(ws.cell(r, 6), f"0.15*D{levy_rows['ordinary']}{scale}")
+                fml(year_cell, f"0.15*D{levy_rows['ordinary']}{scale}")
             elif fam == "reserve" and state.get("reserve_mode") == "pct25" and levy_rows.get("ordinary"):
                 months = max(1, int(state.get("actual_months") or 12))
                 scale = f"*12/{months}" if months < 12 else ""
-                fml(ws.cell(r, 6), f"0.25*D{levy_rows['ordinary']}{scale}")
+                fml(year_cell, f"0.25*D{levy_rows['ordinary']}{scale}")
             elif fam == "reserve" and state.get("reserve_mode") == "rm100":
-                # Number first so the line is never blank. Linked to the R&M total once that row exists.
-                inp(ws.cell(r, 6), float(reserve_contribution(state) or y or 0), MONEY)
+                inp(year_cell, float(reserve_contribution(state) or y or 0), MONEY)
             elif fam == "reserve":
-                inp(ws.cell(r, 6), float(reserve_contribution(state) or y or 0), MONEY)
+                inp(year_cell, float(reserve_contribution(state) or y or 0), MONEY)
             elif is_own_scheme_csos(desc) and fam == "csos_exp" and levy_rows.get("csos"):
-                fml(ws.cell(r, 6), f"F{levy_rows['csos']}")
+                fml(year_cell, f"{YL}{levy_rows['csos']}")
             elif rec and not recovery_as_income:
-                fml(ws.cell(r, 6), f"-ABS(D{r}*(1+E{r}))")
+                fml(year_cell, f"-ABS({base}*(1+{PL}{r}))")
+            elif abs(y - expected) > 1 and abs(y) > 0.5:
+                inp(year_cell, max(0.0, abs(y) - ins), MONEY)
             elif ins > 0.5:
-                if abs(y - expected) > 1 and abs(y) > 0.5:
-                    inp(ws.cell(r, 6), max(0.0, abs(y) - ins), MONEY)
-                else:
-                    fml(ws.cell(r, 6), f"MAX(0,D{r}*(1+E{r})-{ins})")
-            elif act < 0.5 and abs(y) > 0.5:
-                inp(ws.cell(r, 6), abs(y) if recovery_as_income or not rec else (y if y < 0 else abs(y)), MONEY)
-            elif abs(y - expected) > 1 and y > 0:
-                inp(ws.cell(r, 6), abs(y), MONEY)
+                fml(year_cell, f"MAX(0,{base}*(1+{PL}{r})-{ins})")
+            elif act < 0.5 and abs(y) > 0.5 and not early_line:
+                inp(year_cell, abs(y), MONEY)
             else:
-                fml(ws.cell(r, 6), f"D{r}*(1+E{r})")
-            if early_line:
-                # % we are asking is against this year, not against the last full year.
-                fml(ws.cell(r, 5), f"IF(K{r}=0,0,F{r}/K{r}-1)")
-                ws.cell(r, 5).number_format = "0.00%"
-                inp(ws.cell(r, 6), max(0.0, abs(y) - ins), MONEY)
-                jump = ws.cell(r, 12)
-                fml(jump, f"IF(D{r}=0,0,F{r}/D{r}-1)")
-                jump.number_format = "0.00%"
-                fill(jump, "F2F2F2")
-            fml(ws.cell(r, 7), f"F{r}/12")
+                fml(year_cell, f"MAX(0,{base}*(1+{PL}{r})-{ins})")
+            fml(ws.cell(r, C_MON), f"{YL}{r}/12")
             note = clean_note(it.get("note"))
             if ins:
                 extra = "Insurance payout " + f"{ins:,.2f}"
@@ -2418,22 +2416,23 @@ def generate_excel(state: dict) -> BytesIO:
             own = float(it.get("owner_recovery") or 0)
             if owner_box:
                 if items and r == start:
-                    hc = ws.cell(start - 1, 9, "Recovered from owners")
+                    hc = ws.cell(start - 1, C_OWN, "Recovered from owners")
                     fill(hc, NAVY)
                     hc.font = Font(bold=True, color="FFFFFF", size=10)
                     hc.border = THIN
-                    ws.column_dimensions["I"].width = 22
-                inp(ws.cell(r, 9), own, MONEY)
-                cur = ws.cell(r, 6).value
-                if isinstance(cur, str) and cur.startswith("="):
-                    ws.cell(r, 6).value = f"=MAX(0,({cur[1:]})-N(I{r}))"
+                    ws.column_dimensions[get_column_letter(C_OWN)].width = 22
+                inp(ws.cell(r, C_OWN), own, MONEY)
+                cur = year_cell.value
+                own_l = get_column_letter(C_OWN)
+                if isinstance(cur, str) and str(cur).startswith("="):
+                    year_cell.value = f"=MAX(0,({cur[1:]})-N({own_l}{r}))"
                 elif cur is not None:
-                    ws.cell(r, 6).value = f"=MAX(0,{float(cur)}-N(I{r}))"
-                    ws.cell(r, 6).number_format = MONEY
+                    year_cell.value = f"=MAX(0,{float(cur)}-N({own_l}{r}))"
+                    year_cell.number_format = MONEY
                 if own:
                     extra = "Recovered from some owners " + f"{own:,.2f}" + ". Not income. Taken off this line."
                     note = f"{note} | {extra}".strip(" |") if note else extra
-            cnote = ws.cell(r, 8, note)
+            cnote = ws.cell(r, C_NOTE, note)
             cnote.font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
             cnote.alignment = Alignment(wrap_text=True, vertical="top")
             cnote.border = THIN
@@ -2443,12 +2442,12 @@ def generate_excel(state: dict) -> BytesIO:
     def tot(label, start, end):
         nonlocal r
         ws.cell(r, 2, label).font = Font(bold=True)
-        fml(ws.cell(r, 4), f"SUM(D{start}:D{end})", TOTAL)
-        fml(ws.cell(r, 6), f"SUM(F{start}:F{end})", TOTAL)
-        fml(ws.cell(r, 7), f"F{r}/12", TOTAL)
-        if state.get("early_budget"):
-            fml(ws.cell(r, 10), f"SUM(J{start}:J{end})", TOTAL)
-            fml(ws.cell(r, 11), f"SUM(K{start}:K{end})", TOTAL)
+        fml(ws.cell(r, C_ACT), f"SUM(D{start}:D{end})", TOTAL)
+        if early and C_SPENT:
+            fml(ws.cell(r, C_SPENT), f"SUM(E{start}:E{end})", TOTAL)
+            fml(ws.cell(r, C_FULL), f"SUM(F{start}:F{end})", TOTAL)
+        fml(ws.cell(r, C_YEAR), f"SUM({YL}{start}:{YL}{end})", TOTAL)
+        fml(ws.cell(r, C_MON), f"{YL}{r}/12", TOTAL)
         row_n = r
         r += 2
         return row_n
@@ -2461,41 +2460,41 @@ def generate_excel(state: dict) -> BytesIO:
         ord_row = levy_rows["ordinary"]
         bar("MEETING DECISION — Levies received")
         ws.cell(r, 2, "What the costs need").font = Font(bold=True)
-        fml(ws.cell(r, 5), f"E{ord_row}")
-        ws.cell(r, 5).number_format = "0.00%"
-        fml(ws.cell(r, 6), f"F{ord_row}")
-        fml(ws.cell(r, 7), f"G{ord_row}")
+        fml(ws.cell(r, C_PCT), f"{PL}{ord_row}")
+        ws.cell(r, C_PCT).number_format = "0.00%"
+        fml(ws.cell(r, C_YEAR), f"{YL}{ord_row}")
+        fml(ws.cell(r, C_MON), f"{ML}{ord_row}")
         r += 1
         ws.cell(r, 2, "Approved — type a % or a rand")
-        ws.cell(r, 8, "Type the % the meeting agrees, for example 10%. Or type a rand over the yearly amount and leave the %.")
-        ws.cell(r, 8).font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
-        ws.cell(r, 8).alignment = Alignment(wrap_text=True, vertical="center")
-        pct_cell = ws.cell(r, 5)
+        ws.cell(r, C_NOTE, "Type the % the meeting agrees, for example 10%. Or type a rand over the yearly amount and leave the %.")
+        ws.cell(r, C_NOTE).font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
+        ws.cell(r, C_NOTE).alignment = Alignment(wrap_text=True, vertical="center")
+        pct_cell = ws.cell(r, C_PCT)
         mode = state.get("levy_approve_mode") or "costs"
         if mode == "pct":
             inp(pct_cell, float(state.get("levy_approved_pct") or 0) / 100.0, "0.00%")
         else:
-            pct_cell.value = f"=E{ord_row}"
+            pct_cell.value = f"={PL}{ord_row}"
             pct_cell.number_format = "0.00%"
             fill(pct_cell, YELLOW)
             pct_cell.font = Font(name="Calibri", color=BLUE, size=10)
             pct_cell.border = THIN
-        year_cell = ws.cell(r, 6)
+        year_cell = ws.cell(r, C_YEAR)
         if mode == "amount" and float(state.get("levy_approved_amount") or 0) > 0.5:
             inp(year_cell, float(state.get("levy_approved_amount") or 0), MONEY)
         else:
-            year_cell.value = f"=D{ord_row}*(1+E{r})"
+            year_cell.value = f"=D{ord_row}*(1+{PL}{r})"
             year_cell.number_format = MONEY
             fill(year_cell, YELLOW)
             year_cell.font = Font(name="Calibri", color=BLUE, size=10)
             year_cell.border = THIN
-        fml(ws.cell(r, 7), f"F{r}/12", "C6EFCE")
+        fml(ws.cell(r, C_MON), f"{YL}{r}/12", "C6EFCE")
         approved_row = r
         r += 1
         ws.cell(r, 2, "Gap — costs minus approved. Above zero means the costs are still higher.")
         ws.cell(r, 2).font = Font(italic=True, size=9, color="9C0006")
-        fml(ws.cell(r, 6), f"F{ord_row}-F{approved_row}", RED)
-        fml(ws.cell(r, 7), f"F{r}/12", RED)
+        fml(ws.cell(r, C_YEAR), f"{YL}{ord_row}-{YL}{approved_row}", RED)
+        fml(ws.cell(r, C_MON), f"{YL}{r}/12", RED)
         r += 2
     inc_tot = tot("TOTAL INCOME", a, b)
     bar("OTHER INCOME")
@@ -2523,14 +2522,14 @@ def generate_excel(state: dict) -> BytesIO:
     muni_g_tot = tot("TOTAL CITY BILL", a, b)
     ws.cell(r, 2, "TOTAL NET MUNICIPAL (city bill minus recovered)").font = Font(bold=True)
     fml(ws.cell(r, 4), f"D{muni_g_tot}-D{util_tot}", RED)
-    fml(ws.cell(r, 6), f"F{muni_g_tot}-F{util_tot}", RED)
-    fml(ws.cell(r, 7), f"F{r}/12", RED)
+    fml(ws.cell(r, C_YEAR), f"{YL}{muni_g_tot}-{YL}{util_tot}", RED)
+    fml(ws.cell(r, C_MON), f"{YL}{r}/12", RED)
     net_muni = r
     r += 1
     ws.cell(r, 2, "UNDER-RECOVERY memo (already inside the net above — do not add it again)")
     ws.cell(r, 2).font = Font(italic=True, size=9, color="9C0006")
-    fml(ws.cell(r, 6), f"MAX(0,F{net_muni})", RED)
-    fml(ws.cell(r, 7), f"F{r}/12", RED)
+    fml(ws.cell(r, C_YEAR), f"MAX(0,{YL}{net_muni})", RED)
+    fml(ws.cell(r, C_MON), f"{YL}{r}/12", RED)
     r += 1
     gaps = municipal_gaps(state)
     under_rows = [g for g in gaps if g["gap"] > 1]
@@ -2538,16 +2537,16 @@ def generate_excel(state: dict) -> BytesIO:
         ws.cell(r, 2, "Under-recovery by service (city bill minus recovered)").font = Font(bold=True, size=10, color="9C0006")
         r += 1
         for g in under_rows:
-            grefs = [f"F{named_rows[d]}" for d in g["gross_descs"] if d in named_rows]
-            rrefs = [f"F{named_rows[d]}" for d in g["rec_descs"] if d in named_rows]
+            grefs = [f"{YL}{named_rows[d]}" for d in g["gross_descs"] if d in named_rows]
+            rrefs = [f"{YL}{named_rows[d]}" for d in g["rec_descs"] if d in named_rows]
             ws.cell(r, 2, f"{g['name']} under-recovered")
             if grefs or rrefs:
                 gf = "+".join(grefs) if grefs else "0"
                 rf = "+".join(rrefs) if rrefs else "0"
-                fml(ws.cell(r, 6), f"MAX(0,({gf})-({rf}))", RED)
+                fml(ws.cell(r, C_YEAR), f"MAX(0,({gf})-({rf}))", RED)
             else:
-                inp(ws.cell(r, 6), max(0.0, g["gap"]), MONEY)
-            fml(ws.cell(r, 7), f"F{r}/12")
+                inp(ws.cell(r, C_YEAR), max(0.0, g["gap"]), MONEY)
+            fml(ws.cell(r, C_MON), f"{YL}{r}/12")
             r += 1
     r += 1
     bar("EXPENDITURE")
@@ -2562,8 +2561,8 @@ def generate_excel(state: dict) -> BytesIO:
     a, b = write(s.get("rm") or [], in_levy=True, owner_box=True)
     rm_tot = tot("Total Repair and Maintenance", a, b)
     if state.get("reserve_mode") == "rm100" and levy_rows.get("reserve"):
-        fml(ws.cell(levy_rows["reserve"], 6), f"F{rm_tot}")
-        fml(ws.cell(levy_rows["reserve"], 7), f"F{levy_rows['reserve']}/12")
+        fml(ws.cell(levy_rows["reserve"], C_YEAR), f"{YL}{rm_tot}")
+        fml(ws.cell(levy_rows["reserve"], C_MON), f"{YL}{levy_rows['reserve']}/12")
     bar("PERSONNEL")
     hdr()
     a, b = write(s.get("personnel") or [], in_levy=True)
@@ -2584,37 +2583,37 @@ def generate_excel(state: dict) -> BytesIO:
         tot("TOTAL EQUAL CHARGES", a, b)
 
     # Ordinary = costs minus rent and boat income. Interest is not subtracted.
-    bits = f"F{net_muni}"
+    bits = f"{YL}{net_muni}"
     if levy_comp_rows:
-        bits += "+" + "+".join(f"F{n}" for n in levy_comp_rows)
+        bits += "+" + "+".join(f"{YL}{n}" for n in levy_comp_rows)
     relief_refs = []
     for key in ("other", "levy"):
         for it in s.get(key) or []:
             desc = it.get("desc") or ""
             if levy_use_of(it) == "reduce" and desc in named_rows and abs(float(it.get("yearly") or 0)) > 0.5:
-                relief_refs.append(f"F{named_rows[desc]}")
+                relief_refs.append(f"{YL}{named_rows[desc]}")
     if relief_refs:
         bits += "-(" + "+".join(relief_refs) + ")"
     bar("ORDINARY LEVY (what we charge)")
     ws.cell(r, 2, "Ordinary levies = costs minus rent and boat income. Interest is not taken off. Not estate, CSOS, extra insurance, or equal charges.")
-    fml(ws.cell(r, 6), bits, RED)
-    fml(ws.cell(r, 7), f"F{r}/12", RED)
+    fml(ws.cell(r, C_YEAR), bits, RED)
+    fml(ws.cell(r, C_MON), f"{YL}{r}/12", RED)
     ord_check = r
     if levy_rows.get("ordinary"):
-        ws.cell(levy_rows["ordinary"], 6).value = f"=F{ord_check}"
-        ws.cell(levy_rows["ordinary"], 6).font = Font(name="Calibri", size=10)
-        ws.cell(levy_rows["ordinary"], 6).number_format = MONEY
-        fill(ws.cell(levy_rows["ordinary"], 6), RED)
+        ws.cell(levy_rows["ordinary"], C_YEAR).value = f"={YL}{ord_check}"
+        ws.cell(levy_rows["ordinary"], C_YEAR).font = Font(name="Calibri", size=10)
+        ws.cell(levy_rows["ordinary"], C_YEAR).number_format = MONEY
+        fill(ws.cell(levy_rows["ordinary"], C_YEAR), RED)
     r += 2
     if levy_rows.get("reserve"):
-        fml(ws["D6"], f"F{levy_rows['reserve']}")
+        fml(ws["D6"], f"{YL}{levy_rows['reserve']}")
     else:
         ws["D6"] = 0
     if state.get("special_in_ordinary"):
         ws["D7"] = 0
         ws["B7"] = "This year’s projects paid from the reserve (none — they are in the levy)"
     else:
-        fml(ws["D7"], f"F{sp_tot}")
+        fml(ws["D7"], f"{YL}{sp_tot}")
 
     pq = wb.create_sheet("PQ")
     pq["A1"] = "PQ / LEVY SCHEDULE"
@@ -2623,15 +2622,15 @@ def generate_excel(state: dict) -> BytesIO:
     bills = pq_bill_lines(state)
     pq["B3"] = "Monthly"
     name_to_budget = {
-        "Levies": f"BUDGET!G{approved_row}" if approved_row else (f"BUDGET!G{levy_rows['ordinary']}" if levy_rows.get("ordinary") else None),
-        "CSOS": f"BUDGET!G{levy_rows['csos']}" if levy_rows.get("csos") else None,
-        "Reserve Fund": f"BUDGET!G{levy_rows['reserve']}" if levy_rows.get("reserve") else None,
-        "Insurance": f"BUDGET!G{levy_rows['insurance']}" if levy_rows.get("insurance") else None,
+        "Levies": f"BUDGET!{ML}{approved_row}" if approved_row else (f"BUDGET!{ML}{levy_rows['ordinary']}" if levy_rows.get("ordinary") else None),
+        "CSOS": f"BUDGET!{ML}{levy_rows['csos']}" if levy_rows.get("csos") else None,
+        "Reserve Fund": f"BUDGET!{ML}{levy_rows['reserve']}" if levy_rows.get("reserve") else None,
+        "Insurance": f"BUDGET!{ML}{levy_rows['insurance']}" if levy_rows.get("insurance") else None,
     }
     for it in (s.get("hoa_income") or []) + (s.get("fixed") or []):
         nm = it.get("desc") or ""
         if nm in named_rows:
-            name_to_budget[nm] = f"BUDGET!G{named_rows[nm]}"
+            name_to_budget[nm] = f"BUDGET!{ML}{named_rows[nm]}"
     headers = ["#", "Unit", "PQ"] + [n for n, _, _s in bills] + ["Total"]
     for i, h in enumerate(headers, 1):
         cell = pq.cell(6, i, h)
@@ -2790,11 +2789,27 @@ RESTORE_BARS = [
 ]
 
 
+def _budget_cols(ws) -> dict:
+    """Where % and Budgeted Yearly sit. A 9- or 10-month sheet inserts two columns after Actual."""
+    normal = {"pct": 5, "year": 6, "note": 8, "own": 9, "spent": None}
+    for r in range(1, 25):
+        headers = [str(ws.cell(r, c).value or "").strip().lower() for c in range(2, 13)]
+        if not headers or headers[0] != "description":
+            continue
+        if any(h == "full year" or h.endswith("months") or h.endswith("month") for h in headers):
+            return {"pct": 7, "year": 8, "note": 10, "own": 11, "spent": 5}
+        if any("spent so far" in h for h in headers):
+            return {"pct": 5, "year": 6, "note": 8, "own": 9, "spent": 10}
+        return normal
+    return normal
+
+
 def _apply_budget_sheet(wb, data: dict) -> None:
     """Trustees edit the sheet in the meeting. Those cells win when the file comes back."""
     if "BUDGET" not in getattr(wb, "sheetnames", []):
         return
     ws = wb["BUDGET"]
+    cols = _budget_cols(ws)
     sections = data.setdefault("sections", {})
     current = None
     for r in range(1, int(ws.max_row or 1) + 1):
@@ -2811,7 +2826,7 @@ def _apply_budget_sheet(wb, data: dict) -> None:
         )):
             continue
         d_val = ws.cell(r, 4).value
-        f_val = ws.cell(r, 6).value
+        f_val = ws.cell(r, cols["year"]).value
         mapped = next((k for title, k in RESTORE_BARS if title in low and "total" not in low and "check" not in low), None)
         if mapped and d_val is None and f_val is None:
             current = mapped
@@ -2825,15 +2840,19 @@ def _apply_budget_sheet(wb, data: dict) -> None:
             items.append(found)
         if isinstance(d_val, (int, float)):
             found["actual"] = abs(float(d_val))
-        pct_v = ws.cell(r, 5).value
+        pct_v = ws.cell(r, cols["pct"]).value
         year_v = f_val
         fam = family(desc)
-        note = ws.cell(r, 8).value
+        note = ws.cell(r, cols["note"]).value
         if isinstance(note, str) and note.strip():
             found["note"] = note.strip()
-        got = ws.cell(r, 9).value
+        got = ws.cell(r, cols["own"]).value
         if isinstance(got, (int, float)):
             found["owner_recovery"] = abs(float(got))
+        if cols.get("spent"):
+            spent_v = ws.cell(r, cols["spent"]).value
+            if isinstance(spent_v, (int, float)):
+                found["ytd"] = abs(float(spent_v))
         if fam == "ordinary":
             continue
         if fam == "reserve" and isinstance(year_v, (int, float)):
@@ -2857,8 +2876,9 @@ def _apply_budget_sheet(wb, data: dict) -> None:
         elif isinstance(pct_v, (int, float)):
             p = float(pct_v)
             found["pct"] = p * 100 if abs(p) <= 2 else p
-            a = float(found.get("actual") or 0)
-            found["yearly"] = a * (1 + float(found["pct"]) / 100.0)
+            if not data.get("early_budget"):
+                a = float(found.get("actual") or 0)
+                found["yearly"] = a * (1 + float(found["pct"]) / 100.0)
 
 
 def _read_meeting_from_sheet(wb, data: dict) -> None:
@@ -2866,13 +2886,14 @@ def _read_meeting_from_sheet(wb, data: dict) -> None:
     if "BUDGET" not in getattr(wb, "sheetnames", []):
         return
     ws = wb["BUDGET"]
+    cols = _budget_cols(ws)
     pct_v = None
     rand_v = None
     for r in range(1, int(ws.max_row or 1) + 1):
         label = str(ws.cell(r, 2).value or "")
         if label.startswith("Approved"):
-            pct_v = ws.cell(r, 5).value
-            year_v = ws.cell(r, 6).value
+            pct_v = ws.cell(r, cols["pct"]).value
+            year_v = ws.cell(r, cols["year"]).value
             if isinstance(year_v, (int, float)) and float(year_v) > 0.5:
                 data["levy_approve_mode"] = "amount"
                 data["levy_approved_amount"] = float(year_v)
@@ -3639,16 +3660,18 @@ Set **This line**, then Save:
 
 Type **%** and Save. That % is added onto **This year finishes at**, not onto Actual.
 
-**On the Excel sheet** these extra columns appear only when the tick is on. A normal budget keeps the old columns.
+**On the Excel sheet**, a normal budget stays exactly as it was: Actual, %, Budgeted Yearly, Monthly, Notes.
 
-| Column on the sheet | What the trustees should look at |
+When the tick is on, two columns are inserted after Actual. The rest of the sheet is the same.
+
+| Column | What it is |
 |---|---|
-| **Actual (last full year)** | What last year really was |
-| **Spent so far (this year)** | The months so far |
-| **This year finishes at** | The full year the budget was built from |
-| **% we are asking** | Next year against this year. **This is the increase.** |
-| **Budget next year** | What goes into the levy. Type here if the meeting wants a different figure. |
-| **Since last full year** | The bigger jump, for example 2025 to 2027. Do not use this one as the increase. |
+| **Actual** | The last full year |
+| **9 months** or **10 months** | This year, the months already in the books. Next to Actual. |
+| **Full year** | Those months turned into 12. **Budget on this.** A bill that is not paid yet uses this year’s budget instead. |
+| **%** | The increase on Full year. Type 10 for plus 10%. |
+| **Budgeted Yearly** | Next year. Full year × (1 + %). |
+| **Monthly** | Budgeted Yearly ÷ 12 |
 
 The levy line itself still compares with the last full year, because that is what the owners paid.
 
@@ -3666,8 +3689,7 @@ On each cost tab: Actual, % Increase, Budgeted yearly, Monthly.
 **Tick on:**
 
 - Type **%** and Save → yearly = This year finishes at × (1 + %).
-- **% we are asking** on the sheet is that same increase.
-- **Since last full year** is only so the two-year jump is not hidden.
+- On the Excel sheet that same % sits in the normal **%** column, and it is applied to **Full year**.
 
 **Monthly** is always yearly ÷ 12. You cannot type it.
 
@@ -3784,7 +3806,7 @@ Do not type on the % next to Levies received. That % is worked out from the cost
 
 They can also change the other yellow cells: a cost, a note, and the reserve if it is an own amount.
 
-If the early-budget tick was on, change **Budget next year** for a different increase. Do not type on **Since last full year**.
+If the tick was on, the cost lines also show **9 months** or **10 months**, then **Full year**. Change **%** or **Budgeted Yearly** the same way as on a normal sheet. The % is on Full year, not on Actual.
 
 ### 20. When the sheet comes back
 In the sidebar, **Restore my budget**, and choose the file they sent. Their approved levy, the yellow cells and the notes come back. Then download again if you need a clean sheet.
