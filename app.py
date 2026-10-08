@@ -78,6 +78,7 @@ def row(desc: str, note: str = "") -> dict:
     return {
         "id": uid(), "desc": desc, "actual": 0.0, "pct": 0.0, "yearly": 0.0,
         "insurance": 0.0, "owner_recovery": 0.0, "note": note, "is_recovery": False,
+        "reduces_levy": False, "claim_against": "",
     }
 
 
@@ -112,9 +113,9 @@ def default_sections() -> dict:
             row("Estate / HOA CSOS paid", "Master-estate CSOS paid. Not in ordinary."),
         ],
         "recoveries_other": [
-            row("Insurance claims recovered", "Claim payouts. Deduct on the R&M line. Do not budget as normal income."),
-            row("Legal Fees Recovered"),
-            row("Maintenance Recovered"),
+            row("Insurance claims recovered", "Leave Comes off blank if the payout is already on the repair line. Otherwise pick that repair. Do not do both."),
+            row("Legal Fees Recovered", "Pick Legal Expense. The legal bill stays on Expenditure, and this amount comes off it."),
+            row("Charged to an owner", "We paid for the repair, then invoiced the owner. Example: a broken window. Pick the repair line this pays."),
         ],
         "municipal": [
             row("Electricity"),
@@ -182,6 +183,33 @@ def net_of(r: dict) -> float:
 
 def sum_net(items: list) -> float:
     return sum(net_of(r) for r in items)
+
+
+def claims_against(state: dict) -> dict:
+    """Yearly rands in Claims, keyed by the cost line they pay."""
+    out: dict[str, float] = {}
+    for r in (state.get("sections") or {}).get("recoveries_other") or []:
+        target = norm(r.get("claim_against") or "")
+        amt = abs(float(r.get("yearly") or 0))
+        if not target or amt < 0.5:
+            continue
+        out[target] = out.get(target, 0.0) + amt
+    return out
+
+
+def cost_net(state: dict, r: dict) -> float:
+    """What this cost adds to the levy, after payouts and claims."""
+    taken = claims_against(state).get(norm(r.get("desc") or ""), 0.0)
+    return max(0.0, net_of(r) - taken)
+
+
+def income_used(state: dict) -> float:
+    """Other income the user ticked. Nothing is ticked unless they tick it."""
+    total = 0.0
+    for r in (state.get("sections") or {}).get("other") or []:
+        if r.get("reduces_levy"):
+            total += max(0.0, float(r.get("yearly") or 0))
+    return total
 
 
 def insurance_on_pq(state: dict) -> bool:
@@ -339,12 +367,13 @@ def municipal_net(state: dict) -> float:
 def ordinary_total(state: dict) -> float:
     s = state["sections"]
     total = municipal_net(state)
-    total += sum(net_of(r) for r in s["rm"] if not skip_from_ordinary(r, state))
+    total += sum(cost_net(state, r) for r in s["rm"] if not skip_from_ordinary(r, state))
     total += sum_net(s["personnel"]) + sum_net(s["tax"])
-    total += sum(net_of(r) for r in s["expenditure"] if not skip_from_ordinary(r, state))
+    total += sum(cost_net(state, r) for r in s["expenditure"] if not skip_from_ordinary(r, state))
     if state.get("special_in_ordinary"):
         total += sum_net(s["special"])
-    return total
+    total -= income_used(state)
+    return max(0.0, total)
 
 
 def ordinary_actual(state: dict) -> float:
@@ -372,11 +401,12 @@ def levy_pieces(state: dict) -> list:
     s = state["sections"]
     return [
         ("Net municipal (gross minus recoveries)", municipal_net(state)),
-        ("Expenditure", sum(net_of(r) for r in s["expenditure"] if not skip_from_ordinary(r, state))),
-        ("R&M after insurance", sum(net_of(r) for r in s["rm"] if not skip_from_ordinary(r, state))),
+        ("Expenditure", sum(cost_net(state, r) for r in s["expenditure"] if not skip_from_ordinary(r, state))),
+        ("R&M after insurance and claims", sum(cost_net(state, r) for r in s["rm"] if not skip_from_ordinary(r, state))),
         ("Personnel", sum_net(s["personnel"])),
         ("Tax", sum_net(s["tax"])),
         ("Special (only if ticked)", sum_net(s["special"]) if state.get("special_in_ordinary") else 0.0),
+        ("Income used to lower the levy", -income_used(state)),
         ("Insurance premium (billed on PQ, not in levy)", insurance_expense_amount(state) if insurance_on_pq(state) else 0.0),
     ]
 
@@ -456,7 +486,7 @@ def projected_reserve(state: dict) -> float:
 
 def rm_budget(state: dict) -> float:
     return sum(
-        net_of(r)
+        cost_net(state, r)
         for r in (state["sections"].get("rm") or [])
         if not skip_from_ordinary(r, state)
     )
@@ -1211,7 +1241,7 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
     return nxt, added
 
 
-def items_to_df(items: list, rm: bool, recover: bool = False) -> pd.DataFrame:
+def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = False, claims: bool = False, claim_map: dict | None = None) -> pd.DataFrame:
     recs = []
     show_extra = rm or recover
     for it in items:
@@ -1221,7 +1251,8 @@ def items_to_df(items: list, rm: bool, recover: bool = False) -> pd.DataFrame:
         pct = pct_from_amounts(actual, yearly) if actual >= 0.5 else stored
         ins = float(it.get("insurance") or 0)
         own = float(it.get("owner_recovery") or 0)
-        net = max(0.0, yearly - ins - own) if show_extra else abs(yearly)
+        taken = float((claim_map or {}).get(norm(it.get("desc") or "")) or 0)
+        net = max(0.0, yearly - ins - own - taken) if (show_extra or taken) else abs(yearly)
         rec = {
             "Description": it["desc"],
             "Actual": actual,
@@ -1234,8 +1265,16 @@ def items_to_df(items: list, rm: bool, recover: bool = False) -> pd.DataFrame:
             rec["Insurance payout"] = ins
         if recover:
             rec["Recovered from some owners"] = own
+        if income:
+            rec["Lower the levies"] = bool(it.get("reduces_levy"))
+        if claims:
+            rec["Comes off this cost"] = (it.get("claim_against") or "").strip() or "— none —"
         recs.append(rec)
     cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Notes"]
+    if income:
+        cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Lower the levies", "Notes"]
+    if claims:
+        cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Comes off this cost", "Notes"]
     if rm:
         cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Insurance payout", "Notes"]
     if recover:
@@ -1263,6 +1302,17 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             own = float(rec.get("Recovered from some owners") or 0)
         else:
             own = float(prev.get("owner_recovery") or 0)
+        if "Lower the levies" in rec:
+            flag = rec.get("Lower the levies")
+            reduces = False if flag is None or (isinstance(flag, float) and pd.isna(flag)) else bool(flag)
+        else:
+            reduces = bool(prev.get("reduces_levy"))
+        if "Comes off this cost" in rec:
+            against = clean_note(rec.get("Comes off this cost"))
+            if against.lower() in ("", "— none —", "- none -", "none"):
+                against = ""
+        else:
+            against = prev.get("claim_against") or ""
         old_actual = abs(float(prev.get("actual") or 0))
         old_y = abs(float(prev.get("yearly") or 0))
         shown_pct = pct_from_amounts(old_actual, old_y) if old_actual >= 0.5 else float(prev.get("pct") or 0)
@@ -1291,6 +1341,8 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             "owner_recovery": own,
             "note": note,
             "is_recovery": recovery,
+            "reduces_levy": reduces,
+            "claim_against": against,
         })
     return out
 
@@ -1480,7 +1532,7 @@ def _story_costs(state: dict) -> list:
         if skip_from_ordinary(r, state):
             continue
         d = (r.get("desc") or "").lower()
-        y = net_of(r)
+        y = cost_net(state, r)
         if "secur" in d or "gate" in d or "fence" in d or "camera" in d:
             label = "Security and the gate"
         elif "garden" in d:
@@ -1901,7 +1953,7 @@ def meeting_pack(state: dict) -> dict:
         if skip_from_ordinary(r, state):
             continue
         a = float(r.get("actual") or 0)
-        y = net_of(r)
+        y = cost_net(state, r)
         more = y - a
         if more > 500 and a > 1:
             risers.append({
@@ -1923,7 +1975,7 @@ def meeting_pack(state: dict) -> dict:
     for r in pool:
         if skip_from_ordinary(r, state):
             continue
-        y = net_of(r)
+        y = cost_net(state, r)
         if y > 1:
             big.append({"label": r.get("desc") or "Cost", "yearly": y})
     big.sort(key=lambda x: -x["yearly"])
@@ -1935,7 +1987,7 @@ def meeting_pack(state: dict) -> dict:
             continue
         if (r.get("desc") or "") in big_names:
             continue
-        y = net_of(r)
+        y = cost_net(state, r)
         if y > 1:
             repairs.append({"desc": r.get("desc"), "yearly": y, "plain": _child_plain(r.get("desc") or "")})
     repairs.sort(key=lambda x: -x["yearly"])
@@ -2084,7 +2136,7 @@ def generate_excel(state: dict) -> BytesIO:
     named_rows = {}
     levy_comp_rows = []
 
-    def write(items, recovery_as_income=False, in_levy=False, owner_box=False):
+    def write(items, recovery_as_income=False, in_levy=False, owner_box=False, levy_tick=False, claim_col=False):
         """Old pack formulas: F = D*(1+E), G = F/12. Recoveries shown as positive income when asked."""
         nonlocal r
         if not items:
@@ -2092,6 +2144,18 @@ def generate_excel(state: dict) -> BytesIO:
             r += 1
             return start, start
         start = r
+        if items and levy_tick:
+            hc = ws.cell(start - 1, 9, "Lowers the levy")
+            fill(hc, NAVY)
+            hc.font = Font(bold=True, color="FFFFFF", size=10)
+            hc.border = THIN
+            ws.column_dimensions["I"].width = 18
+        if items and claim_col:
+            hc = ws.cell(start - 1, 9, "Comes off this cost")
+            fill(hc, NAVY)
+            hc.font = Font(bold=True, color="FFFFFF", size=10)
+            hc.border = THIN
+            ws.column_dimensions["I"].width = 28
         for it in items:
             desc = it.get("desc") or ""
             inp(ws.cell(r, 2), desc)
@@ -2175,6 +2239,27 @@ def generate_excel(state: dict) -> BytesIO:
                 if own:
                     extra = "Recovered from some owners " + f"{own:,.2f}" + ". Not income. Taken off this line."
                     note = f"{note} | {extra}".strip(" |") if note else extra
+            claim_bits = []
+            for claim in (state.get("sections") or {}).get("recoveries_other") or []:
+                if norm(claim.get("claim_against") or "") != norm(desc):
+                    continue
+                if abs(float(claim.get("yearly") or 0)) < 0.5:
+                    continue
+                crow = named_rows.get(claim.get("desc") or "")
+                if crow:
+                    claim_bits.append(f"N(F{crow})")
+            if claim_bits:
+                cur = ws.cell(r, 6).value
+                minus = "-".join(claim_bits)
+                if isinstance(cur, str) and str(cur).startswith("="):
+                    ws.cell(r, 6).value = f"=MAX(0,({cur[1:]})-{minus})"
+                elif cur is not None:
+                    ws.cell(r, 6).value = f"=MAX(0,{float(cur)}-{minus})"
+                    ws.cell(r, 6).number_format = MONEY
+            if levy_tick:
+                inp(ws.cell(r, 9), "Yes" if it.get("reduces_levy") else "No")
+            if claim_col:
+                inp(ws.cell(r, 9), it.get("claim_against") or "")
             cnote = ws.cell(r, 8, note)
             cnote.font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
             cnote.alignment = Alignment(wrap_text=True, vertical="top")
@@ -2239,9 +2324,12 @@ def generate_excel(state: dict) -> BytesIO:
     inc_tot = tot("TOTAL INCOME", a, b)
     bar("OTHER INCOME")
     hdr()
-    other_items = list(s.get("other") or []) + list(s.get("recoveries_other") or [])
-    a, b = write(other_items)
+    a, b = write(list(s.get("other") or []), levy_tick=True)
     tot("TOTAL OTHER INCOME", a, b)
+    bar("CLAIMS — money that pays a cost")
+    hdr()
+    a, b = write(list(s.get("recoveries_other") or []), claim_col=True)
+    tot("TOTAL CLAIMS", a, b)
     hoa_tot = None
     if state.get("has_master_hoa"):
         bar("Recoveries on HOA Costs")
@@ -2326,9 +2414,17 @@ def generate_excel(state: dict) -> BytesIO:
     bits = f"F{net_muni}"
     if levy_comp_rows:
         bits += "+" + "+".join(f"F{n}" for n in levy_comp_rows)
+    cut = []
+    for it in s.get("other") or []:
+        if it.get("reduces_levy") and abs(float(it.get("yearly") or 0)) > 0.5:
+            n = named_rows.get(it.get("desc") or "")
+            if n:
+                cut.append(f"F{n}")
+    if cut:
+        bits += "-" + "-".join(cut)
     bar("ORDINARY LEVY (what we charge)")
-    ws.cell(r, 2, "Ordinary levies = net municipal + expenditure + R&M + personnel + tax (not estate, CSOS, extra insurance, or equal garden charges)")
-    fml(ws.cell(r, 6), bits, RED)
+    ws.cell(r, 2, "Ordinary levies = net municipal + expenditure + R&M + personnel + tax, minus only the other income marked Yes")
+    fml(ws.cell(r, 6), f"MAX(0,{bits})", RED)
     fml(ws.cell(r, 7), f"F{r}/12", RED)
     ord_check = r
     if levy_rows.get("ordinary"):
@@ -2499,6 +2595,7 @@ def generate_excel(state: dict) -> BytesIO:
 
 
 RESTORE_BARS = [
+    ("claims", "recoveries_other"),
     ("other income", "other"),
     ("recoveries on hoa", "hoa_income"),
     ("hoa / estate recovered", "hoa_income"),
@@ -2560,7 +2657,14 @@ def _apply_budget_sheet(wb, data: dict) -> None:
         if isinstance(note, str) and note.strip():
             found["note"] = note.strip()
         got = ws.cell(r, 9).value
-        if isinstance(got, (int, float)):
+        if current == "other":
+            if isinstance(got, str):
+                found["reduces_levy"] = got.strip().lower() in ("yes", "y", "true", "1")
+            elif isinstance(got, (int, float)) and not isinstance(got, bool):
+                found["reduces_levy"] = float(got) >= 0.5
+        elif current == "recoveries_other" and isinstance(got, str) and got.strip():
+            found["claim_against"] = got.strip()
+        elif isinstance(got, (int, float)) and not isinstance(got, bool):
             found["owner_recovery"] = abs(float(got))
         if fam == "ordinary":
             continue
@@ -2834,12 +2938,24 @@ def init():
     ss.setdefault("estate_split", "equal")
 
 
-def section_form(key: str, title: str, help_text: str, rm: bool = False, recover: bool = False):
+def section_form(key: str, title: str, help_text: str, rm: bool = False, recover: bool = False, income: bool = False, claims: bool = False):
     st.subheader(title)
     if help_text:
         st.caption(help_text)
     items = st.session_state.sections.get(key) or []
-    df = items_to_df(items, rm, recover)
+    claim_map = claims_against(st.session_state) if key in ("expenditure", "rm") else None
+    cost_names = ["— none —"]
+    if claims:
+        for sec in ("expenditure", "rm"):
+            for it in st.session_state.sections.get(sec) or []:
+                name = (it.get("desc") or "").strip()
+                if name and name not in cost_names:
+                    cost_names.append(name)
+        for it in items:
+            name = (it.get("claim_against") or "").strip()
+            if name and name not in cost_names:
+                cost_names.append(name)
+    df = items_to_df(items, rm, recover, income=income, claims=claims, claim_map=claim_map)
     with st.form(f"form_{key}"):
         edited = st.data_editor(
             df,
@@ -2859,12 +2975,21 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                     format="%.2f",
                     help="The full bill. Or type the rand amount then Save. We fill in the %.",
                 ),
-                "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="What goes into the levy, per month. Owner recoveries and insurance payouts are already taken off."),
+                "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="What goes into the levy, per month. Owner recoveries, insurance payouts and claims are already taken off."),
                 "Insurance payout": st.column_config.NumberColumn("Insurance payout", format="%.2f"),
                 "Recovered from some owners": st.column_config.NumberColumn(
                     "Recovered from some owners",
                     format="%.2f",
                     help="What some owners pay towards this same bill. Not income. Not a levy column. The levy carries the bill minus this.",
+                ),
+                "Lower the levies": st.column_config.CheckboxColumn(
+                    "Lower the levies",
+                    help="Tick only the income that should bring the ordinary levy down. Leave it off if this complex does not use that income.",
+                ),
+                "Comes off this cost": st.column_config.SelectboxColumn(
+                    "Comes off this cost",
+                    options=cost_names,
+                    help="Pick the expense or repair this money pays. That cost stays on the books, and this amount comes off it.",
                 ),
                 "Notes": st.column_config.TextColumn("Notes", width="large", help="Shows on the Excel Comments / Notes column. Click Save after typing."),
             },
@@ -2887,6 +3012,20 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
             f"Add the city-bill lines {money(g)}, then subtract the recovered lines {money(rec)}. "
             f"Net in the levy = {money(g - rec)}. Do not add the recovered lines on top of the city bill."
         )
+    elif key == "other":
+        used = [r for r in st.session_state.sections.get("other") or [] if r.get("reduces_levy") and float(r.get("yearly") or 0) > 0.5]
+        if used:
+            names = ", ".join(r.get("desc") or "" for r in used)
+            st.caption(f"Lowering the levy by {money(income_used(st.session_state))}: {names}. Unticked income stays on the sheet and does not change the levy.")
+        else:
+            st.caption("Nothing is ticked, so other income does not change the levy. Tick a line only for this complex.")
+    elif key == "recoveries_other":
+        linked = [r for r in st.session_state.sections.get("recoveries_other") or [] if (r.get("claim_against") or "").strip() and float(r.get("yearly") or 0) > 0.5]
+        if linked:
+            bits = [f"{r.get('desc')} {money(float(r.get('yearly') or 0))} comes off {r.get('claim_against')}" for r in linked]
+            st.caption(" · ".join(bits))
+        else:
+            st.caption("Pick the cost each claim pays, then Save. Until you pick one, the claim does not change the levy.")
     else:
         st.caption(f"Section net total: {money(sum_net(st.session_state.sections[key]))}  ·  Monthly total: {money(sum_net(st.session_state.sections[key]) / 12)}")
 
@@ -2961,7 +3100,7 @@ def main():
             "It is **not** last year’s levy plus a %."
         )
         st.write(
-            "**Ordinary = net municipal + expenditure + R&M + personnel + tax** "
+            "**Ordinary = net municipal + expenditure + R&M + personnel + tax − income you ticked** "
             "(and special projects only if that box is ticked)."
         )
         st.write(
@@ -3250,9 +3389,13 @@ On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly.
 ### 4. What ordinary levies are
 Ordinary levies are **not** last year’s levy plus a %.
 
-**Ordinary = net municipal + expenditure + repairs and maintenance + personnel + tax**
+**Ordinary = net municipal + expenditure + repairs and maintenance + personnel + tax − only the other income you tick**
 
 (and special projects only if you tick that box).
+
+On **Other Income**, tick **Lower the levies** on a line only if this complex uses that money to pay the bills. Nothing is ticked for you. Unticked income stays on the sheet and does not change the levy. Do not tick bank interest if it already sits in the reserve.
+
+**Claims** (legal fees recovered, insurance claim, or a repair invoiced to an owner) are not income. Type the amount, then pick **Comes off this cost**. Example: legal recovery comes off Legal Expense. A broken window comes off the repair line. The cost stays, and the claim comes off it. Do not also type the same insurance payout on the repair line.
 
 **Net municipal** = what the city bills us, minus what owners pay back (electricity, water, sewer, refuse).
 
@@ -3448,9 +3591,21 @@ Do not use Erase everything unless you mean to wipe the screen.
         else:
             st.caption("Estate lines are hidden. Owners pay that estate directly — it does not go through this budget.")
         st.divider()
-        section_form("other", "Other Income", "Fixed Eskom / rental / interest live here. Leave unused lines at 0.")
+        section_form(
+            "other",
+            "Other Income",
+            "Rental, interest, penalties and the like. Tick Lower the levies only on the lines that should bring this complex’s levy down. Leave the tick off if that income is not used.",
+            income=True,
+        )
         st.divider()
-        section_form("recoveries_other", "Other recoveries", "Insurance / legal recoveries. Utility recoveries sit under Municipal.")
+        section_form(
+            "recoveries_other",
+            "Claims",
+            "Money that pays a cost we already have. Legal fees recovered comes off Legal Expense. "
+            "A repair we paid and then invoiced to the owner (a broken window) comes off that repair line. "
+            "Type the amount, pick Comes off this cost, then Save. This is not income and it is not a levy column.",
+            claims=True,
+        )
         st.divider()
         section_form(
             "fixed",
@@ -3564,6 +3719,17 @@ Do not use Erase everything unless you mean to wipe the screen.
                 + ", ".join(it["desc"] for it in over_pay)
                 + ". That column is a **deduction**, not the new budget. "
                 "Put the fire / equipment amount in **Budgeted yearly**. Net in the levy is R0 on those lines."
+            )
+        both = []
+        taken = claims_against(st.session_state)
+        for it in st.session_state.sections.get("rm") or []:
+            if float(it.get("insurance") or 0) > 0.5 and taken.get(norm(it.get("desc") or ""), 0) > 0.5:
+                both.append(it.get("desc") or "")
+        if both:
+            st.warning(
+                "These repairs have an insurance payout and a claim: "
+                + ", ".join(both)
+                + ". Use only one, or the levy is reduced twice."
             )
         section_form(
             "rm",
