@@ -2243,8 +2243,11 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B8"] = "Projected reserve at year-end"
     fml(ws["D8"], "D5+D6-D7")
     ws["B9"] = (
-        "Actual is the last full year. % is next year’s budget against that full year, not against the months so far. "
-        "Spent so far is this year. This year finishes at is what the new budget was built from. Yellow cells = type here."
+        "Actual is the last full year. Spent so far and This year finishes at are the year you are in now. "
+        "% we are asking is next year against This year finishes at. "
+        "Since last full year is the bigger jump over two years — do not use that one as the increase. "
+        "Change Budget next year if the meeting wants a different figure. The % updates. "
+        "The levy line itself stays against the last full year, because that is what owners paid."
         if state.get("early_budget")
         else "Interest is already inside the reserve balance above. It is not added again. Yellow cells = type here. Budgeted Yearly = Actual × (1 + %). Monthly = Yearly ÷ 12."
     )
@@ -2254,8 +2257,8 @@ def generate_excel(state: dict) -> BytesIO:
 
     def bar(title):
         nonlocal r
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=8)
-        for col in range(2, 9):
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=12 if state.get("early_budget") else 8)
+        for col in range(2, (13 if state.get("early_budget") else 9)):
             fill(ws.cell(r, col), SECTION)
             ws.cell(r, col).border = THIN
         ws.cell(r, 2).value = title
@@ -2265,19 +2268,29 @@ def generate_excel(state: dict) -> BytesIO:
     def hdr():
         nonlocal r
         labs = ["Description", "GL Code", "Actual", "%", "Budgeted Yearly", "Monthly", "Comments / Notes"]
+        if state.get("early_budget"):
+            labs = [
+                "Description", "GL Code", "Actual (last full year)", "% we are asking",
+                "Budget next year", "Monthly", "Comments / Notes",
+            ]
         for i, lab in enumerate(labs, 2):
             c = ws.cell(r, i, lab)
             fill(c, NAVY)
             c.font = Font(bold=True, color="FFFFFF", size=10)
             c.border = THIN
         if state.get("early_budget"):
-            for col, lab in ((10, "Spent so far"), (11, "This year finishes at")):
+            for col, lab in (
+                (10, "Spent so far (this year)"),
+                (11, "This year finishes at"),
+                (12, "Since last full year"),
+            ):
                 c = ws.cell(r, col, lab)
-                fill(c, NAVY)
+                fill(c, "0D7377" if col < 12 else "7F8C8D")
                 c.font = Font(bold=True, color="FFFFFF", size=10)
                 c.border = THIN
-            ws.column_dimensions["J"].width = 16
-            ws.column_dimensions["K"].width = 24
+            ws.column_dimensions["J"].width = 24
+            ws.column_dimensions["K"].width = 26
+            ws.column_dimensions["L"].width = 22
         r += 1
 
     levy_rows = {}
@@ -2318,8 +2331,12 @@ def generate_excel(state: dict) -> BytesIO:
             )
             inp(ws.cell(r, 4), act, MONEY)
             if early_line:
-                inp(ws.cell(r, 10), abs(float(it.get("ytd") or 0)), MONEY)
-                inp(ws.cell(r, 11), line_forecast(it, state), MONEY)
+                spent = ws.cell(r, 10)
+                inp(spent, abs(float(it.get("ytd") or 0)), MONEY)
+                fill(spent, "D6EFEA")
+                finishes = ws.cell(r, 11)
+                inp(finishes, line_forecast(it, state), MONEY)
+                fill(finishes, "D6EFEA")
             if fam == "ordinary":
                 # % follows the levy formula so a meeting change to costs updates the %
                 fml(ws.cell(r, 5), f'IF(D{r}=0,0,F{r}/D{r}-1)')
@@ -2359,10 +2376,14 @@ def generate_excel(state: dict) -> BytesIO:
             else:
                 fml(ws.cell(r, 6), f"D{r}*(1+E{r})")
             if early_line:
-                # % on the sheet is against the last full year. The budget is the amount from the app, not Actual × %.
-                fml(ws.cell(r, 5), f"IF(D{r}=0,0,F{r}/D{r}-1)")
+                # % we are asking is against this year, not against the last full year.
+                fml(ws.cell(r, 5), f"IF(K{r}=0,0,F{r}/K{r}-1)")
                 ws.cell(r, 5).number_format = "0.00%"
                 inp(ws.cell(r, 6), max(0.0, abs(y) - ins), MONEY)
+                jump = ws.cell(r, 12)
+                fml(jump, f"IF(D{r}=0,0,F{r}/D{r}-1)")
+                jump.number_format = "0.00%"
+                fill(jump, "F2F2F2")
             fml(ws.cell(r, 7), f"F{r}/12")
             note = clean_note(it.get("note"))
             if ins:
@@ -2399,6 +2420,9 @@ def generate_excel(state: dict) -> BytesIO:
         fml(ws.cell(r, 4), f"SUM(D{start}:D{end})", TOTAL)
         fml(ws.cell(r, 6), f"SUM(F{start}:F{end})", TOTAL)
         fml(ws.cell(r, 7), f"F{r}/12", TOTAL)
+        if state.get("early_budget"):
+            fml(ws.cell(r, 10), f"SUM(J{start}:J{end})", TOTAL)
+            fml(ws.cell(r, 11), f"SUM(K{start}:K{end})", TOTAL)
         row_n = r
         r += 2
         return row_n
@@ -3545,7 +3569,16 @@ On each line, set **This line**, then Save:
 - **Already paid** (a repair, a valuation) — not stretched. Type next year’s amount yourself. Often R 0.
 - **Not paid yet** (insurance, audit) — uses this year’s budget, not the months so far.
 
-Type **%** and Save to add that % onto **This year finishes at**. The % on the Excel sheet is still against last year’s full Actual, so the trustees see the real increase.
+Type **%** and Save to add that % onto **This year finishes at**.
+
+On the Excel sheet, only when this tick is on, each cost line shows:
+
+- **Actual (last full year)**
+- **Spent so far (this year)** and **This year finishes at**
+- **% we are asking** — next year against this year
+- **Since last full year** — the bigger jump. Do not use this one as the increase.
+
+A normal budget, with the tick off, keeps the old columns. Change **Budget next year** in the meeting if they want a different figure. The % updates.
 
 ### 3. Type this year’s amounts
 On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly.
