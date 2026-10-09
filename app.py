@@ -163,13 +163,18 @@ def default_sections() -> dict:
     }
 
 
-def budget_row(desc: str, amount: float, note: str = "", **extra) -> dict:
-    """Last year (or this year's full-year run) sits in Actual. Budgeted yearly starts the same, at 0%, so a % increase can move it."""
+def budget_row(desc: str, actual: float, note: str = "", yearly: float | None = None, pct: float | None = None, **extra) -> dict:
+    """Actual is the full-year base. Pass pct (10 means +10%) or yearly. Otherwise the budget starts equal to Actual."""
     rec = row(desc, note)
-    rec["actual"] = float(amount)
-    rec["yearly"] = float(amount)
-    rec["pct"] = 0.0
-    rec["edit_mode"] = "pct"
+    rec["actual"] = float(actual)
+    if pct is not None:
+        rec["pct"] = float(pct)
+        rec["yearly"] = round(float(actual) * (1 + float(pct) / 100.0), 2)
+        rec["edit_mode"] = "pct"
+    else:
+        rec["yearly"] = float(actual if yearly is None else yearly)
+        rec["pct"] = pct_from_amounts(rec["actual"], rec["yearly"]) if rec["actual"] >= 0.5 else 0.0
+        rec["edit_mode"] = "pct"
     rec.update(extra)
     return rec
 
@@ -181,38 +186,36 @@ def key_west_sections() -> dict:
         "levy": [
             budget_row(
                 "Ordinary Levies",
-                5100631.70,
-                "Actual is what was billed, stretched to 12 months. Budgeted yearly is worked out from the costs. Change the % on the cost lines, then Save.",
+                5119247.24,
+                "Actual is the full-year ordinary levy. Budgeted yearly is worked out from the costs.",
             ),
-            row("Reserve Fund Contribution", "Not in the ledger as a normal levy. Choose Own amount, 15%, 25% or 100% of repairs on the left. Do not use R19,126."),
-            budget_row("CSOS Levy (Income)", 65200, "From this year’s collections. Own column, not inside ordinary levies. After the PQ file is loaded, the formula can replace this."),
-            row("Insurance billed to owners", "Leave at 0. The premium is inside the ordinary levy."),
-            budget_row("Levy - Boathouse", 130600, "Own levy line. Not ordinary."),
-            budget_row("Levy - Boatport", 81100, "Own levy line. Not ordinary."),
-            row("Special Levy"),
+            row("Reserve Fund Contribution", "The bank balance sits in the reserve box on the left, not in this Actual. Type the contribution, or pick 15%, 25% or 100% of repairs."),
+            budget_row("CSOS Levy (Income)", 65568.24, "Own column. Not inside ordinary levies. With the PQ file loaded, the formula can replace the budget."),
         ],
         "other": [
-            budget_row("Interest on Arrear Levies", 102000, "Shown only. Not ticked, so it does not lower the levy."),
-            budget_row("Investment Income", 83000, "Bank interest. Shown only. Already in the reserve. Do not tick."),
-            budget_row("Penalty Income", 42000, "Shown only. Do not tick."),
-            budget_row("Clubhouse Rental", 10000, "Uneven this year. Do not tick until you know it pays the bills."),
+            budget_row("Interest on Arrear Levies", 101584.94, "Not ticked. Do not rely on owners paying late."),
+            budget_row("Interest Received - Investec", 59445.66, "Not ticked. Bank interest stays in the reserve.", pct=6),
+            budget_row("Interest Received - FNB", 12713.10, "Not ticked. Bank interest stays in the reserve.", pct=4),
+            budget_row("Penalty Income", 35324.25, "Not in this budget.", pct=-100),
+            budget_row("Cost Recovered", 1040, "Broken window, unit 15, invoiced to the owner. Not in this budget.", pct=-100),
+            budget_row("Levy Boathouse", 130590.60, "On Other Income, not on the levy block. Tick Lowers the levy only if this money must bring the ordinary levy down. It is off for now.", pct=-100, reduces_levy=True),
+            budget_row("Levy Boatport", 75270.06, "On Other Income, not on the levy block. Tick Lowers the levy only if this money must bring the ordinary levy down. It is off for now.", pct=-100, reduces_levy=True),
+            budget_row("Clubhouse Rental", 7500, "Not ticked, so it stays on the sheet and does not change the levy."),
         ],
         "hoa_income": [],
         "hoa_expense": [],
         "recoveries_other": [
             budget_row(
-                "Insurance claims recovered", 0,
-                "Do not type the R92,600. That was claim money (Bryte / OWC), not levy income.",
+                "Additional Insurance", 92593.53,
+                "Claim money already received. Not in this budget. Do not tick it as income.",
+                pct=-100,
             ),
+            budget_row("CSOS Collections", 3000, "A collection fee. Not in this budget.", pct=-100),
             budget_row(
-                "Legal Fees Recovered", 0,
-                "This year owners were billed R224,307. Type it here only if that continues. It comes off Legal Expense.",
+                "Legal Fees Recovered", 224307.11,
+                "Owners were billed this. Not in this budget unless it happens again. If you put a budget here, it comes off Legal Expense.",
+                pct=-100,
                 claim_against="Legal Expense",
-            ),
-            budget_row(
-                "Charged to an owner", 1040,
-                "Broken window invoiced to an owner. Comes off General Building.",
-                claim_against="General Building",
             ),
         ],
         "municipal": [
@@ -3325,10 +3328,12 @@ def main():
             st.session_state.insurance_bill_yearly = 0.0
             st.session_state.special_in_ordinary = False
             st.session_state.has_master_hoa = False
-            st.session_state.auto_csos = False
+            st.session_state.auto_csos = bool(st.session_state.get("pq"))
             st.session_state.reserve_mode = "amount"
+            st.session_state.reserve_balance = 1079058.82
+            st.session_state.reserve_amount = 1162666.92
             st.session_state.actual_months = 12
-            st.session_state.current_monthly_levy = 418847.49
+            st.session_state.current_monthly_levy = round(5119247.24 / 12, 2)
             if not (st.session_state.fin_year or "").strip():
                 st.session_state.fin_year = "1 January 2027 – 31 December 2027"
             for key in (
@@ -3338,11 +3343,12 @@ def main():
                 st.session_state[f"_nonce_{key}"] = int(st.session_state.get(f"_nonce_{key}") or 0) + 1
             apply_levy_lines(st.session_state)
             st.session_state.msg = (
-                "Key West draft loaded. The figures are in Actual. Budgeted yearly starts at the same amount. "
-                "Type a % on a line and Save, and Budgeted yearly moves. "
-                "Other income is not ticked. Special projects are not in the levy. "
-                "Insurance is inside the ordinary levy. CSOS Actual is R65,200 until you load the PQ file and tick the CSOS formula. "
-                "Choose the reserve on the left. Change the financial year if it is not a calendar year."
+                "Key West draft loaded. Income is only Ordinary, Reserve and CSOS. "
+                "Boathouse, boatport, clubhouse, interest, penalties and the window recovery are under Other Income. "
+                "Boathouse and boatport are ticked, but their budget is 0 until you type a %. "
+                "Investec is +6% and FNB is +4%. The reserve bank balance is on the left, and the contribution is R1,162,666.92. "
+                "Special projects are not in the levy. Insurance is inside the ordinary levy. "
+                "Change the financial year if it is not a calendar year."
             )
             st.rerun()
 
@@ -3590,7 +3596,7 @@ In the sidebar, type the **complex name** and the **financial year** (for exampl
 
 Choose **body corporate** or **HOA**. The four reserve choices work for both. The note under the reserve box changes: a body corporate also sees the Act’s minimum, an HOA follows its MOI or constitution. The note does not change the amount. You do.
 
-**Key West:** click **Load the Key West draft** on the left. The figures go into **Actual**. **Budgeted yearly** starts at the same amount, which is a 0% increase. Type a % on a line and click **Save this section**, and Budgeted yearly moves. It replaces what is on the screen, so download Excel first if you need to keep other work. Other income is not ticked. Special projects stay out of the levy. Insurance stays inside the ordinary levy. CSOS Actual is R65,200 until the PQ file is loaded and you tick the CSOS formula. The reserve is still your choice.
+**Key West:** click **Load the Key West draft** on the left. Income on the sheet is only **Ordinary Levies**, **Reserve Fund Contribution** and **CSOS**. Boathouse, boatport, clubhouse, the two bank-interest lines, penalties and the window recovery sit under **Other Income**, with **Lowers the levy** Yes or No. Actual is the full-year figure. Type a % and Save, and Budgeted yearly moves. It replaces what is on the screen, so download Excel first if you need to keep other work.
 
 ### 2. Load last year
 On the left, in this order:
