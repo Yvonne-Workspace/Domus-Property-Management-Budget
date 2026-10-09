@@ -163,10 +163,13 @@ def default_sections() -> dict:
     }
 
 
-def budget_row(desc: str, yearly: float, note: str = "", **extra) -> dict:
+def budget_row(desc: str, amount: float, note: str = "", **extra) -> dict:
+    """Last year (or this year's full-year run) sits in Actual. Budgeted yearly starts the same, at 0%, so a % increase can move it."""
     rec = row(desc, note)
-    rec["yearly"] = float(yearly)
-    rec["edit_mode"] = "amount"
+    rec["actual"] = float(amount)
+    rec["yearly"] = float(amount)
+    rec["pct"] = 0.0
+    rec["edit_mode"] = "pct"
     rec.update(extra)
     return rec
 
@@ -176,7 +179,11 @@ def key_west_sections() -> dict:
     Monthly costs are a full year. Once-off jobs are not stretched."""
     return {
         "levy": [
-            row("Ordinary Levies", "Worked out from the costs. Do not type over it."),
+            budget_row(
+                "Ordinary Levies",
+                5100631.70,
+                "Actual is what was billed, stretched to 12 months. Budgeted yearly is worked out from the costs. Change the % on the cost lines, then Save.",
+            ),
             row("Reserve Fund Contribution", "Not in the ledger as a normal levy. Choose Own amount, 15%, 25% or 100% of repairs on the left. Do not use R19,126."),
             budget_row("CSOS Levy (Income)", 65200, "From this year’s collections. Own column, not inside ordinary levies. After the PQ file is loaded, the formula can replace this."),
             row("Insurance billed to owners", "Leave at 0. The premium is inside the ordinary levy."),
@@ -3331,9 +3338,10 @@ def main():
                 st.session_state[f"_nonce_{key}"] = int(st.session_state.get(f"_nonce_{key}") or 0) + 1
             apply_levy_lines(st.session_state)
             st.session_state.msg = (
-                "Key West draft loaded. Amounts are a full year from the ledger to 9 October 2026. "
+                "Key West draft loaded. The figures are in Actual. Budgeted yearly starts at the same amount. "
+                "Type a % on a line and Save, and Budgeted yearly moves. "
                 "Other income is not ticked. Special projects are not in the levy. "
-                "Insurance is inside the ordinary levy. CSOS is R65,200 until you load the PQ file and tick the CSOS formula. "
+                "Insurance is inside the ordinary levy. CSOS Actual is R65,200 until you load the PQ file and tick the CSOS formula. "
                 "Choose the reserve on the left. Change the financial year if it is not a calendar year."
             )
             st.rerun()
@@ -3582,7 +3590,7 @@ In the sidebar, type the **complex name** and the **financial year** (for exampl
 
 Choose **body corporate** or **HOA**. The four reserve choices work for both. The note under the reserve box changes: a body corporate also sees the Act’s minimum, an HOA follows its MOI or constitution. The note does not change the amount. You do.
 
-**Key West:** click **Load the Key West draft** on the left. It fills this complex’s lines and the full-year amounts. It replaces what is on the screen, so download Excel first if you need to keep other work. Other income is not ticked. Special projects stay out of the levy. Insurance stays inside the ordinary levy. CSOS is R65,200 until the PQ file is loaded and you tick the CSOS formula. The reserve is still your choice.
+**Key West:** click **Load the Key West draft** on the left. The figures go into **Actual**. **Budgeted yearly** starts at the same amount, which is a 0% increase. Type a % on a line and click **Save this section**, and Budgeted yearly moves. It replaces what is on the screen, so download Excel first if you need to keep other work. Other income is not ticked. Special projects stay out of the levy. Insurance stays inside the ordinary levy. CSOS Actual is R65,200 until the PQ file is loaded and you tick the CSOS formula. The reserve is still your choice.
 
 ### 2. Load last year
 On the left, in this order:
