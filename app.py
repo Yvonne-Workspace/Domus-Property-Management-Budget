@@ -163,6 +163,137 @@ def default_sections() -> dict:
     }
 
 
+def budget_row(desc: str, yearly: float, note: str = "", **extra) -> dict:
+    rec = row(desc, note)
+    rec["yearly"] = float(yearly)
+    rec["edit_mode"] = "amount"
+    rec.update(extra)
+    return rec
+
+
+def key_west_sections() -> dict:
+    """Key West Body Corporate draft from the ledger 1 Jan 2026 to 9 Oct 2026.
+    Monthly costs are a full year. Once-off jobs are not stretched."""
+    return {
+        "levy": [
+            row("Ordinary Levies", "Worked out from the costs. Do not type over it."),
+            row("Reserve Fund Contribution", "Not in the ledger as a normal levy. Choose Own amount, 15%, 25% or 100% of repairs on the left. Do not use R19,126."),
+            budget_row("CSOS Levy (Income)", 65200, "From this year’s collections. Own column, not inside ordinary levies. After the PQ file is loaded, the formula can replace this."),
+            row("Insurance billed to owners", "Leave at 0. The premium is inside the ordinary levy."),
+            budget_row("Levy - Boathouse", 130600, "Own levy line. Not ordinary."),
+            budget_row("Levy - Boatport", 81100, "Own levy line. Not ordinary."),
+            row("Special Levy"),
+        ],
+        "other": [
+            budget_row("Interest on Arrear Levies", 102000, "Shown only. Not ticked, so it does not lower the levy."),
+            budget_row("Investment Income", 83000, "Bank interest. Shown only. Already in the reserve. Do not tick."),
+            budget_row("Penalty Income", 42000, "Shown only. Do not tick."),
+            budget_row("Clubhouse Rental", 10000, "Uneven this year. Do not tick until you know it pays the bills."),
+        ],
+        "hoa_income": [],
+        "hoa_expense": [],
+        "recoveries_other": [
+            budget_row(
+                "Insurance claims recovered", 0,
+                "Do not type the R92,600. That was claim money (Bryte / OWC), not levy income.",
+            ),
+            budget_row(
+                "Legal Fees Recovered", 0,
+                "This year owners were billed R224,307. Type it here only if that continues. It comes off Legal Expense.",
+                claim_against="Legal Expense",
+            ),
+            budget_row(
+                "Charged to an owner", 1040,
+                "Broken window invoiced to an owner. Comes off General Building.",
+                claim_against="General Building",
+            ),
+        ],
+        "municipal": [
+            budget_row("Electricity", 1957000, "10 city bills, averaged to a year."),
+            {**budget_row("Less: Electricity recovered from owners", 1534900, "Comes off the city bill. About R422,100 stays in the levy."), "is_recovery": True},
+            budget_row("Sewerage and water plant", 355300, "No recovery line. The full amount stays in the levy."),
+            budget_row("Refuse Removal", 311200, "Latest bill × 12. August looked like two months."),
+            budget_row("Rates, unit 130", 7800),
+            budget_row("Water, common property", 0, "The bill was credited back. Leave at 0 unless a new bill is expected."),
+        ],
+        "expenditure": [
+            budget_row("Accounting Fees", 5775, "Once a year. Not times 12."),
+            budget_row("Audit Fees", 13500, "Once a year. Not times 12."),
+            budget_row("Bank Charges", 7700),
+            budget_row("Cleaning Materials", 46800),
+            budget_row("Computer Expenses", 2500),
+            budget_row("CSOS Levies (Expense)", 65200, "Same as CSOS income. Not inside ordinary levies."),
+            budget_row("Donation", 5000, "Was coded under legal. Leave it out if the trustees do not want it."),
+            budget_row("Fuel (generator, petrol, diesel)", 92500),
+            budget_row("Garden service (contract)", 595143, "Servest. This is the contract, so it sits here, not under Repairs."),
+            budget_row("Insurance Premium", 376316, "Inside the ordinary levy. Latest premium × 12."),
+            budget_row("Internet, clubhouse", 19300),
+            budget_row("Legal Expense", 40000, "Not the R267,000. Almost all of that was billed back to owners."),
+            budget_row("Management Fees", 221393, "New September fee × 12."),
+            budget_row("Meeting Expenses", 46000, "Mostly the AGM. Not times 12."),
+            budget_row("Meeting Refreshments", 4000),
+            budget_row("Office / General Expenses", 1000),
+            budget_row("Printing and Stationery", 4000),
+            budget_row("Security / Guarding", 1101240, "Bidvest. New monthly fee × 12."),
+            budget_row("Subscriptions", 1500),
+            budget_row("Telephone", 2900),
+            budget_row("Telkom Fibre", 2500, "One bill in the ledger. Not times 12."),
+            budget_row("TimeTec / intercom", 52400, "Normal monthly fee × 12. Ask before adding January’s extra of about R53,000."),
+        ],
+        "rm": [
+            budget_row("Borehole repairs", 19400, "Repairs only. The small borehole project is under Special."),
+            budget_row("Building repairs", 5400),
+            budget_row("Electrical", 34000),
+            budget_row("Fire Equipment", 18000, "Not times 12."),
+            budget_row("Garden equipment", 4800),
+            budget_row("Garden Expenses", 28500, "General garden costs. The tree job is under Special."),
+            budget_row("Garden refuse", 27600),
+            budget_row("Gate & Intercom", 28000, "Repairs. The TimeTec fee is under Expenditure."),
+            budget_row("General Building", 102000),
+            budget_row("Jungle gym", 1800, "Once-off. Set to 0 if it will not happen again."),
+            budget_row("Other R&M", 2000),
+            budget_row("Plumbing / Sewerage", 19500),
+            budget_row("Pool", 24800, "Was coded as admin. It belongs here."),
+            budget_row("Roofs & Gutters", 38000, "Jobs already done. Not times 12."),
+            budget_row("Tools", 1000),
+            budget_row("Tractor repairs", 24000),
+            budget_row("Waterproofing", 50000, "Set to 0 if no more waterproofing is planned."),
+        ],
+        "personnel": [
+            budget_row("Bonuses & Overtime", 35000, "Not times 12."),
+            budget_row("Casual / Relief Wages", 117500),
+            budget_row("Funeral insurance", 5400),
+            budget_row("PAYE / UIF", 157900, "Use R146,000 if the high January amount was a once-off."),
+            budget_row("Payroll costs", 19300),
+            budget_row("Pension / Provident Fund", 29300),
+            budget_row("Protective Clothing", 20400),
+            budget_row("Salaries & Wages", 980700),
+            budget_row("Staff expenses", 2000),
+            budget_row("Staff Welfare", 10000, "Staff refreshments."),
+            budget_row("Travel", 17000),
+            budget_row("Union fees", 6100),
+            budget_row("WCA / COIDA", 10300, "The net for the year. Not times 12."),
+        ],
+        "tax": [
+            budget_row(
+                "Taxation Payable", 13000,
+                "Estimate only, about R11,000 to R15,000, if arrears interest and penalties stay unticked. Do not use the R286,107 SARS payment. That is old tax. Confirm with the auditor.",
+            ),
+        ],
+        "special": [
+            budget_row("Aluminium windows", 99730, "This year only. Not times 12. The reserve pays unless you tick Special into the levy."),
+            budget_row("Borehole project", 2899, "Separate from borehole repairs."),
+            budget_row("Chemical dosing pumps", 16880),
+            budget_row("Jetty", 39917, "Already moved off Repairs. Do not enter it again there."),
+            budget_row("Roadways", 15950),
+            budget_row("Staircase lights", 5232),
+            budget_row("Tree felling", 29900),
+            budget_row("Water-plant sand beds", 50370),
+        ],
+        "fixed": [],
+    }
+
+
 def is_muni_recovery(desc: str, flag: bool = False) -> bool:
     """Any municipal line with 'recovered' or 'Less:' is subtracted. The name need not say water or electricity."""
     d = (desc or "").lower()
@@ -3178,6 +3309,34 @@ def main():
         st.header("Complex")
         st.session_state.complex_name = st.text_input("Complex name", st.session_state.complex_name)
         st.session_state.fin_year = st.text_input("Financial year", st.session_state.fin_year)
+        st.caption("Key West only. This replaces the lines on the screen. Download Excel first if you need to keep what is there.")
+        if st.button("Load the Key West draft"):
+            st.session_state.sections = key_west_sections()
+            st.session_state.complex_name = "Key West Body Corporate"
+            st.session_state.scheme_type = "bc"
+            st.session_state.insurance_mode = "levy"
+            st.session_state.insurance_bill_yearly = 0.0
+            st.session_state.special_in_ordinary = False
+            st.session_state.has_master_hoa = False
+            st.session_state.auto_csos = False
+            st.session_state.reserve_mode = "amount"
+            st.session_state.actual_months = 12
+            st.session_state.current_monthly_levy = 418847.49
+            if not (st.session_state.fin_year or "").strip():
+                st.session_state.fin_year = "1 January 2027 – 31 December 2027"
+            for key in (
+                "levy", "other", "hoa_income", "hoa_expense", "recoveries_other",
+                "municipal", "expenditure", "rm", "personnel", "tax", "special", "fixed",
+            ):
+                st.session_state[f"_nonce_{key}"] = int(st.session_state.get(f"_nonce_{key}") or 0) + 1
+            apply_levy_lines(st.session_state)
+            st.session_state.msg = (
+                "Key West draft loaded. Amounts are a full year from the ledger to 9 October 2026. "
+                "Other income is not ticked. Special projects are not in the levy. "
+                "Insurance is inside the ordinary levy. CSOS is R65,200 until you load the PQ file and tick the CSOS formula. "
+                "Choose the reserve on the left. Change the financial year if it is not a calendar year."
+            )
+            st.rerun()
 
         st.header("Load last year")
         st.caption(
@@ -3422,6 +3581,8 @@ def main():
 In the sidebar, type the **complex name** and the **financial year** (for example 1 March 2027 – 28 February 2028).
 
 Choose **body corporate** or **HOA**. The four reserve choices work for both. The note under the reserve box changes: a body corporate also sees the Act’s minimum, an HOA follows its MOI or constitution. The note does not change the amount. You do.
+
+**Key West:** click **Load the Key West draft** on the left. It fills this complex’s lines and the full-year amounts. It replaces what is on the screen, so download Excel first if you need to keep other work. Other income is not ticked. Special projects stay out of the levy. Insurance stays inside the ordinary levy. CSOS is R65,200 until the PQ file is loaded and you tick the CSOS formula. The reserve is still your choice.
 
 ### 2. Load last year
 On the left, in this order:
