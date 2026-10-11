@@ -2137,11 +2137,11 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B2"].font = Font(name="Calibri", bold=True, size=16, color=NAVY)
     ws["B3"] = state.get("fin_year") or ""
     ws["B3"].font = Font(bold=True, size=12)
-    ws["B5"] = "Current reserve fund (already in the bank)"
+    ws["B5"] = "Money already in the bank"
     inp(ws["D5"], float(state.get("reserve_balance") or 0), MONEY)
-    ws["B6"] = "This year’s reserve contribution"
-    ws["B7"] = "This year’s projects paid from the reserve"
-    ws["B8"] = "Projected reserve at year-end"
+    ws["B6"] = "Owners put in this year"
+    ws["B7"] = "This year's 10-year-plan jobs"
+    ws["B8"] = "Left at year-end"
     fml(ws["D8"], "D5+D6-D7")
     ws["B9"] = "Yellow cell = the one you type. If the % is yellow, Budgeted Yearly = Actual × (1 + %). If Budgeted Yearly is yellow, the % = Yearly ÷ Actual − 1. Monthly = Yearly ÷ 12."
     ws["B9"].font = Font(italic=True, size=9, color="666666")
@@ -2486,7 +2486,7 @@ def generate_excel(state: dict) -> BytesIO:
         ws["D6"] = 0
     if state.get("special_in_ordinary"):
         ws["D7"] = 0
-        ws["B7"] = "This year’s projects paid from the reserve (none — they are in the levy)"
+        ws["B7"] = "This year's jobs (none — they are in the ordinary levy)"
     else:
         fml(ws["D7"], f"F{sp_tot}")
 
@@ -2602,6 +2602,74 @@ def generate_excel(state: dict) -> BytesIO:
     for col in range(5, 15):
         letter = get_column_letter(col)
         fml(ymp.cell(tot, col), f"SUM({letter}{first_data}:{letter}{last})", TOTAL)
+
+    res = wb.create_sheet("RESERVE", 1)
+    res.column_dimensions["A"].width = 3
+    res.column_dimensions["B"].width = 62
+    res.column_dimensions["C"].width = 20
+    res.merge_cells("B2:C2")
+    res["B2"] = "RESERVE BUDGET"
+    res["B2"].font = Font(name="Calibri", bold=True, size=16, color=NAVY)
+    res["B3"] = state.get("complex_name") or ""
+    res["B3"].font = Font(bold=True, size=12)
+    res["B4"] = state.get("fin_year") or ""
+    res["B6"] = "Do not type these four amounts. They follow the BUDGET sheet. Change the yellow reserve cell, the reserve line, or Special Projects there."
+    res["B6"].font = Font(italic=True, size=9, color="666666")
+    for col, lab in ((2, "Description"), (3, "Amount")):
+        c = res.cell(8, col, lab)
+        fill(c, NAVY)
+        c.font = Font(bold=True, color="FFFFFF", size=10)
+        c.border = THIN
+    reserve_lines = [
+        (9, "Money already in the bank", "BUDGET!D5"),
+        (10, "Owners put in this year", "BUDGET!D6"),
+        (11, "This year's jobs taken off the reserve", "BUDGET!D7"),
+        (12, "Left at year-end", "BUDGET!D8"),
+    ]
+    for rr, label, ref in reserve_lines:
+        res.cell(rr, 2, label).border = THIN
+        res.cell(rr, 2).font = Font(name="Calibri", size=10, bold=(rr == 12))
+        fml(res.cell(rr, 3), ref, TOTAL if rr == 12 else None)
+    res["B14"] = "How owners pay the contribution"
+    res["B14"].font = Font(bold=True, size=11, color=NAVY)
+    res["B15"] = (
+        "It is its own line on the owner invoice (the Reserve column on the PQ sheet). "
+        "It is not inside the ordinary levy. Do not add it again."
+    )
+    res["B15"].alignment = Alignment(wrap_text=True)
+    res.row_dimensions[15].height = 32
+    res["B17"] = "THIS YEAR ON THE 10-YEAR PLAN"
+    res["B17"].font = Font(bold=True, size=11, color=NAVY)
+    res["B18"] = "Only this year comes off the reserve. Later years stay on the 10 YMP sheet. They are not billed now."
+    res["B18"].font = Font(italic=True, size=9, color="666666")
+    for col, lab in ((2, "Project"), (3, "This year")):
+        c = res.cell(20, col, lab)
+        fill(c, NAVY)
+        c.font = Font(bold=True, color="FFFFFF", size=10)
+        c.border = THIN
+    for i in range(len(projects)):
+        src = first_data + i
+        rr = 21 + i
+        res.cell(rr, 2, f"='10 YMP'!A{src}")
+        res.cell(rr, 2).border = THIN
+        res.cell(rr, 2).font = Font(name="Calibri", size=10)
+        fml(res.cell(rr, 3), f"'10 YMP'!E{src}")
+    job_end = 20 + len(projects)
+    sum_row = job_end + 1
+    res.cell(sum_row, 2, "Year 1 total on the plan").font = Font(bold=True)
+    res.cell(sum_row, 2).border = THIN
+    fml(res.cell(sum_row, 3), f"'10 YMP'!E{tot}", TOTAL)
+    later_row = sum_row + 1
+    res.cell(later_row, 2, "Later years on the plan (not taken off this year)")
+    res.cell(later_row, 2).border = THIN
+    fml(res.cell(later_row, 3), f"SUM('10 YMP'!F{tot}:N{tot})")
+    note_row = later_row + 2
+    res.cell(note_row, 2, f'=IF(ABS(C{sum_row}-BUDGET!D7)<1,"Year 1 matches the jobs taken off the reserve.","Year 1 on the plan and the Special Projects total on BUDGET are not the same. The reserve uses the BUDGET figure.")')
+    res.cell(note_row, 2).font = Font(italic=True, size=9, color="666666")
+    res.merge_cells(start_row=note_row, start_column=2, end_row=note_row, end_column=3)
+    if state.get("special_in_ordinary"):
+        res.cell(note_row + 1, 2, "Special Projects are ticked into the ordinary levy, so this year's jobs are not taken off the reserve.")
+        res.cell(note_row + 1, 2).font = Font(italic=True, size=9, color="9C0006")
 
     # Hidden round-trip sheet so Restore uploads the same numbers we downloaded.
     pack = wb.create_sheet("_DOMUS")
@@ -3586,7 +3654,9 @@ Upload the plan, or paste the whole block from Excel, including the year heading
 ### 18. The meeting
 You prepare the budget. The trustees decide in the meeting.
 
-**Download Excel** on the Download tab. Yellow cells are the ones they may type in. The sheet has formulas, so a change to a % or a rand updates the yearly amount, the monthly amount, the levy and the PQ.
+**Download Excel** on the Download tab. The file has four tabs: **BUDGET**, **RESERVE**, **PQ** and **10 YMP**. Yellow cells are the ones they may type in. The sheet has formulas, so a change to a % or a rand updates the yearly amount, the monthly amount, the levy and the PQ.
+
+**RESERVE** is not a second place to type. It shows four amounts from the top of **BUDGET**: money already in the bank, what owners put in this year, this year’s jobs, and what is left. This year’s jobs are the Special Projects total, unless those projects are ticked into the ordinary levy. The list under that is Year 1 of the 10-year plan. Later years are shown as one total and are not taken off the reserve. The contribution stays its own line on the owner invoice.
 
 Under Levies received there is one yellow line: **Approved — type a % or a rand**.
 
@@ -4102,7 +4172,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
 
     with tabs[11]:
         st.subheader("Download Excel")
-        st.caption("Budget + PQ + 10-year plan. Yellow cells are inputs.")
+        st.caption("Budget, Reserve, PQ and 10-year plan. The Reserve tab follows the budget. Yellow cells are inputs.")
         if not st.session_state.complex_name:
             st.warning("Type the complex name in the sidebar first.")
         elif st.button("Build Excel file", type="primary"):
