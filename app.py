@@ -1623,6 +1623,7 @@ def parse_ymp_sheet(df, start_year: int | None = None) -> list:
                     years.append(float(num(cells[c]) or 0))
             years = (years + [0.0] * 10)[:10]
             skip = {c for c in year_cols if c is not None}
+            skip |= {col for col, yr in cal_pairs if yr < start_year or yr >= start_year + 10}
             meta = []
             for j, v in enumerate(cells):
                 if j in skip:
