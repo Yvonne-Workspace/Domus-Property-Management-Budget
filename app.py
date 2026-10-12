@@ -75,12 +75,16 @@ def norm(s: str) -> str:
 
 
 def _same_job(a: str, b: str) -> bool:
-    na, nb = norm(a), norm(b)
+    def key(s):
+        s = norm(s).replace("aluminium", "aluminum").replace("jetties", "jetty")
+        s = s.replace("staircases", "staircase").replace("stair case", "staircase")
+        return s
+    na, nb = key(a), key(b)
     if not na or not nb:
         return False
     if na == nb or na in nb or nb in na:
         return True
-    stop = {"the", "and", "for", "from", "with", "project", "projects", "phase"}
+    stop = {"the", "and", "for", "from", "with", "project", "projects", "phase", "water", "plant"}
     ta = {w for w in na.split() if len(w) > 3 and w not in stop}
     tb = {w for w in nb.split() if len(w) > 3 and w not in stop}
     if not ta or not tb:
@@ -88,34 +92,59 @@ def _same_job(a: str, b: str) -> bool:
     return len(ta & tb) / max(len(ta), len(tb)) >= 0.6
 
 
-def sync_special_from_plan(state: dict) -> int:
-    """Budgeted yearly comes from the 2027 column. Actual stays the 2026 spend."""
-    sections = state.setdefault("sections", {})
-    existing = [dict(r) for r in (sections.get("special") or [])]
+def refresh_special(state: dict) -> int:
+    """Actual = Special Projects spend from Actual vs Budget. Budgeted yearly = the 2027 column only."""
+    rows = []
+    seen = set()
+    for src in state.get("wcu_rows") or []:
+        if src.get("section") != "special":
+            continue
+        actual = float(src.get("actual") or 0)
+        desc = str(src.get("desc") or "").strip()
+        if not desc or actual < 0.5 or norm(desc) in seen:
+            continue
+        seen.add(norm(desc))
+        rec = row(desc, "Spent in 2026. Budgeted yearly stays blank unless this job is also in the 2027 column.")
+        rec["actual"] = actual
+        rec["yearly"] = 0.0
+        rec["gl"] = src.get("gl") or ""
+        rows.append(rec)
+    if not rows:
+        for r in (state.get("sections") or {}).get("special") or []:
+            actual = float(r.get("actual") or 0)
+            desc = str(r.get("desc") or "").strip()
+            if desc and actual > 0.5 and norm(desc) not in seen:
+                seen.add(norm(desc))
+                rec = row(desc, r.get("note") or "Spent in 2026.")
+                rec["actual"] = actual
+                rec["yearly"] = 0.0
+                rec["gl"] = r.get("gl") or ""
+                rows.append(rec)
     used = set()
-    n = 0
     for p in state.get("ymp") or []:
         desc = str(p.get("desc") or "").strip()
-        years = p.get("years") or []
-        y2027 = float(years[1] or 0) if len(years) > 1 else 0.0
-        if not desc or y2027 < 0.5:
+        if not desc or re.match(r"^(planned maintenance|total|projects)$", desc, re.I):
             continue
-        hit = next((i for i, r in enumerate(existing) if i not in used and _same_job(desc, r.get("desc") or "")), None)
+        years = (list(p.get("years") or []) + [0.0] * 10)[:10]
+        y2027 = float(years[1] or 0)
+        if y2027 < 0.5:
+            continue
+        hit = next((i for i, r in enumerate(rows) if i not in used and _same_job(desc, r.get("desc") or "")), None)
         if hit is None:
-            rec = row(desc, "2027 column of the 10-year plan. Actual is what was spent in 2026.")
+            rec = row(desc, "2027 plan. Nothing was spent on this job in 2026.")
             rec["yearly"] = y2027
-            existing.append(rec)
-            used.add(len(existing) - 1)
+            rows.append(rec)
         else:
-            existing[hit]["yearly"] = y2027
+            rows[hit]["yearly"] = y2027
+            rows[hit]["note"] = "Actual is what was spent in 2026. Budgeted yearly is the 2027 column."
             used.add(hit)
-        n += 1
-    if n:
-        sections["special"] = [
-            r for r in existing
-            if not re.fullmatch(r"special project \d+", norm(r.get("desc") or ""))
-        ]
-    return n
+    if rows:
+        state.setdefault("sections", {})["special"] = rows
+    return len(rows)
+
+
+def sync_special_from_plan(state: dict) -> int:
+    return refresh_special(state)
 
 
 def seed_plan_from_special(state: dict) -> int:
@@ -3455,10 +3484,8 @@ def main():
         st.title("Domus Property Management Budget")
         st.caption("Load the financial statement PDF (line names) then WeConnectU Excel (rands). Either order is fine.")
 
-    special_now = sum(float(r.get("yearly") or 0) for r in (st.session_state.sections.get("special") or []))
     straighten_plan(st.session_state)
-    if special_now < 0.5:
-        sync_special_from_plan(st.session_state)
+    refresh_special(st.session_state)
     apply_levy_lines(st.session_state)
     s = st.session_state.sections
     ord_amt = ordinary_total(st.session_state)
@@ -3974,18 +4001,26 @@ The schedule uses the **approved** ordinary levy once the meeting has set one. U
 
 **Paid last year** and **Will pay this year** are extra columns on this tab and on the Excel PQ sheet. They are the ordinary levy only. Paid last year is the sidebar amount × the unit’s ratio. Will pay this year is the new ordinary levy × the same ratio. They are not added into the Total, and they do not change any budget formula.
 
-### 17. 10-year plan
-Type the plan, or paste it from Excel with the year headings. Do not paste the total row. The Actual vs Budget does not fill the plan.
+### 17. 10-year plan and Special Projects
+Do these steps in this order.
 
-**Actual** on Special Projects is what was spent in 2026. **Budgeted yearly** is the **2027** column. The reserve uses 2027 only. The 2026 spend is not taken off again.
+1. On the left, choose the WeConnectU **Actual vs Budget** file and click **Load Excel**.
+2. Open **Special Projects**. Every line under the Special Projects heading must be there. **Actual** is what was spent in 2026. **Budgeted yearly** is still blank. For Key West the Actual total is **R276,164.42**.
+3. Open **10-year plan**. Paste the whole plan, including the headings 2025, 2026, 2027. Do not paste the total row. Click **Save 10-year plan**.
+4. Go back to **Special Projects**.
+   - Done in 2026 and also on the 2027 plan: both Actual and Budgeted yearly are filled.
+   - Done in 2026 only: Actual is filled, Budgeted yearly is 0. It is not billed again.
+   - New in 2027 only: Actual is 0, Budgeted yearly is the 2027 amount.
+5. Change a 2027 amount on the **10-year plan**, then Save. Do not type it on the Special Projects table. The table follows the plan.
+6. Leave **Add Special Projects into ordinary levies** unticked. The reserve pays these jobs.
 
-**First cycle** is the year the job first happens, for example 2025. Leave it blank if the rands are already under the years.
+**First cycle** is the year a job starts, for example 2025. Leave it blank if the rands are already under the years.
 
-**Frequency** is not a year. 10 means every 10 years. 3 means every 3 years. Leave it blank if the year columns are already filled.
+**Frequency** is not a year. 10 means every 10 years. 3 means every 3 years. Leave it blank if the years are already filled.
 
 **Current estimate** is the full project cost, if you have one. It is not 2026 and it is not 2027. Leave it blank if you do not use it.
 
-Leave **Add Special Projects into ordinary levies** unticked when the reserve pays those jobs. Tick it only if the levy must pay them. Do not tick it and also leave the same jobs on the reserve.
+The names do not have to be identical. Sand beds, tree felling, windows, staircase lights and jetty are matched. If a name is quite different, such as Roadways and Access Road, you will see two lines. That is correct. Do not force them together.
 
 ### 18. The meeting
 You prepare the budget. The trustees decide in the meeting.
@@ -4364,7 +4399,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         section_form("tax", "Income Tax", "Use the estimate button, or type the auditor’s yearly figure, then Save. Tick Reserve pays this only if the reserve pays the tax. Leave it off and the levy pays it.", reserve_tick=True)
 
     with tabs[7]:
-        section_form("special", "Special Projects", "Actual is what was spent in 2026. Budgeted yearly is the 2027 column of the plan. Type or paste the plan. Do not type the total row. Leave the sidebar tick off if the reserve pays these jobs.")
+        section_form("special", "Special Projects", "Do not type the budget here. Load the Actual vs Budget first, then paste the 10-year plan and Save. Actual is 2026 spend. Budgeted yearly is the 2027 column. Leave the sidebar tick off if the reserve pays these jobs.")
         act_sum = sum(float(r.get("actual") or 0) for r in (st.session_state.sections.get("special") or []))
         yr_sum = sum(float(r.get("yearly") or 0) for r in (st.session_state.sections.get("special") or []))
         st.caption(f"Actual total (spent in 2026) {money(act_sum)}. Budgeted yearly total (2027 plan) {money(yr_sum)}.")
