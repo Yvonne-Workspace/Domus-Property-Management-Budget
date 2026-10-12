@@ -91,6 +91,35 @@ def sync_special_from_plan(state: dict) -> int:
     return len(spec)
 
 
+def seed_plan_from_special(state: dict) -> int:
+    """If the 10-year plan has no Year 1 yet, use the Special Projects that came from Actual vs Budget."""
+    already = 0.0
+    for p in state.get("ymp") or []:
+        years = p.get("years") or []
+        already += float(years[0] or 0) if years else 0.0
+    if already > 0.5:
+        return 0
+    projects = []
+    for r in (state.get("sections") or {}).get("special") or []:
+        desc = str(r.get("desc") or "").strip()
+        amt = float(r.get("yearly") or 0)
+        if amt < 0.5:
+            amt = float(r.get("actual") or 0)
+        if not desc or amt < 0.5 or re.fullmatch(r"special project \d+", norm(desc)):
+            continue
+        projects.append({
+            "desc": desc,
+            "first_cycle": "",
+            "freq": "",
+            "estimate": amt,
+            "years": [amt] + [0.0] * 9,
+        })
+    if not projects:
+        return 0
+    state["ymp"] = projects
+    return len(projects)
+
+
 def row(desc: str, note: str = "") -> dict:
     return {
         "id": uid(), "desc": desc, "actual": 0.0, "pct": 0.0, "yearly": 0.0,
@@ -853,6 +882,12 @@ def extract_wcu(uploaded) -> list:
             ytd = next((i for i, t in enumerate(cur) if t == "actual"), None)
         if ytd is None:
             continue
+        budget_i = None
+        for i, t in enumerate(merged):
+            if "budget" not in t or "var" in t or "actual" in t or "ytd" in t or "month" in t:
+                continue
+            budget_i = i
+        section = ""
         for r in range(header + 1, len(df)):
             raw = str(df.iloc[r, 0] or "").strip()
             if not raw or re.match(r"^(total|surplus|shortfall)", raw, re.I):
@@ -862,16 +897,31 @@ def extract_wcu(uploaded) -> list:
             if m:
                 gl = re.sub(r"\s", "", m.group(1))
                 desc = m.group(2).strip()
-                if gl.endswith("/000"):
-                    continue
             else:
                 desc = raw
                 if len(desc) < 3:
                     continue
             actual = abs(num(df.iloc[r, ytd]) or 0.0)
-            if actual < 0.5:
+            budget = abs(num(df.iloc[r, budget_i]) or 0.0) if budget_i is not None else 0.0
+            if gl.endswith("/000") or (actual < 0.5 and budget < 0.5):
+                if re.search(r"special project|10\s*year|maintenance plan", desc, re.I):
+                    section = "special"
+                elif re.search(r"repair|maintenance", desc, re.I):
+                    section = "rm"
+                elif re.search(r"personnel|salar|wage", desc, re.I):
+                    section = "personnel"
+                elif re.search(r"municipal|utilit", desc, re.I):
+                    section = "municipal"
                 continue
-            out.append({"desc": desc, "actual": actual, "gl": gl})
+            if actual < 0.5 and section != "special":
+                continue
+            out.append({
+                "desc": desc,
+                "actual": actual,
+                "budget": budget,
+                "gl": gl,
+                "section": section,
+            })
     return out
 
 
@@ -1225,6 +1275,8 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
             ):
                 continue
             nd, ni = norm(src["desc"]), norm(it["desc"])
+            if re.fullmatch(r"special project \d+", ni or ""):
+                continue
             sc = 0.0
             if fam and family(it["desc"]) == fam:
                 sc = 0.96
@@ -1262,17 +1314,22 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
         fam = family(src["desc"])
         if fam == "csos_col":
             continue
-        sec = section_for(src["desc"])
+        sec = src.get("section") or section_for(src["desc"])
+        if src.get("section") == "special" or section_for(src["desc"]) == "special":
+            sec = "special"
         if fam:
-            existing = next((i for i in nxt[sec] if family(i["desc"]) == fam), None)
-            if existing:
+            existing = next((i for i in nxt.get(sec) or [] if family(i["desc"]) == fam), None)
+            if existing and not re.fullmatch(r"special project \d+", norm(existing.get("desc") or "")):
                 existing["actual"] = float(existing["actual"] or 0) + src["actual"]
                 if src.get("gl") and not existing.get("gl"):
                     existing["gl"] = src["gl"]
                 continue
         extra = row(src["desc"], "Added from WeConnectU for this complex")
         extra["actual"] = src["actual"]
-        extra["yearly"] = src["actual"]
+        if sec == "special" and float(src.get("budget") or 0) > 0.5:
+            extra["yearly"] = float(src["budget"])
+        else:
+            extra["yearly"] = src["actual"]
         extra["gl"] = src.get("gl") or ""
         extra["is_recovery"] = "recover" in norm(src["desc"]) and sec == "municipal"
         nxt[sec].append(extra)
@@ -3466,6 +3523,7 @@ def main():
                         )
                     if st.session_state.get("wcu_rows"):
                         st.session_state.sections = secs
+                    nplan = seed_plan_from_special(st.session_state)
                     apply_levy_lines(st.session_state)
                     st.rerun()
             except Exception as e:
@@ -3482,8 +3540,12 @@ def main():
                     base = st.session_state.get("afs_sections") or default_sections()
                     secs, added = match_into(rows, base)
                     st.session_state.sections = secs
+                    nplan = seed_plan_from_special(st.session_state)
                     source = "financial statement lines" if st.session_state.get("afs_sections") else "standard template"
-                    st.session_state.msg = f"Loaded {len(rows)} WeConnectU lines onto the {source}. Extra lines: {added}."
+                    st.session_state.msg = (
+                        f"Loaded {len(rows)} WeConnectU lines onto the {source}. Extra lines: {added}. "
+                        f"{nplan} special-project lines are on the reserve budget."
+                    )
                     apply_levy_lines(st.session_state)
                     st.rerun()
             except Exception as e:
@@ -3866,7 +3928,7 @@ Year 1 is **this budget year** (2026 while we are in 2026), not last year’s fi
 
 Upload the plan, or paste the whole block from Excel, including the year headings. An older sheet that starts in 2025 is rolled forward: last year’s next year becomes this Year 1.
 
-**10-year plan and Special Projects are the same for this year.** Year 1 is what the reserve pays this year. Saving, loading or pasting the plan copies Year 1 into Special Projects. You do not type it twice. Years 2 to 10 stay on the plan only.
+**10-year plan and Special Projects are the same for this year.** Year 1 is what the reserve pays this year. It is on the reserve budget as this year's jobs. Saving, loading or pasting the plan copies Year 1 into Special Projects. A Special Projects group on the WeConnectU Actual vs Budget does the same, and those lines come off the reserve. Years 2 to 10 stay on the plan only.
 
 Leave **Add Special Projects into ordinary levies** unticked when the reserve pays those jobs. Tick it only if the levy must pay them. Do not tick it and also leave the same jobs on the reserve.
 
