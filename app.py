@@ -78,7 +78,7 @@ def row(desc: str, note: str = "") -> dict:
     return {
         "id": uid(), "desc": desc, "actual": 0.0, "pct": 0.0, "yearly": 0.0,
         "insurance": 0.0, "owner_recovery": 0.0, "note": note, "is_recovery": False,
-        "reduces_levy": False, "claim_against": "", "edit_mode": "pct", "reserve_pays": False,
+        "reduces_levy": False, "claim_against": "", "edit_mode": "pct", "reserve_pays": False, "gl": "",
     }
 
 
@@ -841,6 +841,7 @@ def extract_wcu(uploaded) -> list:
             if not raw or re.match(r"^(total|surplus|shortfall)", raw, re.I):
                 continue
             m = re.match(r"^(\d{3,5}\s*/\s*\d{2,4})\s*[-–—:]\s*(.+)$", raw)
+            gl = ""
             if m:
                 gl = re.sub(r"\s", "", m.group(1))
                 desc = m.group(2).strip()
@@ -853,7 +854,7 @@ def extract_wcu(uploaded) -> list:
             actual = abs(num(df.iloc[r, ytd]) or 0.0)
             if actual < 0.5:
                 continue
-            out.append({"desc": desc, "actual": actual})
+            out.append({"desc": desc, "actual": actual, "gl": gl})
     return out
 
 
@@ -1230,6 +1231,8 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
             key, it = best
             used.add(f"{key}:{it['id']}")
             it["actual"] = src["actual"]
+            if src.get("gl"):
+                it["gl"] = src["gl"]
             if fam in ("hoa_levy_inc", "hoa_csos_inc", "hoa_levy_exp", "hoa_csos_exp", "ins_bill"):
                 it["desc"] = src["desc"]
             if it.get("is_recovery"):
@@ -1247,17 +1250,35 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
             existing = next((i for i in nxt[sec] if family(i["desc"]) == fam), None)
             if existing:
                 existing["actual"] = float(existing["actual"] or 0) + src["actual"]
+                if src.get("gl") and not existing.get("gl"):
+                    existing["gl"] = src["gl"]
                 continue
         extra = row(src["desc"], "Added from WeConnectU for this complex")
         extra["actual"] = src["actual"]
         extra["yearly"] = src["actual"]
+        extra["gl"] = src.get("gl") or ""
         extra["is_recovery"] = "recover" in norm(src["desc"]) and sec == "municipal"
         nxt[sec].append(extra)
         added += 1
     return nxt, added
 
 
-def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = False, claims: bool = False, claim_map: dict | None = None, reserve_tick: bool = False) -> pd.DataFrame:
+def sort_lines(items: list, how: str) -> list:
+    """Reorder only. Amounts stay as they are."""
+    rows = list(items)
+
+    def gl_key(r):
+        parts = [int(p) for p in re.findall(r"\d+", r.get("gl") or "")]
+        return (0 if parts else 1, parts, (r.get("desc") or "").lower())
+
+    if how == "gl":
+        rows.sort(key=gl_key)
+    else:
+        rows.sort(key=lambda r: (r.get("desc") or "").lower())
+    return rows
+
+
+def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = False, claims: bool = False, claim_map: dict | None = None, reserve_tick: bool = False, show_gl: bool = False) -> pd.DataFrame:
     recs = []
     show_extra = rm or recover
     for it in items:
@@ -1279,6 +1300,8 @@ def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = Fal
             "Monthly": net / 12.0,
             "Notes": it.get("note") or "",
         }
+        if show_gl:
+            rec["GL code"] = it.get("gl") or ""
         if rm:
             rec["Insurance payout"] = ins
         if recover:
@@ -1303,6 +1326,8 @@ def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = Fal
             cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Insurance payout", "Recovered from some owners", "Monthly", "Notes"]
     if reserve_tick and "Reserve pays this" not in cols:
         cols = cols[: cols.index("Monthly")] + ["Reserve pays this"] + cols[cols.index("Monthly") :]
+    if show_gl and "GL code" not in cols:
+        cols = ["Description", "GL code"] + cols[1:]
     if not recs:
         return pd.DataFrame(columns=cols)
     return pd.DataFrame(recs)[cols]
@@ -1366,6 +1391,10 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
                 against = ""
         else:
             against = prev.get("claim_against") or ""
+        if "GL code" in rec:
+            gl = clean_note(rec.get("GL code"))
+        else:
+            gl = prev.get("gl") or ""
         if "Reserve pays this" in rec:
             flag = rec.get("Reserve pays this")
             pays = False if flag is None or (isinstance(flag, float) and pd.isna(flag)) else bool(flag)
@@ -1407,6 +1436,7 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             "claim_against": against,
             "edit_mode": edit_mode,
             "reserve_pays": pays,
+            "gl": gl,
         })
     return out
 
@@ -2876,6 +2906,11 @@ def _apply_budget_sheet(wb, data: dict) -> None:
             found["claim_against"] = got.strip()
         elif isinstance(got, (int, float)) and not isinstance(got, bool):
             found["owner_recovery"] = abs(float(got))
+        gl_v = ws.cell(r, 3).value
+        if gl_v is not None and str(gl_v).strip() and str(gl_v).strip().lower() not in ("none", "nan"):
+            found["gl"] = str(gl_v).strip()
+        if current in ("expenditure", "rm"):
+            sections.setdefault("_order", {}).setdefault(current, []).append(id(found))
         mark = ws.cell(r, 10).value
         if isinstance(mark, str) and current in ("expenditure", "rm", "personnel", "tax"):
             found["reserve_pays"] = mark.strip().lower() in ("yes", "y", "true", "1")
@@ -2904,6 +2939,17 @@ def _apply_budget_sheet(wb, data: dict) -> None:
             found["pct"] = p * 100 if abs(p) <= 2 else p
             a = float(found.get("actual") or 0)
             found["yearly"] = a * (1 + float(found["pct"]) / 100.0)
+    order = sections.pop("_order", None) or {}
+    for sec, ids in order.items():
+        items = sections.get(sec) or []
+        by_id = {id(it): it for it in items}
+        seen = set()
+        ordered = []
+        for i in ids:
+            if i in by_id and i not in seen:
+                seen.add(i)
+                ordered.append(by_id[i])
+        sections[sec] = ordered + [it for it in items if id(it) not in seen]
 
 
 def _read_meeting_from_sheet(wb, data: dict) -> None:
@@ -3152,7 +3198,7 @@ def init():
     ss.setdefault("estate_split", "equal")
 
 
-def section_form(key: str, title: str, help_text: str, rm: bool = False, recover: bool = False, income: bool = False, claims: bool = False, reserve_tick: bool = False):
+def section_form(key: str, title: str, help_text: str, rm: bool = False, recover: bool = False, income: bool = False, claims: bool = False, reserve_tick: bool = False, reorder: bool = False):
     st.subheader(title)
     if help_text:
         st.caption(help_text)
@@ -3169,7 +3215,14 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
             name = (it.get("claim_against") or "").strip()
             if name and name not in cost_names:
                 cost_names.append(name)
-    df = items_to_df(items, rm, recover, income=income, claims=claims, claim_map=claim_map, reserve_tick=reserve_tick)
+    df = items_to_df(items, rm, recover, income=income, claims=claims, claim_map=claim_map, reserve_tick=reserve_tick, show_gl=reorder)
+    if reorder:
+        c1, c2 = st.columns(2)
+        sort_name = c1.button("A to Z", key=f"sort_name_{key}")
+        sort_gl = c2.button("By GL code", key=f"sort_gl_{key}")
+        st.caption("A to Z sorts by the name. By GL code sorts by the code. A line with no code goes last. The totals do not change. The Excel sheet keeps this order.")
+    else:
+        sort_name = sort_gl = False
     nonce = int(st.session_state.get(f"_nonce_{key}") or 0)
     edited = st.data_editor(
         df,
@@ -3179,6 +3232,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
         key=f"grid_{key}_{nonce}",
         column_config={
                 "Description": st.column_config.TextColumn("Description", width="medium"),
+                "GL code": st.column_config.TextColumn("GL code", width="small", help="From WeConnectU, or type it. Used only to sort."),
                 "Actual": st.column_config.NumberColumn("Actual", format="%.2f"),
                 "% Increase": st.column_config.NumberColumn(
                     "% Increase",
@@ -3214,6 +3268,12 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
             },
             disabled=["Monthly"],
         )
+    if sort_name or sort_gl:
+        saved_rows = save_editor(edited, items, rm, municipal=(key == "municipal"))
+        st.session_state.sections[key] = sort_lines(saved_rows, "gl" if sort_gl else "name")
+        st.session_state[f"_nonce_{key}"] = nonce + 1
+        apply_levy_lines(st.session_state)
+        st.rerun()
     saved = st.button("Save this section", type="primary", key=f"save_{key}")
     if saved:
         st.session_state.sections[key] = save_editor(edited, items, rm, municipal=(key == "municipal"))
@@ -3772,6 +3832,8 @@ Upload the unit file in the sidebar or on **PQ / Levies**. If the PQ column is 0
 
 Each owner’s share of a levy column = their PQ × that column’s monthly total.
 
+On **Expenditure** and **Repair and Maintenance**, **A to Z** sorts by the name and **By GL code** sorts by the code. A line with no code goes last. The amounts do not change. Download Excel after you sort if the sheet must match.
+
 Equal charges (and an estate levy set to “same amount”) are split by the number of units, not by PQ.
 
 The schedule uses the **approved** ordinary levy once the meeting has set one. Until then it uses what the costs need.
@@ -4061,9 +4123,11 @@ It uses this complex’s own numbers, in plain words, so owners can see what the
             "It is not income and not a levy column. The levy carries the bill minus that recovery. "
             "CSOS Levies (Expense) is locked to CSOS income — same rand. "
             "If owners pay the gardener themselves, set Garden service to R0. "
-            "Tick Reserve pays this only when the reserve pays that line. Leave it off for a normal cost.",
+            "Tick Reserve pays this only when the reserve pays that line. Leave it off for a normal cost. "
+            "Use A to Z or By GL code to change the order. The amounts stay the same.",
             recover=True,
             reserve_tick=True,
+            reorder=True,
         )
 
     with tabs[4]:
@@ -4096,10 +4160,12 @@ It uses this complex’s own numbers, in plain words, so owners can see what the
             "Budgeted yearly is the full job. Insurance payout is what the insurer pays. "
             "Recovered from some owners is what only some owners pay towards that same job. Neither is income. "
             "The levy carries the job minus those two, never below R0. "
-            "Tick Reserve pays this only when the reserve pays that job. Leave it off for a normal repair.",
+            "Tick Reserve pays this only when the reserve pays that job. Leave it off for a normal repair. "
+            "Use A to Z or By GL code to change the order. The amounts stay the same.",
             rm=True,
             recover=True,
             reserve_tick=True,
+            reorder=True,
         )
 
     with tabs[5]:
