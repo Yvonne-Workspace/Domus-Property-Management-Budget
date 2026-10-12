@@ -2570,13 +2570,16 @@ def generate_excel(state: dict) -> BytesIO:
         nm = it.get("desc") or ""
         if nm in named_rows:
             name_to_budget[nm] = f"BUDGET!G{named_rows[nm]}"
-    headers = ["#", "Unit", "PQ"] + [n for n, _, _s in bills] + ["Total"]
+    headers = ["#", "Unit", "PQ", "Paid last year", "Will pay this year", "Change"] + [n for n, _, _s in bills] + ["Total"]
     for i, h in enumerate(headers, 1):
         cell = pq.cell(6, i, h)
         fill(cell, NAVY)
         cell.font = Font(bold=True, color="FFFFFF")
+    pq["A3"] = "Ordinary levy only. These two columns are not in the Total."
+    pq["A3"].font = Font(italic=True, size=9, color="666666")
+    bill_start = 7
     for j, (name, yearly, split) in enumerate(bills):
-        col = 4 + j
+        col = bill_start + j
         pq.cell(3, col, name)
         fill(pq.cell(3, col), NAVY)
         pq.cell(3, col).font = Font(bold=True, color="FFFFFF")
@@ -2589,16 +2592,30 @@ def generate_excel(state: dict) -> BytesIO:
         fill(pq.cell(4, col), YELLOW)
         pq.cell(5, col, "equal / unit" if split == "equal" else "× PQ")
         pq.cell(5, col).font = Font(italic=True, size=8, color="666666")
+    levy_col = bill_start + next((j for j, (name, _, _) in enumerate(bills) if name == "Levies"), 0)
+    levy_letter = get_column_letter(levy_col)
+    inp(pq.cell(4, 4), float(state.get("current_monthly_levy") or 0), MONEY)
+    pq.cell(5, 4, "whole complex, last year")
+    pq.cell(5, 4).font = Font(italic=True, size=8, color="666666")
+    fml(pq.cell(4, 5), f"{levy_letter}4")
+    pq.cell(5, 5, "whole complex, this year")
+    pq.cell(5, 5).font = Font(italic=True, size=8, color="666666")
+    fml(pq.cell(4, 6), "E4-D4")
+    pq.cell(5, 6, "this year − last year")
+    pq.cell(5, 6).font = Font(italic=True, size=8, color="666666")
     units = state.get("pq") or [{"Unit": "UNIT-1", "PQ": 1.0}]
     n_units = max(len(units), 1)
-    first_amt, last_amt = 4, 3 + len(bills)
+    first_amt, last_amt = bill_start, bill_start - 1 + len(bills)
     for i, u in enumerate(units):
         rr = 7 + i
         pq.cell(rr, 1, i + 1)
         pq.cell(rr, 2, str(u.get("Unit", "")))
         pq.cell(rr, 3, float(u.get("PQ") or 0)).number_format = "0.000000"
+        fml(pq.cell(rr, 4), f"$C{rr}*D$4")
+        fml(pq.cell(rr, 5), f"{levy_letter}{rr}")
+        fml(pq.cell(rr, 6), f"E{rr}-D{rr}")
         for j, (_n, _y, split) in enumerate(bills):
-            col = 4 + j
+            col = bill_start + j
             letter = get_column_letter(col)
             if split == "equal":
                 pq.cell(rr, col, f"={letter}$4/{n_units}").number_format = MONEY
@@ -2611,6 +2628,9 @@ def generate_excel(state: dict) -> BytesIO:
     pq.cell(tot_row, 2, "TOTAL")
     pq.cell(tot_row, 3, f"=SUM(C7:C{last_u})")
     pq.cell(tot_row, 3).number_format = "0.000000"
+    for col in range(4, 7):
+        letter = get_column_letter(col)
+        pq.cell(tot_row, col, f"=SUM({letter}7:{letter}{last_u})").number_format = MONEY
     if bills:
         for col in range(first_amt, last_amt + 2):
             letter = get_column_letter(col)
@@ -2618,6 +2638,9 @@ def generate_excel(state: dict) -> BytesIO:
     pq.column_dimensions["A"].width = 6
     pq.column_dimensions["B"].width = 22
     pq.column_dimensions["C"].width = 14
+    pq.column_dimensions["D"].width = 18
+    pq.column_dimensions["E"].width = 20
+    pq.column_dimensions["F"].width = 14
 
     ymp = wb.create_sheet("10 YMP")
     start_y = plan_start_year(state)
@@ -3437,7 +3460,7 @@ def main():
             value=float(st.session_state.current_monthly_levy),
             min_value=0.0,
             step=100.0,
-            help="Example: R26 400 per month for the whole complex. Not the yearly total.",
+            help="What the whole complex collects now, for one month, ordinary levy only. This fills Paid last year on the PQ. It does not change the budget.",
         )
         st.session_state.actual_months = st.number_input(
             "Months covered by the Actual column",
@@ -3752,6 +3775,8 @@ Each owner’s share of a levy column = their PQ × that column’s monthly tota
 Equal charges (and an estate levy set to “same amount”) are split by the number of units, not by PQ.
 
 The schedule uses the **approved** ordinary levy once the meeting has set one. Until then it uses what the costs need.
+
+**Paid last year** and **Will pay this year** are extra columns on this tab and on the Excel PQ sheet. They are the ordinary levy only. Paid last year is the sidebar amount × the unit’s ratio. Will pay this year is the new ordinary levy × the same ratio. They are not added into the Total, and they do not change any budget formula.
 
 ### 17. 10-year plan
 Year 1 is **this budget year** (2026 while we are in 2026), not last year’s first column.
@@ -4166,12 +4191,21 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 extra_cols.append(col)
             if extra_cols:
                 prev["Total monthly"] = prev[extra_cols].sum(axis=1)
+            current_m = float(st.session_state.get("current_monthly_levy") or 0)
+            new_ordinary_m = approved_ordinary(st.session_state) / 12.0
+            prev["Paid last year"] = prev["PQ"].astype(float) * current_m
+            prev["Will pay this year"] = prev["PQ"].astype(float) * new_ordinary_m
+            prev["Change"] = prev["Will pay this year"] - prev["Paid last year"]
+            ordered = ["Unit", "PQ", "Paid last year", "Will pay this year", "Change"] + extra_cols
+            if extra_cols:
+                ordered.append("Total monthly")
+            prev = prev[ordered]
             show = prev.copy()
             if show.columns.duplicated().any():
                 show.columns = _dedupe_headers([str(c) for c in show.columns])
             if "PQ" in show.columns:
                 show["PQ"] = show["PQ"].astype(float).round(6)
-            for c in extra_cols + (["Total monthly"] if extra_cols else []):
+            for c in ["Paid last year", "Will pay this year", "Change"] + extra_cols + (["Total monthly"] if extra_cols else []):
                 show[c] = show[c].astype(float).round(2)
             st.dataframe(show, use_container_width=True, hide_index=True)
             levy_sum = sum(float(y or 0) for _, y, _s in bills)
@@ -4184,6 +4218,14 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             else:
                 st.caption("Monthly column totals: " + " · ".join(f"{n} {money(y/12)}" for n, y, _s in bills))
             st.caption(f"{len(prev)} units. PQ total {float(prev['PQ'].sum()):.6f} (should be about 1.000).")
+            if current_m > 0.5:
+                st.caption(
+                    f"Paid last year is the ordinary levy only ({money(current_m)} for the whole complex). "
+                    f"Will pay this year is the new ordinary levy only ({money(new_ordinary_m)} for the whole complex). "
+                    "Reserve, CSOS and insurance stay in their own columns. These two columns do not change the budget."
+                )
+            else:
+                st.caption("Type the current ordinary levy in the sidebar to fill Paid last year. It does not change the budget.")
 
     with tabs[9]:
         st.subheader("10-year maintenance plan")
