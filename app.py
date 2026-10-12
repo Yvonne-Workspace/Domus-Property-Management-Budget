@@ -1263,6 +1263,9 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
         fam = family(src["desc"])
         if fam == "csos_col":
             continue
+        if src.get("section") == "special":
+            leftover.append(src)
+            continue
         best, score = None, 0.0
         for key, it in flat:
             mark = f"{key}:{it['id']}"
@@ -1334,6 +1337,13 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
         extra["is_recovery"] = "recover" in norm(src["desc"]) and sec == "municipal"
         nxt[sec].append(extra)
         added += 1
+    real_special = [
+        i for i in nxt.get("special") or []
+        if not re.fullmatch(r"special project \d+", norm(i.get("desc") or ""))
+        and (float(i.get("actual") or 0) > 0.5 or float(i.get("yearly") or 0) > 0.5)
+    ]
+    if real_special:
+        nxt["special"] = real_special
     return nxt, added
 
 
