@@ -1345,7 +1345,11 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
         if fam == "csos_col":
             continue
         sec = src.get("section") or section_for(src["desc"])
-        if src.get("section") == "special" or section_for(src["desc"]) == "special":
+        if src.get("section") == "special":
+            sec = "special"
+        elif src.get("section") and src.get("section") != "special":
+            sec = src["section"]
+        elif section_for(src["desc"]) == "special":
             sec = "special"
         if fam:
             existing = next((i for i in nxt.get(sec) or [] if family(i["desc"]) == fam), None)
@@ -3953,7 +3957,7 @@ If the estimate is R0, nothing is paid. If tax is payable, SARS usually wants pr
 ### 15. Personnel and special projects
 **Personnel** is salaries, casuals, PAYE / UIF, travel, bonuses and the like.
 
-**Special Projects.** Actual is the 2026 spend. Budgeted yearly is the 2027 column of the plan. Tick **Add Special Projects into ordinary levies** only if the levy must pay for that work. If the reserve pays it, leave the tick off.
+**Special Projects.** A line under the Special Projects heading on the Actual vs Budget is this year's 10-year work, even when the name is not the same as the plan. That amount is the Actual. Budgeted yearly stays empty until you type the 2027 column. A job under Repairs, such as Jungle Gym, stays under Repairs.
 
 A cost that is not a special project can still be paid by the reserve. Tick **Reserve pays this** on that line. Do not tick it and also leave the cost in the levy.
 
