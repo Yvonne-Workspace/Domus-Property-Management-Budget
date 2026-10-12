@@ -2909,7 +2909,7 @@ def _apply_budget_sheet(wb, data: dict) -> None:
         gl_v = ws.cell(r, 3).value
         if gl_v is not None and str(gl_v).strip() and str(gl_v).strip().lower() not in ("none", "nan"):
             found["gl"] = str(gl_v).strip()
-        if current in ("expenditure", "rm"):
+        if current in ("expenditure", "rm", "personnel", "municipal"):
             sections.setdefault("_order", {}).setdefault(current, []).append(id(found))
         mark = ws.cell(r, 10).value
         if isinstance(mark, str) and current in ("expenditure", "rm", "personnel", "tax"):
@@ -3832,7 +3832,7 @@ Upload the unit file in the sidebar or on **PQ / Levies**. If the PQ column is 0
 
 Each owner’s share of a levy column = their PQ × that column’s monthly total.
 
-On **Expenditure** and **Repair and Maintenance**, **A to Z** sorts by the name and **By GL code** sorts by the code. A line with no code goes last. The amounts do not change. Download Excel after you sort if the sheet must match.
+On **Municipal charges**, **Expenditure**, **Repair and Maintenance** and **Personnel**, **A to Z** sorts by the name and **By GL code** sorts by the code. A line with no code goes last. The amounts do not change. Download Excel after you sort if the sheet must match.
 
 Equal charges (and an estate levy set to “same amount”) are split by the number of units, not by PQ.
 
@@ -4111,7 +4111,9 @@ It uses this complex’s own numbers, in plain words, so owners can see what the
         section_form(
             "municipal",
             "Municipal charges",
-            "City bill on its own line. Any line with the word recovered is subtracted, including a sewer-plant rental. Type a positive rand, then Save.",
+            "City bill on its own line. Any line with the word recovered is subtracted, including a sewer-plant rental. Type a positive rand, then Save. "
+            "Use A to Z or By GL code to change the order. The amounts stay the same.",
+            reorder=True,
         )
 
     with tabs[3]:
@@ -4169,7 +4171,14 @@ It uses this complex’s own numbers, in plain words, so owners can see what the
         )
 
     with tabs[5]:
-        section_form("personnel", "Personnel", "Salaries, casuals, PAYE/UIF, bonuses. Tick Reserve pays this only if the reserve pays that line. Leave it off for a normal salary.", reserve_tick=True)
+        section_form(
+            "personnel",
+            "Personnel",
+            "Salaries, casuals, PAYE/UIF, bonuses. Tick Reserve pays this only if the reserve pays that line. Leave it off for a normal salary. "
+            "Use A to Z or By GL code to change the order. The amounts stay the same.",
+            reserve_tick=True,
+            reorder=True,
+        )
 
     with tabs[6]:
         other_inc, tax_est = estimate_income_tax(st.session_state)
