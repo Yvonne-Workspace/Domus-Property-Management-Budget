@@ -4006,13 +4006,14 @@ Do these steps in this order.
 
 1. On the left, choose the WeConnectU **Actual vs Budget** file and click **Load Excel**.
 2. Open **Special Projects**. Every line under the Special Projects heading must be there. **Actual** is what was spent in 2026. **Budgeted yearly** is still blank. For Key West the Actual total is **R276,164.42**.
-3. Open **10-year plan**. Paste the whole plan, including the headings 2025, 2026, 2027. Do not paste the total row. Click **Save 10-year plan**.
-4. Go back to **Special Projects**.
+3. Open **10-year plan**. In Excel, copy from the row that says **2025  2026  2027** down to the last project. Do not copy only the bottom. Do not copy the total row. Paste it into the box and click **Paste into plan**. The projects must appear in the table. If the table stays empty, the year headings were not in the copy.
+4. To remove a project, click the trash can on that row, then click **Save 10-year plan**. It stays deleted.
+5. Open **Special Projects**. Actual is the 2026 spend. Budgeted yearly is the **2027** column.
    - Done in 2026 and also on the 2027 plan: both Actual and Budgeted yearly are filled.
    - Done in 2026 only: Actual is filled, Budgeted yearly is 0. It is not billed again.
    - New in 2027 only: Actual is 0, Budgeted yearly is the 2027 amount.
-5. Change a 2027 amount on the **10-year plan**, then Save. Do not type it on the Special Projects table. The table follows the plan.
-6. Leave **Add Special Projects into ordinary levies** unticked. The reserve pays these jobs.
+6. Change a 2027 amount on the **10-year plan**, then Save. Do not type it on the Special Projects table. The table follows the plan.
+7. Leave **Add Special Projects into ordinary levies** unticked. The reserve pays these jobs.
 
 **First cycle** is the year a job starts, for example 2025. Leave it blank if the rands are already under the years.
 
@@ -4495,32 +4496,39 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 xl = pd.ExcelFile(ymp_up)
                 sheet = next((n for n in xl.sheet_names if re.search(r"ymp|10|maintenance", n, re.I)), xl.sheet_names[-1])
                 parsed = parse_ymp_sheet(pd.read_excel(xl, sheet_name=sheet, header=None), plan_start_year(st.session_state))
-                if parsed:
-                    st.session_state.ymp = parsed
+                if parsed and any(any(abs(float(y or 0)) > 0.5 for y in (p.get("years") or [])) for p in parsed):
+                    st.session_state.ymp = [p for p in parsed if (p.get("desc") or "").strip()]
                     straighten_plan(st.session_state)
                     n = sync_special_from_plan(st.session_state)
-                    y0 = plan_start_year(st.session_state)
-                    st.success(f"Loaded {len(parsed)} projects. Year 1 is {y0}. {n} jobs copied to Special Projects.")
+                    st.session_state["ymp_nonce"] = int(st.session_state.get("ymp_nonce") or 0) + 1
+                    st.success(f"Loaded {len(st.session_state.ymp)} projects. The 2027 column is on Special Projects ({n} lines).")
+                    st.rerun()
                 else:
-                    st.error("Could not find Year 1–10 amounts on that sheet.")
+                    st.error("Could not find the year headings 2025, 2026, 2027 on that sheet.")
             except Exception as e:
                 st.error(f"Could not read 10-year plan: {e}")
-        paste = st.text_area("Or paste from Excel (keep the empty cells / tabs)", height=160)
+        paste = st.text_area("Or paste from Excel (keep the empty cells / tabs)", height=160, key="ymp_paste")
         if st.button("Paste into plan") and paste.strip():
             parsed = parse_ymp_paste(paste, plan_start_year(st.session_state))
-            if parsed:
-                st.session_state.ymp = parsed
+            good = [p for p in parsed if (p.get("desc") or "").strip() and any(abs(float(y or 0)) > 0.5 for y in (p.get("years") or []))]
+            if good:
+                st.session_state.ymp = good
                 straighten_plan(st.session_state)
                 n = sync_special_from_plan(st.session_state)
-                y0 = plan_start_year(st.session_state)
-                st.success(
-                    f"Loaded {len(parsed)} projects. Year 1 is {y0}. {n} jobs copied to Special Projects."
-                )
+                st.session_state["ymp_nonce"] = int(st.session_state.get("ymp_nonce") or 0) + 1
+                st.success(f"Pasted {len(good)} projects. Open Special Projects to see Actual and the 2027 budget ({n} lines).")
+                st.rerun()
             else:
-                st.error("Could not read that paste. Copy the whole 10-year block from Excel, including the 2025–2034 year headings.")
+                st.error(
+                    "That paste has no year headings, so the columns cannot be read. "
+                    "In Excel, start the copy on the row that says 2025  2026  2027, and copy down to the last project. "
+                    "Do not copy only the bottom of the sheet. Do not copy the total row."
+                )
         ymp_rows = []
         ylabels = [str(NOW_YEAR + i) for i in range(10)]
         for p in st.session_state.ymp:
+            if not (p.get("desc") or "").strip() and not any(abs(float(y or 0)) > 0.5 for y in (p.get("years") or [])):
+                continue
             rec = {
                 "Project": p.get("desc") or "",
                 "First cycle": p.get("first_cycle") or "",
@@ -4531,25 +4539,37 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             for i in range(10):
                 rec[ylabels[i]] = float(years[i] if i < len(years) else 0)
             ymp_rows.append(rec)
-        with st.form("ymp_form"):
-            ed = st.data_editor(pd.DataFrame(ymp_rows), num_rows="dynamic", use_container_width=True, hide_index=True)
-            if st.form_submit_button("Save 10-year plan"):
-                st.session_state.ymp = [{
-                    "desc": str(r.get("Project") or ""),
+        if not ymp_rows:
+            ymp_rows = [{"Project": "", "First cycle": "", "Frequency": "", "Current estimate": 0.0, **{y: 0.0 for y in ylabels}}]
+        nonce = int(st.session_state.get("ymp_nonce") or 0)
+        ed = st.data_editor(
+            pd.DataFrame(ymp_rows),
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            key=f"ymp_grid_{nonce}",
+        )
+        st.caption("To remove a project, click the trash can on that row, then click Save 10-year plan. The row stays gone.")
+        if st.button("Save 10-year plan", type="primary"):
+            kept = []
+            for _, r in ed.iterrows():
+                desc = str(r.get("Project") or "").strip()
+                years = [float(r.get(ylabels[i]) or r.get(f"Year {i+1}") or 0) for i in range(10)]
+                if not desc and not any(abs(y) > 0.5 for y in years):
+                    continue
+                kept.append({
+                    "desc": desc,
                     "first_cycle": r.get("First cycle") or "",
                     "freq": r.get("Frequency") or "",
                     "estimate": float(r.get("Current estimate") or 0),
-                    "years": [float(r.get(ylabels[i]) or r.get(f"Year {i+1}") or 0) for i in range(10)],
-                } for _, r in ed.iterrows()]
-                straighten_plan(st.session_state)
-                n = sync_special_from_plan(st.session_state)
-                st.success(f"Saved. The {NOW_YEAR + 1} column is now Budgeted yearly on Special Projects. Actual amounts stay.")
-        if st.button("Copy Year 1 into Special Projects"):
+                    "years": years,
+                })
+            st.session_state.ymp = kept
+            straighten_plan(st.session_state)
             n = sync_special_from_plan(st.session_state)
-            if n:
-                st.success(f"Copied {n} projects (Year 1 rands only).")
-            else:
-                st.warning("Year 1 has no rands yet. Save the plan first, with an amount in the Year 1 column.")
+            st.session_state["ymp_nonce"] = nonce + 1
+            st.success(f"Saved {len(kept)} projects. The 2027 column is on Special Projects ({n} lines). Deleted rows stay deleted.")
+            st.rerun()
 
     with tabs[10]:
         st.subheader("For the owners")
