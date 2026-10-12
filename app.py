@@ -4509,21 +4509,27 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 st.error(f"Could not read 10-year plan: {e}")
         paste = st.text_area("Or paste from Excel (keep the empty cells / tabs)", height=160, key="ymp_paste")
         if st.button("Paste into plan") and paste.strip():
-            parsed = parse_ymp_paste(paste, plan_start_year(st.session_state))
-            good = [p for p in parsed if (p.get("desc") or "").strip() and any(abs(float(y or 0)) > 0.5 for y in (p.get("years") or []))]
-            if good:
-                st.session_state.ymp = good
-                straighten_plan(st.session_state)
-                n = sync_special_from_plan(st.session_state)
-                st.session_state["ymp_nonce"] = int(st.session_state.get("ymp_nonce") or 0) + 1
-                st.success(f"Pasted {len(good)} projects. Open Special Projects to see Actual and the 2027 budget ({n} lines).")
-                st.rerun()
-            else:
+            if not re.search(r"20[2-4]\d", paste):
                 st.error(
                     "That paste has no year headings, so the columns cannot be read. "
                     "In Excel, start the copy on the row that says 2025  2026  2027, and copy down to the last project. "
                     "Do not copy only the bottom of the sheet. Do not copy the total row."
                 )
+            else:
+                parsed = parse_ymp_paste(paste, plan_start_year(st.session_state))
+                good = [p for p in parsed if (p.get("desc") or "").strip() and any(abs(float(y or 0)) > 0.5 for y in (p.get("years") or []))]
+                if good:
+                    st.session_state.ymp = good
+                    straighten_plan(st.session_state)
+                    n = sync_special_from_plan(st.session_state)
+                    st.session_state["ymp_nonce"] = int(st.session_state.get("ymp_nonce") or 0) + 1
+                    st.success(f"Pasted {len(good)} projects. Open Special Projects to see Actual and the 2027 budget ({n} lines).")
+                    st.rerun()
+                else:
+                    st.error(
+                        "The year headings were there, but no project amounts were found. "
+                        "Copy from the 2025  2026  2027 row down to the last project, and keep the empty cells."
+                    )
         ymp_rows = []
         ylabels = [str(NOW_YEAR + i) for i in range(10)]
         for p in st.session_state.ymp:
