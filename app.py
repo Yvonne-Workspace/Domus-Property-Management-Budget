@@ -74,6 +74,23 @@ def norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def sync_special_from_plan(state: dict) -> int:
+    """Year 1 of the 10-year plan is Special Projects. An empty plan does not wipe what is already there."""
+    spec = []
+    for p in state.get("ymp") or []:
+        desc = str(p.get("desc") or "").strip()
+        years = p.get("years") or []
+        y1 = float(years[0] or 0) if years else 0.0
+        if not desc or y1 < 0.5:
+            continue
+        rec = row(desc, "From 10-year plan Year 1")
+        rec["yearly"] = y1
+        spec.append(rec)
+    if spec:
+        state.setdefault("sections", {})["special"] = spec
+    return len(spec)
+
+
 def row(desc: str, note: str = "") -> dict:
     return {
         "id": uid(), "desc": desc, "actual": 0.0, "pct": 0.0, "yearly": 0.0,
@@ -3329,6 +3346,9 @@ def main():
         st.title("Domus Property Management Budget")
         st.caption("Load the financial statement PDF (line names) then WeConnectU Excel (rands). Either order is fine.")
 
+    special_now = sum(float(r.get("yearly") or 0) for r in (st.session_state.sections.get("special") or []))
+    if special_now < 0.5:
+        sync_special_from_plan(st.session_state)
     apply_levy_lines(st.session_state)
     s = st.session_state.sections
     ord_amt = ordinary_total(st.session_state)
@@ -3499,6 +3519,7 @@ def main():
                     st.session_state.pq = data["pq"]
                 if data.get("ymp"):
                     st.session_state.ymp = data["ymp"]
+                    sync_special_from_plan(st.session_state)
                 for k in (
                     "has_master_hoa", "insurance_mode", "insurance_bill_yearly", "auto_csos",
                     "reserve_mode", "reserve_amount", "reserve_balance", "reserve_bill", "scheme_type", "special_in_ordinary",
@@ -3845,7 +3866,9 @@ Year 1 is **this budget year** (2026 while we are in 2026), not last year’s fi
 
 Upload the plan, or paste the whole block from Excel, including the year headings. An older sheet that starts in 2025 is rolled forward: last year’s next year becomes this Year 1.
 
-**Copy Year 1 into Special Projects** only when the levy must pay those jobs this year. Then go back and tick the special-projects box if that is the decision. Save the plan after you edit it.
+**10-year plan and Special Projects are the same for this year.** Year 1 is what the reserve pays this year. Saving, loading or pasting the plan copies Year 1 into Special Projects. You do not type it twice. Years 2 to 10 stay on the plan only.
+
+Leave **Add Special Projects into ordinary levies** unticked when the reserve pays those jobs. Tick it only if the levy must pay them. Do not tick it and also leave the same jobs on the reserve.
 
 ### 18. The meeting
 You prepare the budget. The trustees decide in the meeting.
@@ -4224,7 +4247,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         section_form("tax", "Income Tax", "Use the estimate button, or type the auditor’s yearly figure, then Save. Tick Reserve pays this only if the reserve pays the tax. Leave it off and the levy pays it.", reserve_tick=True)
 
     with tabs[7]:
-        section_form("special", "Special Projects", "Year 1 of the 10-year plan. Tick the sidebar box only if levies must fund it.")
+        section_form("special", "Special Projects", "This is Year 1 of the 10-year plan. It fills in when you save or load the plan. Tick the sidebar box only if levies must fund it. Otherwise the reserve pays it.")
 
     with tabs[8]:
         st.subheader("PQ / levy schedule")
@@ -4306,7 +4329,8 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         st.subheader("10-year maintenance plan")
         st.caption(
             f"We are in {NOW_YEAR}. Year 1 of this budget is {NOW_YEAR}, Year 2 is {NOW_YEAR+1}, … Year 10 is {NOW_YEAR+9}. "
-            "If you upload last year’s plan (2025–2034), we roll it: last year’s 2026 column becomes this Year 1."
+            "If you upload last year’s plan (2025–2034), we roll it: last year’s 2026 column becomes this Year 1. "
+            "Saving or loading the plan copies Year 1 into Special Projects."
         )
         ymp_up = st.file_uploader("Upload 10-year plan Excel (or last year’s budget workbook)", type=["xlsx", "xls"], key="ymp_xlsx")
         if ymp_up and st.button("Load 10-year plan"):
@@ -4316,8 +4340,9 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 parsed = parse_ymp_sheet(pd.read_excel(xl, sheet_name=sheet, header=None), plan_start_year(st.session_state))
                 if parsed:
                     st.session_state.ymp = parsed
+                    n = sync_special_from_plan(st.session_state)
                     y0 = plan_start_year(st.session_state)
-                    st.success(f"Loaded {len(parsed)} projects. Year 1 is {y0} (this budget year), not last year’s 2025 column.")
+                    st.success(f"Loaded {len(parsed)} projects. Year 1 is {y0}. {n} jobs copied to Special Projects.")
                 else:
                     st.error("Could not find Year 1–10 amounts on that sheet.")
             except Exception as e:
@@ -4327,10 +4352,10 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             parsed = parse_ymp_paste(paste, plan_start_year(st.session_state))
             if parsed:
                 st.session_state.ymp = parsed
+                n = sync_special_from_plan(st.session_state)
                 y0 = plan_start_year(st.session_state)
                 st.success(
-                    f"Loaded {len(parsed)} projects. Year 1 is {y0} (this budget). "
-                    f"Last year’s 2025 column is dropped. Painting / garage rands sit in {y0} onward."
+                    f"Loaded {len(parsed)} projects. Year 1 is {y0}. {n} jobs copied to Special Projects."
                 )
             else:
                 st.error("Could not read that paste. Copy the whole 10-year block from Excel, including the 2025–2034 year headings.")
@@ -4356,18 +4381,14 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                     "estimate": float(r.get("Current estimate") or 0),
                     "years": [float(r.get(f"Year {i+1}") or 0) for i in range(10)],
                 } for _, r in ed.iterrows()]
-                st.success("Saved.")
+                n = sync_special_from_plan(st.session_state)
+                st.success(f"Saved. {n} Year 1 jobs are now on Special Projects.")
         if st.button("Copy Year 1 into Special Projects"):
-            spec = []
-            for p in st.session_state.ymp:
-                y1 = float((p.get("years") or [0])[0] or 0)
-                if y1:
-                    rec = row(p["desc"], "From 10-year plan Year 1")
-                    rec["yearly"] = y1
-                    spec.append(rec)
-            if spec:
-                st.session_state.sections["special"] = spec
-                st.success(f"Copied {len(spec)} projects (Year 1 rands only).")
+            n = sync_special_from_plan(st.session_state)
+            if n:
+                st.success(f"Copied {n} projects (Year 1 rands only).")
+            else:
+                st.warning("Year 1 has no rands yet. Save the plan first, with an amount in the Year 1 column.")
 
     with tabs[10]:
         st.subheader("For the owners")
