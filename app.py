@@ -75,7 +75,10 @@ def norm(s: str) -> str:
 
 
 def sync_special_from_plan(state: dict) -> int:
-    """Year 1 of the 10-year plan is Special Projects. An empty plan does not wipe what is already there."""
+    """Year 1 of the 10-year plan is Special Projects. Keep the Actual already loaded from WeConnectU."""
+    old = {}
+    for r in (state.get("sections") or {}).get("special") or []:
+        old[norm(r.get("desc") or "")] = r
     spec = []
     for p in state.get("ymp") or []:
         desc = str(p.get("desc") or "").strip()
@@ -83,8 +86,13 @@ def sync_special_from_plan(state: dict) -> int:
         y1 = float(years[0] or 0) if years else 0.0
         if not desc or y1 < 0.5:
             continue
-        rec = row(desc, "From 10-year plan Year 1")
+        prev = old.get(norm(desc))
+        rec = row(desc, "From 10-year plan, 2026 column")
         rec["yearly"] = y1
+        if prev:
+            rec["actual"] = float(prev.get("actual") or 0)
+            rec["gl"] = prev.get("gl") or ""
+            rec["note"] = prev.get("note") or rec["note"]
         spec.append(rec)
     if spec:
         state.setdefault("sections", {})["special"] = spec
@@ -111,7 +119,7 @@ def seed_plan_from_special(state: dict) -> int:
             "desc": desc,
             "first_cycle": "",
             "freq": "",
-            "estimate": amt,
+            "estimate": 0.0,
             "years": [amt] + [0.0] * 9,
         })
     if not projects:
@@ -1647,15 +1655,29 @@ def parse_ymp_sheet(df, start_year: int | None = None) -> list:
             "years": years,
             "first_cycle": first,
             "freq": freq,
-            "estimate": est or (years[0] if years[0] else 0.0),
+            "estimate": est,
         })
     return projects
 
 
 def plan_start_year(state: dict) -> int:
-    m = re.search(r"20\d{2}", str(state.get("fin_year") or ""))
-    y = int(m.group()) if m else NOW_YEAR
-    return max(y, NOW_YEAR)
+    """The plan's first column is this calendar year, 2026. Not Current Estimate, and not next year."""
+    return NOW_YEAR
+
+
+def straighten_plan(state: dict) -> None:
+    """A figure sitting in Current Estimate, with nothing in 2026, belongs in 2026."""
+    for p in state.get("ymp") or []:
+        years = list(p.get("years") or [0.0] * 10)
+        years = (years + [0.0] * 10)[:10]
+        est = float(p.get("estimate") or 0)
+        y1 = float(years[0] or 0)
+        if est > 0.5 and y1 < 0.5:
+            years[0] = est
+            p["estimate"] = 0.0
+        elif est > 0.5 and abs(est - y1) < 0.5:
+            p["estimate"] = 0.0
+        p["years"] = years
 
 
 def _rgb(h: str) -> RGBColor:
@@ -3414,6 +3436,7 @@ def main():
         st.caption("Load the financial statement PDF (line names) then WeConnectU Excel (rands). Either order is fine.")
 
     special_now = sum(float(r.get("yearly") or 0) for r in (st.session_state.sections.get("special") or []))
+    straighten_plan(st.session_state)
     if special_now < 0.5:
         sync_special_from_plan(st.session_state)
     apply_levy_lines(st.session_state)
@@ -3934,7 +3957,9 @@ The schedule uses the **approved** ordinary levy once the meeting has set one. U
 **Paid last year** and **Will pay this year** are extra columns on this tab and on the Excel PQ sheet. They are the ordinary levy only. Paid last year is the sidebar amount × the unit’s ratio. Will pay this year is the new ordinary levy × the same ratio. They are not added into the Total, and they do not change any budget formula.
 
 ### 17. 10-year plan
-Year 1 is **this budget year** (2026 while we are in 2026), not last year’s first column.
+Year 1 is **2026**. The columns are 2026, 2027, 2028 and so on. A number in **Current estimate** is not the 2026 figure. If the first year was sitting in Current estimate, it is moved into the 2026 column.
+
+The **Actual** column on Special Projects stays the spend from the Actual vs Budget. It is not replaced when the plan is saved.
 
 Upload the plan, or paste the whole block from Excel, including the year headings. An older sheet that starts in 2025 is rolled forward: last year’s next year becomes this Year 1.
 
@@ -4319,7 +4344,10 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         section_form("tax", "Income Tax", "Use the estimate button, or type the auditor’s yearly figure, then Save. Tick Reserve pays this only if the reserve pays the tax. Leave it off and the levy pays it.", reserve_tick=True)
 
     with tabs[7]:
-        section_form("special", "Special Projects", "This is Year 1 of the 10-year plan. It fills in when you save or load the plan. Tick the sidebar box only if levies must fund it. Otherwise the reserve pays it.")
+        section_form("special", "Special Projects", "Actual is what was spent so far, from the Actual vs Budget. Budgeted yearly is the 2026 column of the 10-year plan. Current estimate is not used for this. Leave the sidebar tick off if the reserve pays these jobs.")
+        act_sum = sum(float(r.get("actual") or 0) for r in (st.session_state.sections.get("special") or []))
+        yr_sum = sum(float(r.get("yearly") or 0) for r in (st.session_state.sections.get("special") or []))
+        st.caption(f"Actual total {money(act_sum)}. Budgeted yearly total {money(yr_sum)}. The actual total is the spend so far. It is not the Current Estimate column.")
 
     with tabs[8]:
         st.subheader("PQ / levy schedule")
@@ -4412,6 +4440,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 parsed = parse_ymp_sheet(pd.read_excel(xl, sheet_name=sheet, header=None), plan_start_year(st.session_state))
                 if parsed:
                     st.session_state.ymp = parsed
+                    straighten_plan(st.session_state)
                     n = sync_special_from_plan(st.session_state)
                     y0 = plan_start_year(st.session_state)
                     st.success(f"Loaded {len(parsed)} projects. Year 1 is {y0}. {n} jobs copied to Special Projects.")
@@ -4424,6 +4453,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             parsed = parse_ymp_paste(paste, plan_start_year(st.session_state))
             if parsed:
                 st.session_state.ymp = parsed
+                straighten_plan(st.session_state)
                 n = sync_special_from_plan(st.session_state)
                 y0 = plan_start_year(st.session_state)
                 st.success(
@@ -4432,6 +4462,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             else:
                 st.error("Could not read that paste. Copy the whole 10-year block from Excel, including the 2025–2034 year headings.")
         ymp_rows = []
+        ylabels = [str(NOW_YEAR + i) for i in range(10)]
         for p in st.session_state.ymp:
             rec = {
                 "Project": p.get("desc") or "",
@@ -4441,7 +4472,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             }
             years = p.get("years") or [0] * 10
             for i in range(10):
-                rec[f"Year {i+1}"] = float(years[i] if i < len(years) else 0)
+                rec[ylabels[i]] = float(years[i] if i < len(years) else 0)
             ymp_rows.append(rec)
         with st.form("ymp_form"):
             ed = st.data_editor(pd.DataFrame(ymp_rows), num_rows="dynamic", use_container_width=True, hide_index=True)
@@ -4451,10 +4482,11 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                     "first_cycle": r.get("First cycle") or "",
                     "freq": r.get("Frequency") or "",
                     "estimate": float(r.get("Current estimate") or 0),
-                    "years": [float(r.get(f"Year {i+1}") or 0) for i in range(10)],
+                    "years": [float(r.get(ylabels[i]) or r.get(f"Year {i+1}") or 0) for i in range(10)],
                 } for _, r in ed.iterrows()]
+                straighten_plan(st.session_state)
                 n = sync_special_from_plan(st.session_state)
-                st.success(f"Saved. {n} Year 1 jobs are now on Special Projects.")
+                st.success(f"Saved. The 2026 column is Year 1. {n} jobs are on Special Projects, and the Actual amounts stay.")
         if st.button("Copy Year 1 into Special Projects"):
             n = sync_special_from_plan(st.session_state)
             if n:
