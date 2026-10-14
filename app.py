@@ -2317,93 +2317,6 @@ def generate_meeting_html(state: dict) -> bytes:
     return render_meeting_html(meeting_pack(state), logo)
 
 
-def _with_two_way_macro(bio: BytesIO) -> BytesIO:
-    """Excel on a computer: typing the % or the yearly amount updates the other."""
-    import os
-    import tempfile
-    from pyopenvba import ExcelFile
-
-    source = (
-        "Private Sub Workbook_SheetChange(ByVal Sh As Object, ByVal Target As Range)\r\n"
-        "    If Sh.Name <> \"BUDGET\" Then Exit Sub\r\n"
-        "    On Error GoTo Clean\r\n"
-        "    Application.EnableEvents = False\r\n"
-        "    Dim cell As Range\r\n"
-        "    For Each cell In Target.Cells\r\n"
-        "        If cell.Column = 5 Or cell.Column = 6 Or cell.Column = 9 Then DomusSync cell\r\n"
-        "    Next cell\r\n"
-        "Clean:\r\n"
-        "    Application.EnableEvents = True\r\n"
-        "End Sub\r\n"
-        "Private Sub DomusSync(ByVal cell As Range)\r\n"
-        "    Dim Sh As Worksheet\r\n"
-        "    Dim r As Long\r\n"
-        "    Dim mark As String\r\n"
-        "    Dim act As Double\r\n"
-        "    Dim p As Double\r\n"
-        "    Dim y As Double\r\n"
-        "    Dim recov As Double\r\n"
-        "    Set Sh = cell.Worksheet\r\n"
-        "    r = cell.Row\r\n"
-        "    mark = CStr(Sh.Cells(r, 11).Value)\r\n"
-        "    If mark = \"TWOWAY\" Then\r\n"
-        "        act = 0\r\n"
-        "        recov = 0\r\n"
-        "        If IsNumeric(Sh.Cells(r, 4).Value) Then act = CDbl(Sh.Cells(r, 4).Value)\r\n"
-        "        If IsNumeric(Sh.Cells(r, 9).Value) Then recov = Abs(CDbl(Sh.Cells(r, 9).Value))\r\n"
-        "        If cell.Column = 6 Then\r\n"
-        "            If Not IsNumeric(Sh.Cells(r, 6).Value) Then Exit Sub\r\n"
-        "            y = CDbl(Sh.Cells(r, 6).Value)\r\n"
-        "            If act >= 0.5 Then\r\n"
-        "                Sh.Cells(r, 5).Value = (y + recov) / act - 1\r\n"
-        "                Sh.Cells(r, 5).NumberFormat = \"0.00%\"\r\n"
-        "            End If\r\n"
-        "        Else\r\n"
-        "            If act < 0.5 Then Exit Sub\r\n"
-        "            If Not IsNumeric(Sh.Cells(r, 5).Value) Then Exit Sub\r\n"
-        "            p = CDbl(Sh.Cells(r, 5).Value)\r\n"
-        "            y = act * (1 + p) - recov\r\n"
-        "            If y < 0 Then y = 0\r\n"
-        "            Sh.Cells(r, 6).Value = Round(y, 2)\r\n"
-        "            Sh.Cells(r, 6).NumberFormat = \"#,##0.00\"\r\n"
-        "        End If\r\n"
-        "    ElseIf mark = \"MEETING\" Then\r\n"
-        "        On Error Resume Next\r\n"
-        "        act = CDbl(Sh.Range(\"OrdinaryActual\").Value)\r\n"
-        "        On Error GoTo 0\r\n"
-        "        If cell.Column = 5 Then\r\n"
-        "            If act < 0.5 Then Exit Sub\r\n"
-        "            If Not IsNumeric(Sh.Cells(r, 5).Value) Then Exit Sub\r\n"
-        "            p = CDbl(Sh.Cells(r, 5).Value)\r\n"
-        "            Sh.Cells(r, 6).Value = Round(act * (1 + p), 2)\r\n"
-        "            Sh.Cells(r, 6).NumberFormat = \"#,##0.00\"\r\n"
-        "        Else\r\n"
-        "            If Not IsNumeric(Sh.Cells(r, 6).Value) Then Exit Sub\r\n"
-        "            y = CDbl(Sh.Cells(r, 6).Value)\r\n"
-        "            If act >= 0.5 Then\r\n"
-        "                Sh.Cells(r, 5).Value = y / act - 1\r\n"
-        "                Sh.Cells(r, 5).NumberFormat = \"0.00%\"\r\n"
-        "            End If\r\n"
-        "        End If\r\n"
-        "    End If\r\n"
-        "End Sub\r\n"
-    )
-    fd, name = tempfile.mkstemp(suffix=".xlsm")
-    os.close(fd)
-    path = Path(name)
-    try:
-        path.write_bytes(bio.getvalue())
-        with ExcelFile(path) as book:
-            book.add_vba_project()
-            book.set_module("ThisWorkbook", source)
-            book.save()
-        out = BytesIO(path.read_bytes())
-        out.seek(0)
-        return out
-    finally:
-        path.unlink(missing_ok=True)
-
-
 def generate_excel(state: dict) -> BytesIO:
     apply_levy_lines(state)
     s = state["sections"]
@@ -2444,7 +2357,7 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B7"] = "This year's 10-year-plan jobs"
     ws["B8"] = "Left at year-end"
     fml(ws["D8"], "D5+D6-D7")
-    ws["B9"] = "Both yellow cells can be typed. Type the % and Budgeted Yearly updates. Type Budgeted Yearly and the % updates. Monthly follows. Click Enable Content once. This works in Excel on a computer."
+    ws["B9"] = "Yellow = Budgeted Yearly, the amount you type. The % is worked out from that amount. Do not type on the %. Monthly = Yearly ÷ 12."
     ws["B9"].font = Font(italic=True, size=9, color="666666")
 
     r = 11
@@ -2517,52 +2430,23 @@ def generate_excel(state: dict) -> BytesIO:
             if fam == "ins_bill" or re.search(r"insurance recovered|levy\s*[-–]\s*insurance", desc, re.I):
                 levy_rows["insurance"] = r
             named_rows[desc] = r
-            if in_levy and not skip_from_ordinary(it, state, ignore_reserve=True):
-                levy_comp_rows.append(r)
             if reserve_col:
                 reserve_mark_rows.append(r)
             ins = float(it.get("insurance") or 0)
             rec = bool(it.get("is_recovery")) and not recovery_as_income
             inp(ws.cell(r, 4), act, MONEY)
             ins = float(it.get("insurance") or 0)
-            has_claim = False
-            for claim in (state.get("sections") or {}).get("recoveries_other") or []:
-                if norm(claim.get("claim_against") or "") == norm(desc) and abs(float(claim.get("yearly") or 0)) > 0.5 and named_rows.get(claim.get("desc") or ""):
-                    has_claim = True
-                    break
-            use_amount = (
-                it.get("edit_mode") == "amount"
-                and fam not in ("ordinary", "reserve", "csos_inc", "csos_exp")
-                and not rec
-                and ins < 0.5
-                and not owner_box
-                and not has_claim
-                and act >= 0.5
-            )
-            two_way = (
-                fam != "ordinary"
-                and not (fam == "reserve" and state.get("reserve_mode") in ("pct15", "pct25", "15pct", "legal", "rm100"))
-                and not (is_own_scheme_csos(desc) and fam == "csos_exp" and levy_rows.get("csos"))
-                and not rec
-                and ins < 0.5
-                and not has_claim
-            )
-            if two_way:
-                own_now = float(it.get("owner_recovery") or 0)
-                show_pct = (pct_from_amounts(act, abs(y)) if act >= 0.5 else pct) / 100.0
-                inp(ws.cell(r, 5), show_pct, "0.00%")
-                inp(ws.cell(r, 6), max(0.0, abs(y) - own_now), MONEY)
-                ws.cell(r, 11, "TWOWAY")
-            elif fam == "ordinary":
-                fml(ws.cell(r, 5), f"IF(D{r}=0,0,F{r}/D{r}-1)")
+            linked_csos = is_own_scheme_csos(desc) and fam == "csos_exp" and levy_rows.get("csos")
+            # % is always a formula. Budgeted Yearly is the number you type, except a few totals.
+            pct_f = f"IF(D{r}=0,0,IF(D{r}<0,ABS(F{r})/ABS(D{r})-1,F{r}/D{r}-1))"
+            if fam != "ordinary":
+                fml(ws.cell(r, 5), pct_f)
                 ws.cell(r, 5).number_format = "0.00%"
-            elif not use_amount:
-                show_pct = pct_from_amounts(act, y) if act >= 0.5 else pct
-                inp(ws.cell(r, 5), show_pct / 100.0, "0.00%")
-            if two_way:
-                pass
-            elif fam == "ordinary":
-                pass  # F filled after totals
+            else:
+                fml(ws.cell(r, 5), pct_f)
+                ws.cell(r, 5).number_format = "0.00%"
+            if fam == "ordinary":
+                pass  # F filled after the cost total
             elif fam == "reserve" and state.get("reserve_mode") in ("pct15", "15pct", "legal") and levy_rows.get("ordinary"):
                 months = max(1, int(state.get("actual_months") or 12))
                 scale = f"*12/{months}" if months < 12 else ""
@@ -2573,23 +2457,12 @@ def generate_excel(state: dict) -> BytesIO:
                 fml(ws.cell(r, 6), f"0.25*D{levy_rows['ordinary']}{scale}")
             elif fam == "reserve" and state.get("reserve_mode") == "rm100":
                 inp(ws.cell(r, 6), float(reserve_contribution(state) or y or 0), MONEY)
-            elif fam == "reserve":
-                inp(ws.cell(r, 6), float(reserve_contribution(state) or y or 0), MONEY)
-            elif is_own_scheme_csos(desc) and fam == "csos_exp" and levy_rows.get("csos"):
+            elif linked_csos:
                 fml(ws.cell(r, 6), f"F{levy_rows['csos']}")
-            elif use_amount:
-                inp(ws.cell(r, 6), abs(y), MONEY)
-                fml(ws.cell(r, 5), f"IF(D{r}=0,0,F{r}/D{r}-1)")
-                ws.cell(r, 5).number_format = "0.00%"
-            elif act < 0.5 and abs(y) > 0.5 and not rec:
-                inp(ws.cell(r, 6), abs(y), MONEY)
             elif rec and not recovery_as_income:
-                fml(ws.cell(r, 6), f"-ABS(D{r}*(1+E{r}))")
-            elif ins > 0.5:
-                fml(ws.cell(r, 6), f"MAX(0,D{r}*(1+E{r})-{ins})")
+                inp(ws.cell(r, 6), -abs(y), MONEY)
             else:
-                fml(ws.cell(r, 6), f"D{r}*(1+E{r})")
-            fml(ws.cell(r, 7), f"F{r}/12")
+                inp(ws.cell(r, 6), abs(y), MONEY)
             note = clean_note(it.get("note"))
             if ins:
                 extra = "Insurance payout " + f"{ins:,.2f}"
@@ -2603,13 +2476,6 @@ def generate_excel(state: dict) -> BytesIO:
                     hc.border = THIN
                     ws.column_dimensions["I"].width = 22
                 inp(ws.cell(r, 9), own, MONEY)
-                if not two_way:
-                    cur = ws.cell(r, 6).value
-                    if isinstance(cur, str) and cur.startswith("="):
-                        ws.cell(r, 6).value = f"=MAX(0,({cur[1:]})-N(I{r}))"
-                    elif cur is not None:
-                        ws.cell(r, 6).value = f"=MAX(0,{float(cur)}-N(I{r}))"
-                        ws.cell(r, 6).number_format = MONEY
                 if own:
                     extra = "Recovered from some owners " + f"{own:,.2f}" + ". Not income. Taken off this line."
                     note = f"{note} | {extra}".strip(" |") if note else extra
@@ -2622,14 +2488,22 @@ def generate_excel(state: dict) -> BytesIO:
                 crow = named_rows.get(claim.get("desc") or "")
                 if crow:
                     claim_bits.append(f"N(F{crow})")
+            deduct = ""
+            if ins > 0.5:
+                deduct += f"-{ins}"
+            if owner_box:
+                deduct += f"-N(I{r})"
             if claim_bits:
-                cur = ws.cell(r, 6).value
-                minus = "-".join(claim_bits)
-                if isinstance(cur, str) and str(cur).startswith("="):
-                    ws.cell(r, 6).value = f"=MAX(0,({cur[1:]})-{minus})"
-                elif cur is not None:
-                    ws.cell(r, 6).value = f"=MAX(0,{float(cur)}-{minus})"
-                    ws.cell(r, 6).number_format = MONEY
+                deduct += "-" + "-".join(claim_bits)
+            if deduct and not (isinstance(ws.cell(r, 6).value, str) and str(ws.cell(r, 6).value).startswith("=") and fam in ("ordinary", "csos_exp")):
+                fml(ws.cell(r, 7), f"MAX(0,F{r}{deduct})/12")
+            else:
+                fml(ws.cell(r, 7), f"F{r}/12")
+            if in_levy and not skip_from_ordinary(it, state, ignore_reserve=True):
+                if deduct:
+                    levy_comp_rows.append(f"MAX(0,F{r}{deduct})")
+                else:
+                    levy_comp_rows.append(f"F{r}")
             if levy_tick:
                 inp(ws.cell(r, 9), "Yes" if it.get("reduces_levy") else "No")
             if claim_col:
@@ -2669,27 +2543,23 @@ def generate_excel(state: dict) -> BytesIO:
         fml(ws.cell(r, 6), f"F{ord_row}")
         fml(ws.cell(r, 7), f"G{ord_row}")
         r += 1
-        ws.cell(r, 2, "Approved — type a % or a rand")
-        ws.cell(r, 8, "Type the % the meeting agrees, for example 10%. Or type a rand over the yearly amount and leave the %.")
+        ws.cell(r, 2, "Approved — type the yearly rand")
+        ws.cell(r, 8, "Type the yearly amount the meeting agrees. The % updates on its own. Do not type on the %.")
         ws.cell(r, 8).font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
         ws.cell(r, 8).alignment = Alignment(wrap_text=True, vertical="center")
-        pct_cell = ws.cell(r, 5)
-        year_cell = ws.cell(r, 6)
         mode = state.get("levy_approve_mode") or "costs"
         ord_actual = float(ws.cell(ord_row, 4).value or 0)
         if mode == "amount" and float(state.get("levy_approved_amount") or 0) > 0.5:
             approved_year = float(state.get("levy_approved_amount") or 0)
-            approved_pct = 0.0 if ord_actual < 0.5 else approved_year / ord_actual - 1
         elif mode == "pct":
-            approved_pct = float(state.get("levy_approved_pct") or 0) / 100.0
-            approved_year = ord_actual * (1 + approved_pct)
+            approved_year = ord_actual * (1 + float(state.get("levy_approved_pct") or 0) / 100.0)
         else:
             approved_year = float(next((it.get("yearly") or 0) for it in s["levy"] if family(it.get("desc") or "") == "ordinary"))
-            approved_pct = 0.0 if ord_actual < 0.5 else approved_year / ord_actual - 1
-        inp(pct_cell, approved_pct, "0.00%")
-        inp(year_cell, approved_year, MONEY)
-        ws.cell(r, 11, "MEETING")
         wb.defined_names.add(DefinedName(name="OrdinaryActual", attr_text=f"BUDGET!$D${ord_row}"))
+        pct_cell = ws.cell(r, 5)
+        fml(pct_cell, f"IF(OrdinaryActual=0,0,F{r}/OrdinaryActual-1)")
+        pct_cell.number_format = "0.00%"
+        inp(ws.cell(r, 6), approved_year, MONEY)
         fml(ws.cell(r, 7), f"F{r}/12", "C6EFCE")
         approved_row = r
         r += 1
@@ -2798,7 +2668,7 @@ def generate_excel(state: dict) -> BytesIO:
     # Ordinary = net municipal + each cost line that is not billed separately (estate / insurance / garden / CSOS)
     bits = f"F{net_muni}"
     if levy_comp_rows:
-        bits += "+" + "+".join(f"F{n}" for n in levy_comp_rows)
+        bits += "+" + "+".join(str(n) if isinstance(n, str) else f"F{n}" for n in levy_comp_rows)
     cut = []
     for it in s.get("other") or []:
         if it.get("reduces_levy") and abs(float(it.get("yearly") or 0)) > 0.5:
@@ -3076,6 +2946,7 @@ def generate_excel(state: dict) -> BytesIO:
         "levy_approved_pct": float(state.get("levy_approved_pct") or 0),
         "levy_approved_amount": float(state.get("levy_approved_amount") or 0),
         "levy_approve_mode": state.get("levy_approve_mode") or "costs",
+        "actual_months": int(state.get("actual_months") or 12),
     }
     blob = json.dumps(payload, ensure_ascii=False)
     # Excel cell cap is 32767; split across rows if needed.
@@ -3085,11 +2956,10 @@ def generate_excel(state: dict) -> BytesIO:
     for i in range(0, len(blob), chunk):
         pack.cell(3 + i // chunk, 1, blob[i : i + chunk])
 
-    ws.column_dimensions["K"].hidden = True
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
-    return _with_two_way_macro(bio)
+    return bio
 
 
 RESTORE_BARS = [
@@ -3100,7 +2970,7 @@ RESTORE_BARS = [
     ("hoa / estate recovered", "hoa_income"),
     ("hoa / estate paid", "hoa_expense"),
     ("equal charges", "fixed"),
-    ("recoveries on utilities", "recoveries_other"),
+    ("recoveries on utilities", "municipal"),
     ("other recoveries", "recoveries_other"),
     ("municipal", "municipal"),
     ("expenditure", "expenditure"),
@@ -3114,11 +2984,20 @@ RESTORE_BARS = [
 ]
 
 
-def _apply_budget_sheet(wb, data: dict) -> None:
+def _cell_amount(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _apply_budget_sheet(wb, data: dict, wb_values=None) -> None:
     """Trustees edit the sheet in the meeting. Those cells win when the file comes back."""
     if "BUDGET" not in getattr(wb, "sheetnames", []):
         return
     ws = wb["BUDGET"]
+    ws_values = wb_values["BUDGET"] if wb_values is not None and "BUDGET" in getattr(wb_values, "sheetnames", []) else None
     sections = data.setdefault("sections", {})
     current = None
     for r in range(1, int(ws.max_row or 1) + 1):
@@ -3136,6 +3015,11 @@ def _apply_budget_sheet(wb, data: dict) -> None:
             continue
         d_val = ws.cell(r, 4).value
         f_val = ws.cell(r, 6).value
+        if ws_values is not None:
+            if _cell_amount(d_val) is None:
+                d_val = ws_values.cell(r, 4).value
+            if _cell_amount(f_val) is None:
+                f_val = ws_values.cell(r, 6).value
         mapped = next((k for title, k in RESTORE_BARS if title in low and "total" not in low and "check" not in low), None)
         if mapped and d_val is None and f_val is None:
             current = mapped
@@ -3271,10 +3155,19 @@ def restore_from_app_excel(uploaded) -> dict:
     bio = BytesIO(raw)
     try:
         wb = load_workbook(bio, data_only=False, read_only=False)
+        try:
+            wb_values = load_workbook(BytesIO(raw), data_only=True, read_only=False)
+        except Exception:
+            wb_values = None
         packed = _restore_from_domus_sheet(wb)
         if packed:
-            _apply_budget_sheet(wb, packed)
+            _apply_budget_sheet(wb, packed, wb_values)
             _read_meeting_from_sheet(wb, packed)
+            if "10 YMP" in wb.sheetnames:
+                rows = [list(row) for row in wb["10 YMP"].iter_rows(values_only=True)]
+                projects = parse_ymp_sheet(pd.DataFrame(rows), NOW_YEAR) if rows else []
+                if projects:
+                    packed["ymp"] = projects
             try:
                 recs, _msg = parse_pq_upload(BytesIO(raw))
                 if recs:
@@ -3763,7 +3656,6 @@ def main():
                     st.session_state.pq = data["pq"]
                 if data.get("ymp"):
                     st.session_state.ymp = data["ymp"]
-                    sync_special_from_plan(st.session_state)
                 for k in (
                     "has_master_hoa", "insurance_mode", "insurance_bill_yearly", "auto_csos",
                     "reserve_mode", "reserve_amount", "reserve_balance", "reserve_bill", "scheme_type", "special_in_ordinary",
@@ -4130,28 +4022,17 @@ The names do not have to be identical. Sand beds, tree felling, windows, stairca
 ### 18. The meeting
 You prepare the budget. The trustees decide in the meeting.
 
-**Download Excel** on the Download tab. The file has four tabs: **BUDGET**, **RESERVE**, **PQ** and **10 YMP**. Yellow cells are the ones they may type in. The sheet has formulas, so a change to a % or a rand updates the yearly amount, the monthly amount, the levy and the PQ.
+**Download Excel** on the Download tab. The file is a normal Excel workbook. It has **BUDGET**, **RESERVE**, **PQ** and **10 YMP**. The yellow cell is **Budgeted Yearly**. Type the rand there. The % is white and updates on its own. Monthly follows the yearly amount. Do not type on the %.
 
 **RESERVE** is not a second place to type. It shows money already in the bank, what owners put in, the **2027** jobs, and what is left. 2026 spend is not taken off again. Later years are one total and are not billed now.
 
-Under Levies received there is one yellow line: **Approved — type a % or a rand**.
+Under Levies received, type the yearly rand on **Approved — type the yearly rand**. The % next to it updates. **What the costs need** stays as the reference. **Gap** is the costs minus the approved amount. The PQ uses the approved amount.
 
-- They type the % the meeting agrees (10 means plus 10% on last year’s levies).
-- Or they type a rand amount over the yearly figure and leave the %.
-- **What the costs need** stays as the reference.
-- **Gap** is the costs minus the approved amount. Above zero means the costs are still higher. They cut a cost, or they take the gap from the reserve.
-- The PQ uses the **approved** amount.
-
-On a normal cost line, **both** the % and Budgeted yearly are yellow. Type either one. Excel updates the other, and Monthly follows. Click **Enable Content** when the file opens. This works in Excel on a computer, not in a browser.
-
-- Type 10% and the yearly amount becomes Actual × 1.10.
-- Type a rand in Budgeted yearly and the % becomes yearly ÷ Actual − 1.
-- If Actual is 0, type the rand. A % cannot make an amount from nothing.
-- A line with an insurance payout, a recovery, or “recovered from some owners” still uses the % only, so those deductions stay in the formula.
+On a normal cost line, type the new yearly rand. The % becomes yearly ÷ actual − 1. If Actual is 0, still type the rand.
 
 They can also change notes, **Lowers the levy** (Yes or No), **Comes off this cost**, and the reserve when it is an own amount.
 
-Do **not** type on the % next to Levies received itself. That % is worked out from the costs. It jumps back.
+Do **not** type on the % next to Levies received itself. That % is worked out from the costs.
 
 If you already know the decision before you download, you can set the same choice on the Income tab under **Meeting decision**. The sheet still shows it, so the meeting can change it.
 
@@ -4715,7 +4596,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
 
     with tabs[11]:
         st.subheader("Download Excel")
-        st.caption("Budget, Reserve, PQ and 10-year plan. Open it in Excel on a computer and click Enable Content. Then typing the % or the yearly amount updates the other.")
+        st.caption("Budget, Reserve, PQ and 10-year plan. Yellow cells are Budgeted Yearly. Type the rand. The % updates on its own. Save the file, then Restore it here and the amounts come back.")
         if not st.session_state.complex_name:
             st.warning("Type the complex name in the sidebar first.")
         elif st.button("Build Excel file", type="primary"):
@@ -4726,8 +4607,8 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             st.download_button(
                 "Download budget Excel",
                 data=st.session_state["xlsx"],
-                file_name=f"Budget_{name}.xlsm",
-                mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                file_name=f"Budget_{name}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
 
