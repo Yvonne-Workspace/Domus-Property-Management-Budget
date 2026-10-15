@@ -4167,8 +4167,10 @@ On **Municipal**, the city bill and the recovery are separate lines.
 On both:
 
 - **Budgeted yearly** is the full bill.
-- **Recovered from some owners** is what only some owners pay towards that same bill (for example a private refuse company for a few units). It is not income, not municipal, and not a column on the PQ. The levy carries the bill minus that amount.
+- **Cost recoveries** is what only some owners pay towards that same bill (for example a private refuse company for a few units). It is not income, not municipal, and not a column on the PQ. The levy carries the bill minus that amount.
 - On repairs, **Insurance payout** is what the insurer pays towards that job. It is a deduction. Do not type the new budget in the payout column.
+- **Move to** sends a line to another section when WeConnectU filed it in the wrong place. Choose the section and Save. The amounts go with it.
+- **Breakdown**, at the bottom of Expenditure and of Repairs, is the detail inside a main account (for example Accounting fees: annual statements, tax return). Pick the main account, type the name, the Actual and the Budgeted yearly, then **Save breakdown**. On the sheet those lines sit under the main account. They are for the trustees. They are not added to the levy. Only the main account is used.
 
 ### 9. Garden and other equal charges
 If owners pay the gardener themselves, set **Garden service** on Expenditure to **R0**. Do not also put it under Fixed monthly charges. **Garden Expenses** on Repair and Maintenance stays in the levy (small garden repairs).
@@ -4223,7 +4225,7 @@ Untick it only if you must type a different CSOS figure yourself.
 ### 14. Income tax
 Levies are not taxed. Interest, investment income and rent can be.
 
-On the **Tax** tab, **Put this estimate on the tax line** uses Other Income: the first R50,000 is exempt, the rest × 27%. Or type the auditor’s yearly figure and Save. That tax is a cost inside the ordinary levy.
+On the **Tax** tab, leave **Calculate the tax** ticked. It uses other income only (interest, investment income, rent, penalties). Levies are not included. The first R50,000 is free. The rest is × 27%. Budgeted yearly still fills in when Actual tax is 0. Untick it and type the auditor’s figure when a complex is different. That tax is a cost inside the ordinary levy.
 
 Owners do not pay SARS every month. The monthly column is only so the levy can fund one yearly amount.
 
