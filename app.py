@@ -1808,7 +1808,19 @@ def parse_ymp_sheet(df, start_year: int | None = None) -> list:
                 est = float(nums[0]) if nums[0] >= 50 else 0.0
         if not desc:
             continue
-        if not any(abs(y) > 0.5 for y in years) and not est and not first:
+        note = ""
+        used_cols = {c for c in (year_cols or []) if c is not None}
+        for j, v in enumerate(cells):
+            if j in used_cols:
+                continue
+            s = str(v or "").strip()
+            if not s or s.lower() in ("nan", "none") or s == desc:
+                continue
+            if num(s) is not None and not re.search(r"[A-Za-z]", s):
+                continue
+            if re.search(r"[A-Za-z]", s) and len(s) > 2:
+                note = s
+        if not any(abs(y) > 0.5 for y in years) and not est and not first and not note and len(desc) < 4:
             continue
         projects.append({
             "desc": desc,
@@ -1816,6 +1828,7 @@ def parse_ymp_sheet(df, start_year: int | None = None) -> list:
             "first_cycle": first,
             "freq": freq,
             "estimate": est,
+            "note": note,
         })
     return projects
 
@@ -3215,8 +3228,8 @@ def generate_excel(state: dict) -> BytesIO:
     ymp["A2"].font = Font(bold=True, size=12, color=NAVY)
     ymp.row_dimensions[1].height = 50
     brand(ymp, "H1", 150, 58)
-    headers = ["PROJECTS", "First Cycle", "Frequency of Cycles", "Current Estimate"] + [str(start_y + i) for i in range(10)]
-    sub = ["", "", "", ""] + [f"Year {i+1}" for i in range(10)]
+    headers = ["PROJECTS", "First Cycle", "Frequency of Cycles", "Current Estimate"] + [str(start_y + i) for i in range(10)] + ["Notes"]
+    sub = ["", "", "", ""] + [f"Year {i+1}" for i in range(10)] + [""]
     for i, h in enumerate(headers, 1):
         c = ymp.cell(4, i, h)
         fill(c, NAVY)
@@ -3227,10 +3240,11 @@ def generate_excel(state: dict) -> BytesIO:
         fill(c, NAVY)
         c.font = Font(bold=True, color="FFFFFF", size=8)
         c.alignment = Alignment(horizontal="center")
-    ymp.column_dimensions["A"].width = 38
+    ymp.column_dimensions["A"].width = 62
     ymp.column_dimensions["B"].width = 12
     ymp.column_dimensions["C"].width = 14
     ymp.column_dimensions["D"].width = 16
+    ymp.column_dimensions["O"].width = 42
     projects = [p for p in (state.get("ymp") or []) if (p.get("desc") or "").strip()]
     if not projects:
         projects = [{"desc": "", "years": [0] * 10}]
@@ -3238,7 +3252,11 @@ def generate_excel(state: dict) -> BytesIO:
     for i, p in enumerate(projects):
         rr = first_data + i
         years = p.get("years") or [0] * 10
-        inp(ymp.cell(rr, 1), p.get("desc") or "")
+        name_cell = ymp.cell(rr, 1)
+        inp(name_cell, p.get("desc") or "")
+        name_cell.alignment = Alignment(wrap_text=True, vertical="center")
+        name_len = len(str(p.get("desc") or ""))
+        ymp.row_dimensions[rr].height = 18 * max(1, (name_len // 55) + (1 if name_len > 55 else 0))
         fc = p.get("first_cycle") or ""
         ymp.cell(rr, 2, fc if fc != "" else None)
         fr = p.get("freq") or ""
@@ -3250,6 +3268,8 @@ def generate_excel(state: dict) -> BytesIO:
             inp(ymp.cell(rr, 5 + y), val, MONEY)
             if val and y == 0:
                 ymp.cell(rr, 5 + y).font = Font(bold=True, color="9C0006")
+        note_cell = ymp.cell(rr, 15, p.get("note") or "")
+        note_cell.alignment = Alignment(wrap_text=True, vertical="center")
     last = first_data + len(projects) - 1
     tot = last + 1
     ymp.cell(tot, 1, "TOTAL").font = Font(bold=True)
@@ -4599,7 +4619,7 @@ Do these steps in this order.
 1. On the left, choose the WeConnectU **Actual vs Budget** file and click **Load Excel**.
 2. Open **10-year projects**. The GL code comes from WeConnectU. **Budgeted this year** is what was allowed. **Actual** is what was spent. **Over / under** is Actual minus Budgeted. Above zero means we overspent. **Next year** is still blank until the plan is pasted. There is no %.
 3. Open **10-year plan**. In Excel, copy from the row that says **2025  2026  2027** down to the last project. Do not copy only the bottom. Do not copy the total row. Paste it into the box and click **Paste into plan**. The projects must appear in the table. If the table stays empty, the year headings were not in the copy.
-4. To remove a project, click the trash can on that row, then click **Save 10-year plan**. It stays deleted.
+4. To remove a project, click the trash can on that row, then click **Save 10-year plan**. It stays deleted. Click a project name to read the full words. Scroll right for the later years. A note that sat to the right of the years is in the **Note** column.
 5. Open **10-year projects** again.
    - Done this year and also planned next year: Actual and Next year are both filled.
    - Done this year only: Actual is filled, Next year is blank. It is not repeated.
@@ -5164,7 +5184,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 )
             else:
                 parsed = parse_ymp_paste(paste, plan_start_year(st.session_state))
-                good = [p for p in parsed if (p.get("desc") or "").strip() and any(abs(float(y or 0)) > 0.5 for y in (p.get("years") or []))]
+                good = [p for p in parsed if (p.get("desc") or "").strip()]
                 if good:
                     st.session_state.ymp = good
                     straighten_plan(st.session_state)
@@ -5191,9 +5211,10 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             years = p.get("years") or [0] * 10
             for i in range(10):
                 rec[ylabels[i]] = float(years[i] if i < len(years) else 0)
+            rec["Note"] = p.get("note") or ""
             ymp_rows.append(rec)
         if not ymp_rows:
-            ymp_rows = [{"Project": "", "First cycle": "", "Frequency": "", "Current estimate": 0.0, **{y: 0.0 for y in ylabels}}]
+            ymp_rows = [{"Project": "", "First cycle": "", "Frequency": "", "Current estimate": 0.0, "Note": "", **{y: 0.0 for y in ylabels}}]
         nonce = int(st.session_state.get("ymp_nonce") or 0)
         ed = st.data_editor(
             pd.DataFrame(ymp_rows),
@@ -5201,8 +5222,12 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             use_container_width=True,
             hide_index=True,
             key=f"ymp_grid_{nonce}",
+            column_config={
+                "Project": st.column_config.TextColumn("Project", width="large", help="The full name. Click the cell if it looks cut off."),
+                "Note": st.column_config.TextColumn("Note", width="large", help="The words that sat to the right of the years, such as a prediction note."),
+            },
         )
-        st.caption("To remove a project, click the trash can on that row, then click Save 10-year plan. The row stays gone.")
+        st.caption("Scroll to the right for the later years. Click a project name to see the full words. The note from the right of the plan is in the Note column.")
         if st.button("Save 10-year plan", type="primary"):
             kept = []
             for _, r in ed.iterrows():
@@ -5216,6 +5241,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                     "freq": r.get("Frequency") or "",
                     "estimate": float(r.get("Current estimate") or 0),
                     "years": years,
+                    "note": str(r.get("Note") or "").strip(),
                 })
             st.session_state.ymp = kept
             straighten_plan(st.session_state)
