@@ -2484,11 +2484,14 @@ def generate_excel(state: dict) -> BytesIO:
             for claim in (state.get("sections") or {}).get("recoveries_other") or []:
                 if norm(claim.get("claim_against") or "") != norm(desc):
                     continue
-                if abs(float(claim.get("yearly") or 0)) < 0.5:
-                    continue
                 crow = named_rows.get(claim.get("desc") or "")
-                if crow:
+                year_c = abs(float(claim.get("yearly") or 0))
+                act_c = abs(float(claim.get("actual") or 0))
+                if crow and year_c > 0.5:
                     claim_bits.append(f"N(F{crow})")
+                if act_c > 0.5:
+                    extra = "This year's recovery " + f"{act_c:,.2f}" + " comes off this actual. It is not added again."
+                    note = f"{note} | {extra}".strip(" |") if note else extra
             deduct = ""
             if ins > 0.5:
                 deduct += f"-{ins}"
@@ -2625,6 +2628,26 @@ def generate_excel(state: dict) -> BytesIO:
             fml(ws.cell(r, 7), f"D{r}/12")
             r += 1
     r += 1
+    def write_actual_after_recoveries(label, total_row, items):
+        nonlocal r
+        names = {norm(it.get("desc") or "") for it in items}
+        refs = []
+        seen = set()
+        for claim in s.get("recoveries_other") or []:
+            if norm(claim.get("claim_against") or "") not in names:
+                continue
+            if abs(float(claim.get("actual") or 0)) < 0.5:
+                continue
+            crow = named_rows.get(claim.get("desc") or "")
+            if crow and crow not in seen:
+                seen.add(crow)
+                refs.append(f"N(D{crow})")
+        if not refs:
+            return
+        ws.cell(r, 2, label).font = Font(italic=True, size=9, color="9C0006")
+        fml(ws.cell(r, 4), f"MAX(0,D{total_row}-" + "-".join(refs) + ")", RED)
+        r += 2
+
     bar("EXPENDITURE")
     hdr()
     exp_items = list(s.get("expenditure") or [])
@@ -2632,12 +2655,14 @@ def generate_excel(state: dict) -> BytesIO:
         exp_items = exp_items + list(s.get("hoa_expense") or [])
     a, b = write(exp_items, in_levy=True, owner_box=True, reserve_col=True)
     exp_tot = tot("TOTAL EXPENDITURE", a, b)
+    write_actual_after_recoveries("ACTUAL after this year's recoveries (expenditure). Already net — do not add it again.", exp_tot, exp_items)
     bar("REPAIR AND MAINTENANCE")
     hdr()
     rm_from = len(reserve_mark_rows)
     a, b = write(s.get("rm") or [], in_levy=True, owner_box=True, reserve_col=True)
     rm_mark_rows = reserve_mark_rows[rm_from:]
     rm_tot = tot("Total Repair and Maintenance", a, b)
+    write_actual_after_recoveries("ACTUAL after this year's recoveries (repairs). Already net — do not add it again.", rm_tot, s.get("rm") or [])
 
     def yes_sum(rows) -> str:
         if not rows:
@@ -3453,12 +3478,21 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
         else:
             st.caption("Nothing is ticked, so other income does not change the levy. Tick a line only for this complex.")
     elif key == "recoveries_other":
-        linked = [r for r in st.session_state.sections.get("recoveries_other") or [] if (r.get("claim_against") or "").strip() and float(r.get("yearly") or 0) > 0.5]
+        linked = [r for r in st.session_state.sections.get("recoveries_other") or [] if (r.get("claim_against") or "").strip() and (float(r.get("yearly") or 0) > 0.5 or float(r.get("actual") or 0) > 0.5)]
         if linked:
-            bits = [f"{r.get('desc')} {money(float(r.get('yearly') or 0))} comes off {r.get('claim_against')}" for r in linked]
+            bits = []
+            for r in linked:
+                act = float(r.get("actual") or 0)
+                y = float(r.get("yearly") or 0)
+                bit = r.get("desc") or ""
+                if act > 0.5:
+                    bit += f" actual {money(act)} comes off {r.get('claim_against')} this year"
+                if y > 0.5:
+                    bit += f"; budget {money(y)} comes off the levy" if act > 0.5 else f" budget {money(y)} comes off the levy"
+                bits.append(bit)
             st.caption(" · ".join(bits))
         else:
-            st.caption("Pick the cost each recovery pays, then Save. Until you pick one, it does not change the levy.")
+            st.caption("Pick the cost each recovery pays, then Save. Actual comes off this year. Budgeted yearly comes off the new levy.")
     else:
         paid = [r for r in (st.session_state.sections.get(key) or []) if r.get("reserve_pays") and float(r.get("yearly") or 0) > 0.5]
         extra = ""
@@ -3888,15 +3922,17 @@ On the Excel sheet the same choice is the column **Lowers the levy** (Yes or No)
 ### 6. Recovery income — money that pays a cost
 **Income → Recovery income** is money that pays a cost we already have. It is not added on top of the levy.
 
-Type the amount, then under **Comes off this cost** pick the expense or repair it pays. The cost stays on the books. The recovery comes off that cost, never below R0.
+Type this year's recovery in **Actual**. Pick the cost. That amount comes off that cost's actual. It is already in the net row on the sheet. Do not add it again.
 
-- **Legal fees recovered:** pick **Legal Expense**. If the bill and the recovery are the same, legal adds nothing to the levy.
-- **A repair invoiced to an owner** (a broken window): use **Charged to an owner**, or add a row. Pick the repair line, for example General Building.
-- **Insurance:** either type the payout on the repair line, **or** put the recovery here and pick that repair. Do not do both, or it comes off twice. The app warns you if both are filled in.
+Type next year's recovery in **Budgeted yearly**, if you expect it again. That amount comes off the new levy. If you leave Budgeted yearly at 0, next year's levy is not reduced.
 
-Until you pick a cost, the recovery does not change the levy.
+On the Excel sheet this block is **RECOVERY INCOME**. The cost line keeps the full spend in Actual, so the % stays on the full amount. Under the expenditure total and the repairs total, **ACTUAL after this year's recoveries** is the actual minus those recoveries.
 
-On the Excel sheet this block is **RECOVERY INCOME**. Column **Comes off this cost** names the line, and that line’s yearly formula subtracts the recovery.
+- **Legal fees recovered:** type this year's amount in Actual and pick **Legal Expense**. Type the same amount in Budgeted yearly only if you expect it again next year.
+- **A repair invoiced to an owner** (a broken window): use **Charged to an owner**, or add a row. Pick the repair line. Actual comes off this year. Budgeted yearly comes off the levy only if you type one.
+- **Insurance:** either type the payout on the repair line, **or** put the recovery here and pick that repair. Do not do both, or it comes off twice.
+
+Until you pick a cost, the recovery does not come off anything.
 
 ### 7. Municipal
 On **Municipal**, the city bill and the recovery are separate lines.
