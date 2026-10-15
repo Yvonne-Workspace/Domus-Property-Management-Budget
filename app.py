@@ -106,7 +106,7 @@ def refresh_special(state: dict) -> int:
         if not desc or actual < 0.5 or norm(desc) in seen:
             continue
         seen.add(norm(desc))
-        rec = row(desc, "Spent in 2026. Budgeted yearly stays blank unless this job is also in the 2027 column.")
+        rec = row(desc, "Spent this year. Next year stays blank unless this job is also in next year's column.")
         rec["actual"] = actual
         rec["yearly"] = 0.0
         rec["gl"] = src.get("gl") or ""
@@ -133,12 +133,12 @@ def refresh_special(state: dict) -> int:
             continue
         hit = next((i for i, r in enumerate(rows) if i not in used and _same_job(desc, r.get("desc") or "")), None)
         if hit is None:
-            rec = row(desc, "2027 plan. Nothing was spent on this job in 2026.")
+            rec = row(desc, f"On the {NOW_YEAR + 1} plan. Nothing was spent on this job this year.")
             rec["yearly"] = y2027
             rows.append(rec)
         else:
             rows[hit]["yearly"] = y2027
-            rows[hit]["note"] = "Actual is what was spent in 2026. Budgeted yearly is the 2027 column."
+            rows[hit]["note"] = f"Actual is what was spent this year. Next year is the {NOW_YEAR + 1} column."
             used.add(hit)
     if rows:
         state.setdefault("sections", {})["special"] = rows
@@ -163,7 +163,7 @@ def seed_plan_from_special(state: dict) -> int:
         amt = float(r.get("yearly") or 0)
         if amt < 0.5:
             amt = float(r.get("actual") or 0)
-        if not desc or amt < 0.5 or re.fullmatch(r"special project \d+", norm(desc)):
+        if not desc or amt < 0.5 or re.fullmatch(r"special project \d+|maintenance project \d+", norm(desc)):
             continue
         projects.append({
             "desc": desc,
@@ -257,7 +257,7 @@ def default_sections() -> dict:
         ],
         "tax": [row("Taxation Payable", "Based on taxable investment income. Do not leave this blank if the FS has tax.")],
         "special": [
-            row("Special Project 1"), row("Special Project 2"), row("Special Project 3"),
+            row("Maintenance project 1"), row("Maintenance project 2"), row("Maintenance project 3"),
         ],
         "fixed": [
             row("Prepaid meters estimate (monthly)"),
@@ -1223,7 +1223,7 @@ def sections_from_afs(rows: list) -> dict:
             row("Reserve Fund Contribution", "Not always a separate AFS line. Type the yearly amount trustees want."),
         )
     if not secs["special"]:
-        secs["special"] = [row("Special Project 1"), row("Special Project 2")]
+        secs["special"] = [row("Maintenance project 1"), row("Maintenance project 2")]
     if not secs["tax"]:
         secs["tax"] = [row("Taxation Payable", "Based on taxable investment income.")]
     return secs
@@ -1383,7 +1383,7 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
             ):
                 continue
             nd, ni = norm(src["desc"]), norm(it["desc"])
-            if re.fullmatch(r"special project \d+", ni or ""):
+            if re.fullmatch(r"special project \d+|maintenance project \d+", ni or ""):
                 continue
             sc = 0.0
             if fam and family(it["desc"]) == fam:
@@ -1431,7 +1431,7 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
             sec = "special"
         if fam:
             existing = next((i for i in nxt.get(sec) or [] if family(i["desc"]) == fam), None)
-            if existing and not re.fullmatch(r"special project \d+", norm(existing.get("desc") or "")):
+            if existing and not re.fullmatch(r"special project \d+|maintenance project \d+", norm(existing.get("desc") or "")):
                 existing["actual"] = float(existing["actual"] or 0) + src["actual"]
                 if src.get("gl") and not existing.get("gl"):
                     existing["gl"] = src["gl"]
@@ -1449,7 +1449,7 @@ def match_into(extracted: list, sections: dict) -> tuple[dict, int]:
         added += 1
     real_special = [
         i for i in nxt.get("special") or []
-        if not re.fullmatch(r"special project \d+", norm(i.get("desc") or ""))
+        if not re.fullmatch(r"special project \d+|maintenance project \d+", norm(i.get("desc") or ""))
         and (float(i.get("actual") or 0) > 0.5 or float(i.get("yearly") or 0) > 0.5)
     ]
     if real_special:
@@ -1472,7 +1472,7 @@ def sort_lines(items: list, how: str) -> list:
     return rows
 
 
-def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = False, claims: bool = False, claim_map: dict | None = None, reserve_tick: bool = False, show_gl: bool = False, move: bool = False) -> pd.DataFrame:
+def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = False, claims: bool = False, claim_map: dict | None = None, reserve_tick: bool = False, show_gl: bool = False, move: bool = False, plan: bool = False) -> pd.DataFrame:
     recs = []
     show_extra = rm or recover
     for it in items:
@@ -1487,6 +1487,16 @@ def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = Fal
         if it.get("reserve_pays") and funded < 0.5:
             funded = net
         net = max(0.0, net - min(funded, net))
+        if plan:
+            rec = {
+                "Description": it["desc"],
+                "Actual": actual,
+                "Next year": yearly,
+                "Monthly": yearly / 12.0,
+                "Notes": it.get("note") or "",
+            }
+            recs.append(rec)
+            continue
         rec = {
             "Description": it["desc"],
             "Actual": actual,
@@ -1510,6 +1520,11 @@ def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = Fal
         if move:
             rec["Move to"] = "Stay"
         recs.append(rec)
+    if plan:
+        cols = ["Description", "Actual", "Next year", "Monthly", "Notes"]
+        if not recs:
+            return pd.DataFrame(columns=cols)
+        return pd.DataFrame(recs)[cols]
     cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Notes"]
     if income:
         cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Lowers the ordinary levy", "Notes"]
@@ -1555,7 +1570,7 @@ def cell_num(v) -> float:
         return 0.0
 
 
-def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool = False) -> list:
+def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool = False, plan: bool = False) -> list:
     out = []
     records = edited.to_dict("records")
     for i, rec in enumerate(records):
@@ -1572,8 +1587,15 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             elif i < len(previous):
                 prev = previous[i]
         actual = abs(cell_num(rec.get("Actual")))
-        pct = cell_num(rec.get("% Increase"))
-        yearly = abs(cell_num(rec.get("Budgeted yearly")))
+        if plan:
+            yearly = abs(cell_num(rec.get("Next year")))
+            pct = 0.0
+            edit_mode = "amount"
+        else:
+            yearly = None
+        pct = cell_num(rec.get("% Increase")) if not plan else 0.0
+        if not plan:
+            yearly = abs(cell_num(rec.get("Budgeted yearly")))
         ins = cell_num(rec.get("Insurance payout")) if rm else float(prev.get("insurance") or 0)
         if "Cost recoveries" in rec:
             own = abs(cell_num(rec.get("Cost recoveries")))
@@ -1612,21 +1634,25 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             if prev.get("reserve_pays") and funded < 0.5:
                 funded = yearly
         move_to = str(rec.get("Move to") or "Stay").strip() or "Stay"
-        old_actual = abs(float(prev.get("actual") or 0))
-        old_y = abs(float(prev.get("yearly") or 0))
-        shown_pct = round(pct_from_amounts(old_actual, old_y), 2) if old_actual >= 0.5 else round(float(prev.get("pct") or 0), 2)
-        pct_changed = abs(round(pct, 2) - shown_pct) > 0.05
-        y_changed = abs(yearly - old_y) > 0.5
-        if pct_changed and actual >= 0.5:
-            yearly = round(actual * (1 + pct / 100.0), 2)
-            edit_mode = "pct"
-        elif y_changed:
-            pct = pct_from_amounts(actual, yearly) if actual >= 0.5 else pct
+        if plan:
             edit_mode = "amount"
+            pct = 0.0
         else:
-            edit_mode = prev.get("edit_mode") or "pct"
-            if actual >= 0.5 and edit_mode != "amount":
-                pct = pct_from_amounts(actual, yearly)
+            old_actual = abs(float(prev.get("actual") or 0))
+            old_y = abs(float(prev.get("yearly") or 0))
+            shown_pct = round(pct_from_amounts(old_actual, old_y), 2) if old_actual >= 0.5 else round(float(prev.get("pct") or 0), 2)
+            pct_changed = abs(round(pct, 2) - shown_pct) > 0.05
+            y_changed = abs(yearly - old_y) > 0.5
+            if pct_changed and actual >= 0.5:
+                yearly = round(actual * (1 + pct / 100.0), 2)
+                edit_mode = "pct"
+            elif y_changed:
+                pct = pct_from_amounts(actual, yearly) if actual >= 0.5 else pct
+                edit_mode = "amount"
+            else:
+                edit_mode = prev.get("edit_mode") or "pct"
+                if actual >= 0.5 and edit_mode != "amount":
+                    pct = pct_from_amounts(actual, yearly)
         if "Notes" not in rec or rec.get("Notes") is None or (
             isinstance(rec.get("Notes"), float) and pd.isna(rec.get("Notes"))
         ):
@@ -2724,7 +2750,7 @@ def generate_excel(state: dict) -> BytesIO:
     levy_comp_rows = []
     reserve_mark_rows = []
 
-    def write(items, recovery_as_income=False, in_levy=False, owner_box=False, levy_tick=False, claim_col=False, reserve_col=False, mains=None, l_rows=None):
+    def write(items, recovery_as_income=False, in_levy=False, owner_box=False, levy_tick=False, claim_col=False, reserve_col=False, mains=None, l_rows=None, no_pct=False):
         """Old pack formulas: F = D*(1+E), G = F/12. Recoveries shown as positive income when asked."""
         nonlocal r, reserve_mark_rows
         if not items:
@@ -2778,7 +2804,9 @@ def generate_excel(state: dict) -> BytesIO:
             linked_csos = is_own_scheme_csos(desc) and fam == "csos_exp" and levy_rows.get("csos")
             # % is always a formula. Budgeted Yearly is the number you type, except a few totals.
             pct_f = f"IF(D{r}=0,0,IF(D{r}<0,ABS(F{r})/ABS(D{r})-1,F{r}/D{r}-1))"
-            if fam != "ordinary":
+            if no_pct:
+                ws.cell(r, 5, None)
+            elif fam != "ordinary":
                 fml(ws.cell(r, 5), pct_f)
                 ws.cell(r, 5).number_format = "0.00%"
             else:
@@ -3014,10 +3042,16 @@ def generate_excel(state: dict) -> BytesIO:
     a, b = write(s.get("tax") or [], in_levy=True, reserve_col=True)
     tax_tot = tot("TOTAL TAX", a, b)
     if state.get("special_in_ordinary"):
-        bar("SPECIAL PROJECTS")
-        hdr()
-        a, b = write(s.get("special") or [], in_levy=True)
-        tot("Total Special Projects Expenses", a, b)
+        bar("10 YEAR MAINTENANCE PROJECTS")
+        labs = ["Description", "GL Code", "Spent this year", "", "Next year", "Monthly", "Comments / Notes"]
+        for i, lab in enumerate(labs, 2):
+            c = ws.cell(r, i, lab)
+            fill(c, NAVY)
+            c.font = Font(bold=True, color="FFFFFF", size=10)
+            c.border = THIN
+        r += 1
+        a, b = write(s.get("special") or [], in_levy=True, no_pct=True)
+        tot("Total 10-year maintenance projects", a, b)
     charged = [x for x in (s.get("fixed") or []) if float(x.get("yearly") or 0) > 0.5]
     if charged:
         bar("EQUAL CHARGES BILLED TO OWNERS (same rand each unit)")
@@ -3223,7 +3257,7 @@ def generate_excel(state: dict) -> BytesIO:
     res["B4"] = state.get("fin_year") or ""
     res.row_dimensions[1].height = 58
     brand(res, "H1")
-    res["B6"] = "Same columns as the levy budget. Actual is this year. Budgeted yearly is next year. Yellow cells can be typed. The % is locked. Password to unlock: domus."
+    res["B6"] = "Spent this year is what was paid. Next year is the next column of the 10-year plan. There is no %. A job with no spend and nothing next year stays on the 10-year plan only."
     res["B6"].font = Font(italic=True, size=9, color="666666")
     res["B8"] = "Opening reserve balance"
     inp(res["D8"], float(state.get("reserve_balance") or 0), MONEY)
@@ -3250,22 +3284,43 @@ def generate_excel(state: dict) -> BytesIO:
     if state.get("special_in_ordinary"):
         res["B15"] = "The maintenance plan is ticked into the ordinary levy, so it is not on this sheet."
         res["B15"].font = Font(italic=True, size=9, color="9C0006")
-    for col, lab in enumerate(["Description", "GL Code", "Actual", "%", "Budgeted Yearly", "Monthly", "Comments / Notes"], 2):
+    for col, lab in enumerate(["Description", "GL Code", "Spent this year", "", "Next year", "Monthly", "Comments / Notes"], 2):
         c = res.cell(17, col, lab)
         fill(c, NAVY)
         c.font = Font(bold=True, color="FFFFFF", size=10)
         c.border = THIN
+    res["B16"] = "10 YEAR MAINTENANCE PROJECTS"
+    res["B16"].font = Font(bold=True, size=12, color=NAVY)
     rr = 18
     plan_rows = []
+    pct_rows = []
     if not state.get("special_in_ordinary"):
+        plan_index = {}
         for i, p in enumerate(projects):
-            if not str(p.get("desc") or "").strip():
-                continue
-            src = first_data + i
-            res.cell(rr, 2, f"='10 YMP'!A{src}").border = THIN
+            desc = str(p.get("desc") or "").strip()
+            if desc:
+                plan_index[norm(desc)] = first_data + i
+        shown = [
+            it for it in (s.get("special") or [])
+            if float(it.get("actual") or 0) > 0.5 or float(it.get("yearly") or 0) > 0.5
+        ]
+        for it in shown:
+            desc = it.get("desc") or ""
+            res.cell(rr, 2, desc).border = THIN
             res.cell(rr, 2).font = Font(name="Calibri", size=10)
-            fml(res.cell(rr, 4), f"'10 YMP'!E{src}")
-            fml(res.cell(rr, 6), f"'10 YMP'!F{src}")
+            inp(res.cell(rr, 4), float(it.get("actual") or 0), MONEY)
+            src = plan_index.get(norm(desc))
+            if src is None:
+                for i, p in enumerate(projects):
+                    if _same_job(desc, str(p.get("desc") or "")):
+                        src = first_data + i
+                        break
+            if src:
+                fml(res.cell(rr, 6), f"'10 YMP'!F{src}")
+            else:
+                inp(res.cell(rr, 6), float(it.get("yearly") or 0), MONEY)
+            note = "Spent this year." if float(it.get("actual") or 0) > 0.5 else f"Not done this year. Planned for {NOW_YEAR + 1}."
+            res.cell(rr, 8, note).font = Font(italic=True, size=9, color="1F4E79")
             plan_rows.append(rr)
             rr += 1
     for key in ("expenditure", "rm", "personnel", "tax"):
@@ -3278,15 +3333,17 @@ def generate_excel(state: dict) -> BytesIO:
             inp(res.cell(rr, 6), amt, MONEY)
             res.cell(rr, 8, "Funded by reserve. A part of a levy-sheet line.").font = Font(italic=True, size=9, color="1F4E79")
             plan_rows.append(rr)
+            pct_rows.append(rr)
             rr += 1
     if not plan_rows:
         res.cell(rr, 2, "No reserve expenditure")
         plan_rows = [rr]
         rr += 1
     for n in plan_rows:
-        pctc = res.cell(n, 5)
-        fml(pctc, f"IF(D{n}=0,0,F{n}/D{n}-1)")
-        pctc.number_format = "0.00%"
+        if n in pct_rows:
+            pctc = res.cell(n, 5)
+            fml(pctc, f"IF(D{n}=0,0,F{n}/D{n}-1)")
+            pctc.number_format = "0.00%"
         fml(res.cell(n, 7), f"F{n}/12")
     tot_r = rr
     res.cell(tot_r, 2, "TOTAL RESERVE EXPENDITURE").font = Font(bold=True)
@@ -3811,7 +3868,7 @@ def subs_editor(key: str) -> None:
         st.success("Breakdown saved. It shows under the main line on the sheet and is not added again.")
 
 
-def section_form(key: str, title: str, help_text: str, rm: bool = False, recover: bool = False, income: bool = False, claims: bool = False, reserve_tick: bool = False, reorder: bool = False, move: bool = False):
+def section_form(key: str, title: str, help_text: str, rm: bool = False, recover: bool = False, income: bool = False, claims: bool = False, reserve_tick: bool = False, reorder: bool = False, move: bool = False, plan: bool = False):
     st.subheader(title)
     if help_text:
         st.caption(help_text)
@@ -3828,7 +3885,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
             name = (it.get("claim_against") or "").strip()
             if name and name not in cost_names:
                 cost_names.append(name)
-    df = items_to_df(items, rm, recover, income=income, claims=claims, claim_map=claim_map, reserve_tick=reserve_tick, show_gl=reorder, move=move)
+    df = items_to_df(items, rm, recover, income=income, claims=claims, claim_map=claim_map, reserve_tick=reserve_tick, show_gl=reorder, move=move, plan=plan)
     if reorder:
         c1, c2 = st.columns(2)
         sort_name = c1.button("A to Z", key=f"sort_name_{key}")
@@ -3856,6 +3913,11 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                     "Budgeted yearly",
                     format="%.2f",
                     help="The full bill. Or type the rand amount then Save. We fill in the %.",
+                ),
+                "Next year": st.column_config.NumberColumn(
+                    "Next year",
+                    format="%.2f",
+                    help=f"The {NOW_YEAR + 1} amount on the 10-year plan. It is not a % of this year.",
                 ),
                 "Monthly": st.column_config.NumberColumn("Monthly", format="%.2f", disabled=True, help="Budgeted yearly, after cost recoveries and an insurance payout, minus the rand funded by the reserve. Recovery income does not reduce this."),
                 "Insurance payout": st.column_config.NumberColumn("Insurance payout", format="%.2f"),
@@ -3888,14 +3950,14 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
             disabled=["Monthly"],
         )
     if sort_name or sort_gl:
-        saved_rows = place_moved(key, save_editor(edited, items, rm, municipal=(key == "municipal")))
+        saved_rows = place_moved(key, save_editor(edited, items, rm, municipal=(key == "municipal"), plan=plan))
         st.session_state.sections[key] = sort_lines(saved_rows, "gl" if sort_gl else "name")
         st.session_state[f"_nonce_{key}"] = nonce + 1
         apply_levy_lines(st.session_state)
         st.rerun()
     saved = st.button("Save this section", type="primary", key=f"save_{key}")
     if saved:
-        st.session_state.sections[key] = place_moved(key, save_editor(edited, items, rm, municipal=(key == "municipal")))
+        st.session_state.sections[key] = place_moved(key, save_editor(edited, items, rm, municipal=(key == "municipal"), plan=plan))
         st.session_state[f"_nonce_{key}"] = nonce + 1
         if key == "levy":
             for r in st.session_state.sections["levy"]:
@@ -3903,7 +3965,10 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                     st.session_state["_pending_insurance_bill"] = float(r["yearly"])
                     break
         apply_levy_lines(st.session_state)
-        st.success("Saved. A new % sets Budgeted yearly = Actual × (1 + %). A new yearly amount sets the %.")
+        if plan:
+            st.success(f"Saved. Actual is what was spent this year. Next year is the {NOW_YEAR + 1} plan. There is no %.")
+        else:
+            st.success("Saved. A new % sets Budgeted yearly = Actual × (1 + %). A new yearly amount sets the %.")
         st.rerun()
     if key == "municipal":
         g, rec = municipal_gross_and_rec(st.session_state)
@@ -4015,7 +4080,7 @@ def main():
         )
         st.write(
             "**Ordinary = net municipal + expenditure + R&M + personnel + tax − income you ticked** "
-            "(and special projects only if that box is ticked)."
+            "(and the 10-year projects only if that box is ticked)."
         )
         st.write(
             "**Left out of ordinary:** estate pass-through, CSOS (own PQ column), "
@@ -4095,7 +4160,7 @@ def main():
                     source = "financial statement lines" if st.session_state.get("afs_sections") else "standard template"
                     st.session_state.msg = (
                         f"Loaded {len(rows)} WeConnectU lines onto the {source}. Extra lines: {added}. "
-                        "Special Projects Actual is the 2026 spend. Type or paste the 10-year plan for the 2027 budget."
+                        "10-year project Actual is this year's spend. Type or paste the 10-year plan for next year."
                     )
                     apply_levy_lines(st.session_state)
                     st.rerun()
@@ -4249,9 +4314,9 @@ def main():
         else:
             st.caption("Owners see Levies and Reserve as two amounts. The contribution is not inside the ordinary levy.")
         st.session_state.special_in_ordinary = st.checkbox(
-            "Add Special Projects into ordinary levies",
+            "Pay the 10-year projects from the ordinary levy",
             value=st.session_state.special_in_ordinary,
-            help="Tick only if special work is paid from levies, not from the reserve fund.",
+            help="Leave this off. The reserve pays these jobs. Tick it only when this complex pays the plan from the levy.",
         )
         st.header("Second levy (master estate)")
         st.caption("Use this when owners also pay another estate / HOA.")
@@ -4292,7 +4357,7 @@ def main():
 
     tabs = st.tabs([
         "How it works", "Income", "Municipal", "Expenditure",
-        "Repair & Maintenance", "Personnel", "Tax", "Special",
+        "Repair & Maintenance", "Personnel", "Tax", "10-year projects",
         "PQ / Levies", "10-year plan", "For the meeting", "Download",
     ])
 
@@ -4334,7 +4399,7 @@ Ordinary levies are **not** last year’s levy plus a %.
 
 **Ordinary = net municipal + expenditure + repairs and maintenance + personnel + tax − only the other income you tick**
 
-Special projects are added only if you tick **Add Special Projects into ordinary levies**.
+The 10-year projects are added only if you tick **Pay the 10-year projects from the ordinary levy**.
 
 The **% on Levies received** is the result of that sum. Do not type over it. It will not stick.
 
@@ -4456,10 +4521,12 @@ Owners do not pay SARS every month. The monthly column is only so the levy can f
 
 If the estimate is R0, nothing is paid. If tax is payable, SARS usually wants provisional tax: one payment six months into the year, and one at year-end. A top-up can be due a few months after year-end. A February year-end is often 31 August, 28 February, and a top-up by 30 September if needed. The return is filed after year-end. Confirm the dates and the amount with the auditor.
 
-### 15. Personnel and special projects
+### 15. Personnel and 10-year projects
 **Personnel** is salaries, casuals, PAYE / UIF, travel, bonuses and the like.
 
-**Special Projects** do not show on the levy sheet. They are the reserve fund's costs. Tick **Paid from the ordinary levy** only when this complex pays the plan from the levy. Then they move onto the levy sheet and off the reserve sheet.
+**10 Year Maintenance Projects** do not show on the levy sheet. They are the reserve fund's costs. **Actual** is what was spent this year. **Next year** is the next column of the 10-year plan. There is no %. Tick **Pay the 10-year projects from the ordinary levy** only when this complex pays the plan from the levy. Then they move onto the levy sheet and off the reserve sheet.
+
+A job you did not do, and that has no amount next year, is not on this list. It stays on the 10-year plan if a later year still has it.
 
 A cost that is not on the plan can still be paid by the reserve. Type the rand in **Funded by reserve**. A part is allowed. Do not also leave that same rand in the levy.
 
@@ -4476,19 +4543,20 @@ The schedule uses the **approved** ordinary levy once the meeting has set one. U
 
 **Paid last year** and **Will pay this year** are extra columns on this tab and on the Excel PQ sheet. They are the ordinary levy only. Paid last year is the sidebar amount × the unit’s ratio. Will pay this year is the new ordinary levy × the same ratio. They are not added into the Total, and they do not change any budget formula.
 
-### 17. 10-year plan and Special Projects
+### 17. 10-year plan and the projects
 Do these steps in this order.
 
 1. On the left, choose the WeConnectU **Actual vs Budget** file and click **Load Excel**.
-2. Open **Special Projects**. Every line under the Special Projects heading must be there. **Actual** is what was spent in 2026. **Budgeted yearly** is still blank. For Key West the Actual total is **R276,164.42**.
+2. Open **10-year projects**. Every maintenance job that was spent must be there. **Actual** is what was spent this year. **Next year** is still blank. There is no %.
 3. Open **10-year plan**. In Excel, copy from the row that says **2025  2026  2027** down to the last project. Do not copy only the bottom. Do not copy the total row. Paste it into the box and click **Paste into plan**. The projects must appear in the table. If the table stays empty, the year headings were not in the copy.
 4. To remove a project, click the trash can on that row, then click **Save 10-year plan**. It stays deleted.
-5. Open **Special Projects**. Actual is the 2026 spend. Budgeted yearly is the **2027** column.
-   - Done in 2026 and also on the 2027 plan: both Actual and Budgeted yearly are filled.
-   - Done in 2026 only: Actual is filled, Budgeted yearly is 0. It is not billed again.
-   - New in 2027 only: Actual is 0, Budgeted yearly is the 2027 amount.
-6. Change a 2027 amount on the **10-year plan**, then Save. Do not type it on the Special Projects table. The table follows the plan.
-7. Leave **Add Special Projects into ordinary levies** unticked. The reserve pays these jobs.
+5. Open **10-year projects** again.
+   - Done this year and also planned next year: Actual and Next year are both filled.
+   - Done this year only: Actual is filled, Next year is blank. It is not repeated.
+   - Not done this year, but planned next year: Actual is 0, Next year is the plan amount.
+   - Not done, and nothing next year: it is not on this list. A later year on the 10-year plan keeps it.
+6. Change a next-year amount on the **10-year plan**, then Save. Do not type it on the projects table. The table follows the plan.
+7. Leave **Pay the 10-year projects from the ordinary levy** unticked. The reserve pays these jobs.
 
 **First cycle** is the year a job starts, for example 2025. Leave it blank if the rands are already under the years.
 
@@ -4881,10 +4949,16 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         section_form("tax", "Income Tax", "Other income only. Levies are not taxed. Leave the box above ticked unless the auditor gave you a different figure.", reserve_tick=True, move=True)
 
     with tabs[7]:
-        section_form("special", "Special Projects", "Do not type the budget here. Load the Actual vs Budget first, then paste the 10-year plan and Save. Actual is 2026 spend. Budgeted yearly is the 2027 column. Leave the sidebar tick off if the reserve pays these jobs.")
+        section_form(
+            "special",
+            "10 Year Maintenance Projects",
+            f"Actual is what was spent this year. Next year is the {NOW_YEAR + 1} column of the 10-year plan. There is no %. "
+            "A job with no spend and nothing next year is not on this list. Leave the sidebar tick off if the reserve pays these jobs.",
+            plan=True,
+        )
         act_sum = sum(float(r.get("actual") or 0) for r in (st.session_state.sections.get("special") or []))
         yr_sum = sum(float(r.get("yearly") or 0) for r in (st.session_state.sections.get("special") or []))
-        st.caption(f"Actual total (spent in 2026) {money(act_sum)}. Budgeted yearly total (2027 plan) {money(yr_sum)}.")
+        st.caption(f"Spent this year {money(act_sum)}. Next year ({NOW_YEAR + 1}) {money(yr_sum)}.")
 
     with tabs[8]:
         st.subheader("PQ / levy schedule")
@@ -4969,7 +5043,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             "First cycle is the year the job starts, for example 2025. Leave it blank if the rands are already in the year columns. "
             "Frequency is not a year. 10 means every 10 years. 3 means every 3 years. Leave it blank if the years are already filled. "
             "Current estimate is the whole project cost, if you have one. It is not 2026 and not 2027. "
-            f"The {NOW_YEAR + 1} column is the budget. It goes to Special Projects as Budgeted yearly. Actual stays the {NOW_YEAR} spend."
+            f"The {NOW_YEAR + 1} column is next year. It goes to 10 Year Maintenance Projects. Actual stays what was spent this year. There is no %."
         )
         ymp_up = st.file_uploader("Upload 10-year plan Excel (or last year’s budget workbook)", type=["xlsx", "xls"], key="ymp_xlsx")
         if ymp_up and st.button("Load 10-year plan"):
@@ -4982,7 +5056,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                     straighten_plan(st.session_state)
                     n = sync_special_from_plan(st.session_state)
                     st.session_state["ymp_nonce"] = int(st.session_state.get("ymp_nonce") or 0) + 1
-                    st.success(f"Loaded {len(st.session_state.ymp)} projects. The 2027 column is on Special Projects ({n} lines).")
+                    st.success(f"Loaded {len(st.session_state.ymp)} projects. Next year is on 10 Year Maintenance Projects ({n} lines).")
                     st.rerun()
                 else:
                     st.error("Could not find the year headings 2025, 2026, 2027 on that sheet.")
@@ -5004,7 +5078,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                     straighten_plan(st.session_state)
                     n = sync_special_from_plan(st.session_state)
                     st.session_state["ymp_nonce"] = int(st.session_state.get("ymp_nonce") or 0) + 1
-                    st.success(f"Pasted {len(good)} projects. Open Special Projects to see Actual and the 2027 budget ({n} lines).")
+                    st.success(f"Pasted {len(good)} projects. Open 10-year projects to see what was spent and next year ({n} lines).")
                     st.rerun()
                 else:
                     st.error(
@@ -5055,7 +5129,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             straighten_plan(st.session_state)
             n = sync_special_from_plan(st.session_state)
             st.session_state["ymp_nonce"] = nonce + 1
-            st.success(f"Saved {len(kept)} projects. The 2027 column is on Special Projects ({n} lines). Deleted rows stay deleted.")
+            st.success(f"Saved {len(kept)} projects. Next year is on 10 Year Maintenance Projects ({n} lines). Deleted rows stay deleted.")
             st.rerun()
 
     with tabs[10]:
