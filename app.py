@@ -127,14 +127,19 @@ def refresh_special(state: dict) -> int:
         if this_year < 0.5 and nxt < 0.5:
             continue
         src = spend_for(desc) or {}
-        budget = float(src.get("budget") or src.get("this_budget") or 0)
+        old = existing.get(norm(desc)) or {}
+        budget = float(src.get("budget") or src.get("this_budget") or old.get("this_budget") or 0)
         if budget < 0.5:
             budget = this_year
-        rec = row(desc, f"2026 is this year. {NOW_YEAR + 1} is the budget year. A later year stays on the plan only.")
-        rec["actual"] = float(src.get("actual") or 0)
+        auto = f"2026 is this year. {NOW_YEAR + 1} is the budget year. A later year stays on the plan only."
+        note = str(old.get("note") or "").strip()
+        if not note or note == auto:
+            note = str(p.get("note") or "").strip() or auto
+        rec = row(desc, note)
+        rec["actual"] = float(src.get("actual") or old.get("actual") or 0)
         rec["this_budget"] = budget
         rec["yearly"] = nxt
-        rec["gl"] = src.get("gl") or ""
+        rec["gl"] = src.get("gl") or old.get("gl") or ""
         rows.append(rec)
     have = {norm(r.get("desc") or "") for r in rows}
     for old in existing.values():
@@ -4077,10 +4082,11 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                         "first_cycle": "",
                         "freq": "",
                         "estimate": 0.0,
-                        "note": "Added on 10-year projects",
+                        "note": r.get("note") or "Added on 10-year projects",
                     })
                 else:
                     hit["years"] = years
+                    hit["note"] = r.get("note") or hit.get("note") or ""
         apply_levy_lines(st.session_state)
         if plan:
             st.success(f"Saved. Actual is what was spent this year. Next year is the {NOW_YEAR + 1} plan. There is no %.")
@@ -4676,7 +4682,7 @@ Do these steps in this order.
    - Done this year only: Actual is filled, Next year is blank. It is not repeated.
    - Not done this year, but planned next year: Actual is 0, Next year is the plan amount.
    - **2026** shows as Budgeted this year. **2027** shows as Next year. A later year does not come onto this tab.
-6. You can type a new project on **10-year projects** and Save. You can also change **Next year** there and Save. It is written back to the plan.
+6. You can type a new project on **10-year projects** and Save. You can change **Next year** and the **note** there and Save. Both are kept.
 7. Leave **Pay the 10-year projects from the ordinary levy** unticked. The reserve pays these jobs.
 
 **First cycle** is the year a job starts, for example 2025. Leave it blank if the rands are already under the years.
