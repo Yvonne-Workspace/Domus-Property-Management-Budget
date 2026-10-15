@@ -1728,50 +1728,67 @@ def parse_ymp_paste(text: str, start_year: int | None = None) -> list:
 
 
 def parse_ymp_sheet(df, start_year: int | None = None) -> list:
-    """Read a 10 YMP sheet. Calendar headers (2025, 2026, …) are aligned so Year 1 = this budget year (2026)."""
+    """Read a 10-year plan as it stands. Do not invent a total or a current estimate."""
     start_year = int(start_year or NOW_YEAR)
     header_row = None
-    year_cols = []  # column indexes in Year1..Year10 order (already aligned)
-    cal_pairs = []  # (col, calendar_year)
-    for i in range(min(12, len(df))):
+    year_cols = []
+    cal_pairs = []
+    for i in range(len(df)):
         raw = [df.iat[i, j] for j in range(df.shape[1])]
-        labels = [str(v).strip().lower() for v in raw]
-        ylabels = [j for j, v in enumerate(labels) if re.match(r"^(year|tear)\s*\d+", v) or re.match(r"^y\d+$", v)]
         cals = []
         for j, v in enumerate(raw):
-            s = str(v).strip().replace(".0", "")
-            if re.fullmatch(r"20[2-4]\d", s):
-                cals.append((j, int(s)))
-        if len(cals) >= 8:
+            year = _cell_year(v)
+            if year:
+                cals.append((j, year))
+        if len(cals) >= 6 and (header_row is None or len(cals) > len(cal_pairs)):
             header_row = i
             cal_pairs = cals
-            by_year = {yr: col for col, yr in cals}
-            year_cols = [by_year.get(start_year + k) for k in range(10)]
-            break
-        if len(ylabels) >= 8:
-            header_row, year_cols = i, ylabels[:10]
-            break
+    if cal_pairs:
+        by_year = {}
+        for col, yr in cal_pairs:
+            by_year.setdefault(yr, col)
+        year_cols = [by_year.get(start_year + k) for k in range(10)]
+    first_year_col = min((c for c in year_cols if c is not None), default=None)
+    estimate_col = first_col = freq_col = None
+    if header_row is not None:
+        for extra in range(0, 3):
+            row_i = header_row + extra
+            if row_i >= len(df):
+                break
+            stop = first_year_col if first_year_col is not None else df.shape[1]
+            for j in range(stop):
+                label = str(df.iat[row_i, j] or "").strip().lower()
+                if not label:
+                    continue
+                if estimate_col is None and ("estimate" in label or label == "current"):
+                    estimate_col = j
+                if freq_col is None and "freq" in label:
+                    freq_col = j
+                if first_col is None and ("first" in label or "cycle" in label):
+                    first_col = j
     projects = []
     start = (header_row + 1) if header_row is not None else 0
     for r in range(start, len(df)):
         cells = [df.iat[r, j] if j < df.shape[1] else None for j in range(df.shape[1])]
-        desc = ""
-        for v in cells[:6]:
-            s = str(v or "").strip()
+        texts = []
+        limit = first_year_col if first_year_col is not None else min(6, len(cells))
+        for j in range(limit):
+            s = str(cells[j] or "").strip()
             if not s or s.lower() in ("nan", "none"):
                 continue
-            if num(s) is not None and not re.search(r"[A-Za-z]", s):
+            if _cell_year(cells[j]) or (num(s) is not None and not re.search(r"[A-Za-z]", s)):
                 continue
-            desc = s
-            break
-        if not desc or re.match(
-            r"^(total|planned maintenance|project|projects|first|cycle|frequency|current|estimate|"
-            r"year\s*\d+|tear\s*\d+|10 year|body corporate)$",
-            desc,
-            re.I,
-        ):
+            texts.append(s)
+        if not texts:
+            for v in cells:
+                s = str(v or "").strip()
+                if s and re.search(r"[A-Za-z]", s) and num(s) is None:
+                    texts.append(s)
+                    break
+        if not texts:
             continue
-        if re.search(r"maintenance plan|body corporate", desc, re.I) and not re.search(r"paint|roof|door|window|valuation|lift|pool|fence", desc, re.I):
+        desc = " — ".join(dict.fromkeys(texts))
+        if all(_plan_header_word(part) for part in texts):
             continue
         if year_cols:
             years = []
@@ -1781,50 +1798,43 @@ def parse_ymp_sheet(df, start_year: int | None = None) -> list:
                 else:
                     years.append(float(num(cells[c]) or 0))
             years = (years + [0.0] * 10)[:10]
-            skip = {c for c in year_cols if c is not None}
-            skip |= {col for col, yr in cal_pairs if yr < start_year or yr >= start_year + 10}
-            meta = []
-            for j, v in enumerate(cells):
-                if j in skip:
-                    continue
-                n = num(v)
-                if n is not None:
-                    meta.append(n)
-            first = int(meta[0]) if meta and 2020 <= meta[0] <= 2040 else ""
-            freq = int(meta[1]) if len(meta) > 1 and 1 <= meta[1] <= 15 else ""
-            est = float(meta[2]) if len(meta) > 2 else (float(meta[0]) if meta and not first else 0.0)
         else:
             nums = [num(v) for v in cells]
             nums = [x for x in nums if x is not None]
             years = ymp_years_from_nums(nums, start_year)
-            first, freq, est = "", "", 0.0
-            if nums and 2020 <= nums[0] <= 2040:
-                first = int(nums[0])
-                if len(nums) > 1 and 1 <= nums[1] <= 20:
-                    freq = int(nums[1])
-                    if len(nums) > 2 and nums[2] >= 50:
-                        est = float(nums[2])
-            elif nums:
-                est = float(nums[0]) if nums[0] >= 50 else 0.0
-        if not desc:
-            continue
+        est = 0.0
+        if estimate_col is not None and estimate_col < len(cells):
+            est = float(num(cells[estimate_col]) or 0)
+        first = ""
+        freq = ""
+        if first_col is not None and first_col < len(cells) and num(cells[first_col]) is not None:
+            first = int(num(cells[first_col]))
+        elif any(2020 <= (num(cells[j]) or 0) <= 2045 for j in range(limit)):
+            for j in range(limit):
+                n = num(cells[j])
+                if n is not None and 2020 <= n <= 2045:
+                    first = int(n)
+                    break
+        if freq_col is not None and freq_col < len(cells) and num(cells[freq_col]) is not None:
+            freq = int(num(cells[freq_col]))
         note = ""
-        used_cols = {c for c in (year_cols or []) if c is not None}
+        used = {c for c in year_cols if c is not None}
+        for col in (estimate_col, first_col, freq_col):
+            if col is not None:
+                used.add(col)
         for j, v in enumerate(cells):
-            if j in used_cols:
+            if j < limit or j in used:
                 continue
             s = str(v or "").strip()
-            if not s or s.lower() in ("nan", "none") or s == desc:
+            if not s or s.lower() in ("nan", "none") or s in texts:
                 continue
             if num(s) is not None and not re.search(r"[A-Za-z]", s):
                 continue
-            if re.search(r"[A-Za-z]", s) and len(s) > 2:
+            if re.search(r"[A-Za-z]", s):
                 note = s
-        if not any(abs(y) > 0.5 for y in years) and not est and not first and not note and len(desc) < 4:
-            continue
         projects.append({
             "desc": desc,
-            "years": years,
+            "years": (list(years) + [0.0] * 10)[:10],
             "first_cycle": first,
             "freq": freq,
             "estimate": est,
@@ -1833,19 +1843,42 @@ def parse_ymp_sheet(df, start_year: int | None = None) -> list:
     return projects
 
 
+def _plan_header_word(text: str) -> bool:
+    return bool(re.fullmatch(
+        r"(projects?|first(\s*cycle)?|frequency(\s*of\s*cycles)?|current(\s*estimate)?|estimate|"
+        r"year\s*\d+|tear\s*\d+|y\d+|notes?)",
+        str(text or "").strip(),
+        re.I,
+    ))
+
+
+def _cell_year(v):
+    """2026, a date, or 2026/2027. Nothing else."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    if hasattr(v, "year") and not isinstance(v, (int, float, str)):
+        try:
+            y = int(v.year)
+            if 2020 <= y <= 2045:
+                return y
+        except Exception:
+            pass
+    s = str(v).strip().replace(".0", "")
+    m = re.match(r"^(20[2-4]\d)", s)
+    if m and not re.search(r"[A-Za-z]", s):
+        return int(m.group(1))
+    return None
+
+
 def plan_start_year(state: dict) -> int:
     """The plan's first column is this calendar year, 2026. Not Current Estimate, and not next year."""
     return NOW_YEAR
 
 
 def straighten_plan(state: dict) -> None:
-    """Do not treat Current Estimate as a year. Only clear it when it is an exact copy of the 2026 figure."""
+    """Keep the 10 year columns in order. Do not invent or clear a current estimate."""
     for p in state.get("ymp") or []:
-        years = (list(p.get("years") or []) + [0.0] * 10)[:10]
-        est = float(p.get("estimate") or 0)
-        if est > 0.5 and abs(est - float(years[0] or 0)) < 0.5:
-            p["estimate"] = 0.0
-        p["years"] = years
+        p["years"] = (list(p.get("years") or []) + [0.0] * 10)[:10]
 
 
 def _rgb(h: str) -> RGBColor:
@@ -3261,8 +3294,9 @@ def generate_excel(state: dict) -> BytesIO:
         ymp.cell(rr, 2, fc if fc != "" else None)
         fr = p.get("freq") or ""
         ymp.cell(rr, 3, fr if fr != "" else None)
-        est = float(p.get("estimate") or 0) or float(years[0] or 0)
-        inp(ymp.cell(rr, 4), est, MONEY)
+        est = float(p.get("estimate") or 0)
+        if est:
+            inp(ymp.cell(rr, 4), est, MONEY)
         for y in range(10):
             val = float(years[y] if y < len(years) else 0)
             inp(ymp.cell(rr, 5 + y), val, MONEY)
@@ -3270,12 +3304,6 @@ def generate_excel(state: dict) -> BytesIO:
                 ymp.cell(rr, 5 + y).font = Font(bold=True, color="9C0006")
         note_cell = ymp.cell(rr, 15, p.get("note") or "")
         note_cell.alignment = Alignment(wrap_text=True, vertical="center")
-    last = first_data + len(projects) - 1
-    tot = last + 1
-    ymp.cell(tot, 1, "TOTAL").font = Font(bold=True)
-    for col in range(5, 15):
-        letter = get_column_letter(col)
-        fml(ymp.cell(tot, col), f"SUM({letter}{first_data}:{letter}{last})", TOTAL)
 
     res = wb.create_sheet("RESERVE", 1)
     for i, w in enumerate([3, 46, 14, 16, 12, 18, 14, 42], 1):
@@ -4618,7 +4646,7 @@ Do these steps in this order.
 
 1. On the left, choose the WeConnectU **Actual vs Budget** file and click **Load Excel**.
 2. Open **10-year projects**. The GL code comes from WeConnectU. **Budgeted this year** is what was allowed. **Actual** is what was spent. **Over / under** is Actual minus Budgeted. Above zero means we overspent. **Next year** is still blank until the plan is pasted. There is no %.
-3. Open **10-year plan**. In Excel, copy from the row that says **2025  2026  2027** down to the last project. Do not copy only the bottom. Do not copy the total row. Paste it into the box and click **Paste into plan**. The projects must appear in the table. If the table stays empty, the year headings were not in the copy.
+3. Open **10-year plan**. Upload the Excel, or copy from the row that says **2025  2026  2027** down to the last project and paste it. Every project line comes through, including a line with no amount yet. The app does not add a total, and it does not fill Current estimate unless that column is on your sheet.
 4. To remove a project, click the trash can on that row, then click **Save 10-year plan**. It stays deleted. Click a project name to read the full words. Scroll right for the later years. A note that sat to the right of the years is in the **Note** column.
 5. Open **10-year projects** again.
    - Done this year and also planned next year: Actual and Next year are both filled.
@@ -5161,9 +5189,12 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         if ymp_up and st.button("Load 10-year plan"):
             try:
                 xl = pd.ExcelFile(ymp_up)
-                sheet = next((n for n in xl.sheet_names if re.search(r"ymp|10|maintenance", n, re.I)), xl.sheet_names[-1])
-                parsed = parse_ymp_sheet(pd.read_excel(xl, sheet_name=sheet, header=None), plan_start_year(st.session_state))
-                if parsed and any(any(abs(float(y or 0)) > 0.5 for y in (p.get("years") or [])) for p in parsed):
+                parsed = []
+                for sheet in xl.sheet_names:
+                    trial = parse_ymp_sheet(pd.read_excel(xl, sheet_name=sheet, header=None), plan_start_year(st.session_state))
+                    if len(trial) > len(parsed):
+                        parsed = trial
+                if parsed:
                     st.session_state.ymp = [p for p in parsed if (p.get("desc") or "").strip()]
                     straighten_plan(st.session_state)
                     n = sync_special_from_plan(st.session_state)
