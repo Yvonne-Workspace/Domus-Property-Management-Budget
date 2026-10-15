@@ -4004,6 +4004,12 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                 if is_ins_bill_line(r.get("desc") or "") and float(r.get("yearly") or 0) > 0.5:
                     st.session_state["_pending_insurance_bill"] = float(r["yearly"])
                     break
+        if key == "tax":
+            typed = float((st.session_state.sections.get("tax") or [{}])[0].get("yearly") or 0)
+            if abs(typed - calculated_tax(st.session_state)) > 0.5:
+                st.session_state["_unlock_tax"] = True
+                st.session_state[f"_nonce_{key}"] = nonce + 1
+                st.rerun()
         apply_levy_lines(st.session_state)
         if plan:
             st.success(f"Saved. Actual is what was spent this year. Next year is the {NOW_YEAR + 1} plan. There is no %.")
@@ -4064,6 +4070,8 @@ def main():
 
     straighten_plan(st.session_state)
     refresh_special(st.session_state)
+    if st.session_state.pop("_unlock_tax", False):
+        st.session_state.tax_auto = False
     apply_levy_lines(st.session_state)
     s = st.session_state.sections
     ord_amt = ordinary_total(st.session_state)
@@ -4555,7 +4563,9 @@ Untick it only if you must type a different CSOS figure yourself.
 ### 14. Income tax
 Levies are not taxed. Interest, investment income and rent can be.
 
-On the **Tax** tab, leave **Calculate the tax** ticked. It uses other income only (interest, investment income, rent, penalties). Levies are not included. The first R50,000 is free. The rest is × 27%. Budgeted yearly still fills in when Actual tax is 0. Untick it and type the auditor’s figure when a complex is different. That tax is a cost inside the ordinary levy.
+On the **Tax** tab, **Calculate the tax from other income** works out the tax: other income only, first R50,000 free, then 27%. Levies are not included.
+
+Untick that box when you cannot budget the income, but you still have to budget the tax. Type **Tax to budget for the year**, then **Use this tax amount**. Example: tax paid this year was R46,000, and next year you budget R46,000 even though the income is not budgeted. That amount goes into the levy. Tick the box again only when the tax must follow the income.
 
 Owners do not pay SARS every month. The monthly column is only so the levy can fund one yearly amount.
 
@@ -4981,12 +4991,49 @@ This is a budget estimate (section 10(1)(e)), not a SARS assessment. If the audi
 Confirm the dates and the amount with the auditor or tax practitioner.
             """
         )
-        st.session_state.tax_auto = st.checkbox(
-            "Calculate the tax (first R50,000 of other income free, then 27%)",
-            value=bool(st.session_state.get("tax_auto", True)),
-            help="On = Budgeted yearly follows the estimate, even when Actual tax is 0. Off = type the auditor’s figure and Save.",
+        st.checkbox(
+            "Calculate the tax from other income",
+            key="tax_auto",
+            help="Tick only when the tax must follow other income. Untick it to type the tax yourself.",
         )
-        section_form("tax", "Income Tax", "Other income only. Levies are not taxed. Leave the box above ticked unless the auditor gave you a different figure.", reserve_tick=True, move=True)
+        if st.session_state.tax_auto:
+            st.caption(f"Budgeted yearly is the estimate, {money(tax_est)}. Untick the box to type your own tax. Use that when the income is not budgeted, but the tax still has to be.")
+        else:
+            current_tax = 0.0
+            for r in st.session_state.sections.get("tax") or []:
+                current_tax = float(r.get("yearly") or 0)
+                break
+            if "tax_typed" not in st.session_state:
+                st.session_state.tax_typed = current_tax
+            st.number_input(
+                "Tax to budget for the year",
+                min_value=0.0,
+                step=100.0,
+                key="tax_typed",
+                help="The tax you want in the levy. It does not need other income.",
+            )
+            st.caption("Type the tax here, then Use this tax amount. Actual can stay what was paid this year, for example R46,000.")
+            if st.button("Use this tax amount"):
+                amount = float(st.session_state.tax_typed or 0)
+                lines = st.session_state.sections.get("tax") or []
+                if not lines:
+                    lines = [row("Income tax", "Typed tax budget. Not calculated from income.")]
+                    st.session_state.sections["tax"] = lines
+                lines[0]["yearly"] = amount
+                a = float(lines[0].get("actual") or 0)
+                lines[0]["pct"] = 0.0 if a < 0.5 else (amount / a) * 100.0 - 100.0
+                lines[0]["note"] = "Typed tax budget. Not calculated from other income."
+                st.session_state["_nonce_tax"] = int(st.session_state.get("_nonce_tax") or 0) + 1
+                apply_levy_lines(st.session_state)
+                st.success(f"Tax budget is {money(amount)}. It is in the levy.")
+                st.rerun()
+        section_form(
+            "tax",
+            "Income Tax",
+            "Other income only when the box above is ticked. Untick it and type Tax to budget when you must budget the tax without budgeting the income.",
+            reserve_tick=True,
+            move=True,
+        )
 
     with tabs[7]:
         section_form(
