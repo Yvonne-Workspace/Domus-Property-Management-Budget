@@ -1820,6 +1820,229 @@ def _typical_share(state: dict):
     return share, "a full erf"
 
 
+def deck_rands(n: float) -> str:
+    """Slide money: R5,031,790. No cents."""
+    return f"R{abs(float(n or 0)):,.0f}"
+
+
+def _section_yearly(state: dict, key: str) -> float:
+    return sum(abs(float(r.get("yearly") or 0)) for r in (state.get("sections") or {}).get(key) or [])
+
+
+def _cost_matching(state: dict, words: tuple) -> float:
+    total = 0.0
+    for key in ("expenditure", "rm", "personnel"):
+        for r in (state.get("sections") or {}).get(key) or []:
+            d = (r.get("desc") or "").lower()
+            if any(w in d for w in words):
+                total += cost_for_levy(state, r)
+    return total
+
+
+def _plan_names(state: dict, indexes: list, skip: set | None = None) -> tuple[str, set]:
+    names = []
+    for p in state.get("ymp") or []:
+        years = list(p.get("years") or []) + [0.0] * 10
+        desc = (p.get("desc") or "").strip()
+        if not desc or (skip and desc in skip):
+            continue
+        if any(float(years[i] or 0) > 1 for i in indexes if i < len(years)):
+            names.append(desc)
+    if not names:
+        return "Nothing listed yet", set()
+    text = ", ".join(names[:4])
+    if len(names) > 4:
+        text += " and more"
+    return text, set(names)
+
+
+def presentation_data(state: dict) -> dict:
+    """Numbers for the owner deck. The template's words and pictures stay as they are."""
+    apply_levy_lines(state)
+    ordinary = float(approved_ordinary(state) or 0)
+    share, _who = _typical_share(state)
+    units = [u for u in (state.get("pq") or []) if float(u.get("PQ") or 0) > 1e-8]
+    n_units = len(units)
+    blurbs = {
+        "levies": "Day-to-day running of the complex",
+        "csos": "A small legal amount we pay over",
+        "reserve": "The savings wallet for big repairs",
+        "insurance": "Insurance for the buildings, on the invoice",
+    }
+    bill_lines = []
+    for name, yearly, split in pq_bill_lines(state):
+        if abs(float(yearly or 0)) < 0.5:
+            continue
+        if split == "equal":
+            monthly = float(yearly) / 12 / max(n_units, 1)
+        elif share:
+            monthly = float(yearly) / 12 * share
+        else:
+            monthly = float(yearly) / 12
+        low = (name or "").lower()
+        if low in blurbs or low == "reserve fund":
+            desc = blurbs["reserve"] if "reserve" in low else blurbs.get(low, "Part of this home's bill")
+        elif "insurance" in low:
+            desc = blurbs["insurance"]
+        elif "boat" in low:
+            desc = "Running of " + name.replace("Levy -", "").replace("Levy", "").strip().lower()
+        elif split == "equal":
+            desc = "The same amount for every home"
+        else:
+            desc = "An extra levy for this complex"
+        bill_lines.append({"name": name, "description": desc, "amount": deck_rands(monthly)})
+    if not bill_lines:
+        bill_lines.append({
+            "name": "Levies",
+            "description": "Day-to-day running of the complex",
+            "amount": deck_rands(ordinary / 12 * (share or 1)),
+        })
+    monthly_total = 0.0
+    for name, yearly, split in pq_bill_lines(state):
+        if abs(float(yearly or 0)) < 0.5:
+            continue
+        if split == "equal":
+            monthly_total += float(yearly) / 12 / max(n_units, 1)
+        elif share:
+            monthly_total += float(yearly) / 12 * share
+        else:
+            monthly_total += float(yearly) / 12
+    if monthly_total < 0.5:
+        monthly_total = ordinary / 12 * (share or 1)
+
+    security = _cost_matching(state, ("security", "guard", "access control"))
+    gardens = _cost_matching(state, ("garden", "landscap", "horticult"))
+    city = municipal_net(state)
+    tax = sum(cost_for_levy(state, r) for r in (state.get("sections") or {}).get("tax") or [])
+    parts = [
+        ("Security and the gate", security, "#4FB391"),
+        ("The city bill (shared part)", max(0.0, city), "#F6A58C"),
+        ("Gardens", gardens, "#8FDCBB"),
+        ("Tax on other income", tax, "#F2B84B"),
+    ]
+    used = 0.0
+    kept = []
+    for label, amt, color in parts:
+        amt = max(0.0, float(amt or 0))
+        if amt < 1 or ordinary < 1:
+            continue
+        if used + amt > ordinary:
+            amt = max(0.0, ordinary - used)
+        if amt < 1:
+            continue
+        used += amt
+        kept.append((label, amt, color))
+    rest = max(0.0, ordinary - used)
+    kept.append(("Everything else", rest, "#2E8B6E"))
+    rand_split = []
+    for label, amt, color in kept:
+        pct = 0.0 if ordinary < 1 else round(amt / ordinary * 100, 1)
+        rand_split.append({"label": label, "amount": deck_rands(amt), "pct": pct, "color": color})
+    # Keep the bars at 100 even after rounding.
+    drift = round(100 - sum(x["pct"] for x in rand_split), 1)
+    if rand_split and abs(drift) >= 0.1 and ordinary > 1:
+        rand_split[-1]["pct"] = round(rand_split[-1]["pct"] + drift, 1)
+
+    balance = float(state.get("reserve_balance") or 0)
+    plan_total = 0.0
+    for p in state.get("ymp") or []:
+        plan_total += sum(float(x or 0) for x in (p.get("years") or []))
+    if plan_total > 1:
+        fill = max(0, min(100, int(round(balance / plan_total * 100))))
+    else:
+        fill = 100 if balance > 1 else 0
+    reserve_items = []
+    seen = set()
+    ranked = []
+    for p in state.get("ymp") or []:
+        years = list(p.get("years") or []) + [0.0] * 10
+        desc = (p.get("desc") or "").strip()
+        if not desc:
+            continue
+        for i, amt in enumerate(years[:10]):
+            if float(amt or 0) > 1:
+                ranked.append((0 if i >= 1 else 1, i, -float(amt), desc, str(NOW_YEAR + i)))
+    ranked.sort()
+    for _a, _i, _amt, desc, year in ranked:
+        if desc in seen:
+            continue
+        seen.add(desc)
+        reserve_items.append({"name": desc, "year": year})
+        if len(reserve_items) == 3:
+            break
+    if not reserve_items:
+        reserve_items = [{"name": "No project listed yet", "year": str(NOW_YEAR + 1)}]
+
+    done = [r for r in (state.get("sections") or {}).get("special") or [] if float(r.get("actual") or 0) > 1]
+    achievements = [
+        {
+            "title": (done[0].get("desc") if done else "Work already done"),
+            "text": (f"Spent {deck_rands(done[0].get('actual'))} this year." if done else "Say what was finished this year."),
+        },
+        {"title": "A safer, cared-for home", "text": "Gates, lights and the day-to-day work that owners can see."},
+        {"title": "The Jar", "text": f"Saved so far: {deck_rands(balance)}"},
+    ]
+    risers = []
+    for key in ("expenditure", "rm", "personnel"):
+        for r in (state.get("sections") or {}).get(key) or []:
+            if skip_from_ordinary(r, state):
+                continue
+            more = cost_for_levy(state, r) - float(r.get("actual") or 0)
+            if more > 500:
+                risers.append((more, r.get("desc") or "A cost"))
+    risers.sort(reverse=True)
+    changes = []
+    for more, label in risers[:2]:
+        changes.append({"title": label, "reason": f"Up by {deck_rands(more)} on last year."})
+    while len(changes) < 2:
+        changes.append({"title": "The running costs", "reason": "Normal yearly price increases."})
+    changes.append({"title": "Everything else", "reason": "Normal yearly price increases."})
+
+    gross, recovered = municipal_split(state, "yearly")
+    actual_gaps = municipal_gaps(state, "actual")
+    this_txt, this_set = _plan_names(state, [1])
+    soon_txt, soon_set = _plan_names(state, [2, 3], skip=this_set)
+    later_txt, _later_set = _plan_names(state, [4, 5, 6, 7, 8, 9], skip=this_set | soon_set)
+    return {
+        "scheme_name": state.get("complex_name") or "Our community",
+        "fin_year": state.get("fin_year") or "",
+        "ordinary_levy_total": deck_rands(ordinary),
+        "monthly_total": deck_rands(monthly_total),
+        "bill_lines": bill_lines,
+        "rand_split": rand_split,
+        "rand_note": "Everything else is people, insurance, repairs and admin.",
+        "reserve_balance": deck_rands(balance),
+        "reserve_fill_pct": fill,
+        "reserve_items": reserve_items,
+        "plan_this_year": this_txt,
+        "plan_soon": soon_txt,
+        "plan_later": later_txt,
+        "achievements": achievements,
+        "changes": changes,
+        "approve_budget": f"{deck_rands(ordinary)} ordinary levies for the year",
+        "approve_levy": f"{deck_rands(monthly_total)} a month for a full erf" if share or n_units else f"{deck_rands(monthly_total)} a month for the whole complex — load the PQ file for one home",
+        "approve_reserve": f"{deck_rands(reserve_contribution(state))} into the reserve fund",
+        "show_other_income": _section_yearly(state, "other") > 1,
+        "show_recovery_income": _section_yearly(state, "recoveries_other") > 1,
+        "show_utilities": recovered > 1,
+        "show_personnel": _section_yearly(state, "personnel") > 1,
+        "show_shortfall": any(g.get("gap", 0) > 1 for g in actual_gaps) or (gross - recovered) > 1,
+        "show_reserve": balance > 1 or reserve_contribution(state) > 1 or plan_total > 1,
+        "_share_known": bool(share or n_units),
+        "_city_gross": gross,
+    }
+
+
+def render_budget_deck(data: dict) -> str:
+    """Fill the finished deck. The design is not changed."""
+    import jinja2
+    path = Path(__file__).parent / "domus_budget_template.html"
+    env = jinja2.Environment(undefined=jinja2.StrictUndefined, autoescape=False)
+    tpl = env.from_string(path.read_text(encoding="utf-8"))
+    fields = {k: v for k, v in data.items() if not str(k).startswith("_")}
+    return tpl.render(**fields)
+
+
 def _story_costs(state: dict) -> list:
     """Plain groups that add up to the ordinary levy."""
     groups: dict[str, list] = {}
@@ -3102,6 +3325,7 @@ def generate_excel(state: dict) -> BytesIO:
         "levy_approve_mode": state.get("levy_approve_mode") or "costs",
         "actual_months": int(state.get("actual_months") or 12),
         "tax_auto": bool(state.get("tax_auto", True)),
+        "deck_copy": state.get("deck_copy") or {},
     }
     blob = json.dumps(payload, ensure_ascii=False)
     # Excel cell cap is 32767; split across rows if needed.
@@ -3913,6 +4137,7 @@ def main():
                     "reserve_mode", "reserve_amount", "reserve_balance", "reserve_bill", "scheme_type", "special_in_ordinary",
                     "current_monthly_levy", "actual_months", "tax_auto",
                     "levy_approve_mode", "levy_approved_pct", "levy_approved_amount",
+                    "deck_copy",
                 ):
                     if k in data and data[k] is not None:
                         st.session_state[k] = data[k]
@@ -4292,12 +4517,13 @@ If you already know the decision before you download, you can set the same choic
 Do not use **Erase everything** unless you mean to wipe the screen. Download first if you still need the numbers.
 
 ### 20. The owner presentation
-On **For the meeting**, type the complex name, then **Build the presentation**.
+On **For the meeting**, the slides are already designed. This complex's figures fill in. Slides that do not apply (no staff, no reserve, no cost shortfall) stay hidden.
 
-- **Download the presentation** is the full-screen version. Open it in Chrome. Arrow keys move on. F is full screen. The Domus logo comes in at the start and leaves at the end.
-- **Download the PowerPoint** is the same story. Open it and press F5. The logo fills the first screen, then zooms out onto the budget.
+Check the numbers. Change the words if you want — the three good-news lines, what is changing, and the three things the meeting votes on. Then **Play the presentation**.
 
-It uses this complex’s own numbers, in plain words, so owners can see what the levy pays for. Build it again after you change figures, so the slides match the sheet.
+Click the picture to move on. For the meeting, **Download the presentation**, open it in Chrome, and press F for full screen. Arrow keys, click, or a swipe move the story. The pictures already move.
+
+**Fill the words from this budget** writes the words again after you change figures. Do not put unit numbers or owner names on the slides.
             """
         )
 
@@ -4835,33 +5061,151 @@ Confirm the dates and the amount with the auditor or tax practitioner.
     with tabs[10]:
         st.subheader("For the owners")
         st.caption(
-            "Open the presentation in Chrome. Arrow keys move on. F is full screen. "
-            "It explains the levy in plain words, with this complex’s own numbers, so owners can see what they are paying for."
+            "The story is already drawn. This complex's figures fill in. "
+            "Change the words if you need to, then play it. Click the picture to move on."
         )
         if not st.session_state.complex_name:
             st.warning("Type the complex name in the sidebar first.")
-        elif st.button("Build the presentation", type="primary"):
-            st.session_state["meeting_html"] = generate_meeting_html(st.session_state)
-            deck = generate_pptx(st.session_state)
-            st.session_state["pptx"] = deck.getvalue()
-        if st.session_state.get("meeting_html"):
-            name = re.sub(r"\s+", "_", st.session_state.complex_name or "budget")
-            st.download_button(
-                "Download the presentation",
-                data=st.session_state["meeting_html"],
-                file_name=f"Budget_presentation_{name}.html",
-                mime="text/html",
+        else:
+            base = presentation_data(st.session_state)
+            name = st.session_state.complex_name
+            flat = {
+                "rand_note": base["rand_note"],
+                "plan_this_year": base["plan_this_year"],
+                "plan_soon": base["plan_soon"],
+                "plan_later": base["plan_later"],
+                "approve_budget": base["approve_budget"],
+                "approve_levy": base["approve_levy"],
+                "approve_reserve": base["approve_reserve"],
+            }
+            for i in range(3):
+                flat[f"ach_{i}_title"] = base["achievements"][i]["title"]
+                flat[f"ach_{i}_text"] = base["achievements"][i]["text"]
+                flat[f"ch_{i}_title"] = base["changes"][i]["title"]
+                flat[f"ch_{i}_reason"] = base["changes"][i]["reason"]
+            for i, it in enumerate(base["reserve_items"]):
+                flat[f"res_{i}_name"] = it["name"]
+                flat[f"res_{i}_year"] = it["year"]
+            if st.session_state.get("_deck_complex") != name:
+                saved = st.session_state.get("deck_copy") or {}
+                source = dict(flat)
+                if saved.get("complex") == name:
+                    source.update({k: saved[k] for k in flat if k in saved and saved[k]})
+                for k, v in source.items():
+                    st.session_state["deck_" + k] = v
+                st.session_state._deck_complex = name
+            if st.button("Fill the words from this budget"):
+                for k, v in flat.items():
+                    st.session_state["deck_" + k] = v
+                st.rerun()
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Ordinary levy for the year", base["ordinary_levy_total"])
+            c2.metric("One full share a month", base["monthly_total"])
+            c3.metric("Reserve in the bank", base["reserve_balance"])
+            if not base.get("_share_known"):
+                st.info("Load the PQ file. Until then, the monthly bill on the slides is the whole complex, not one home.")
+            st.markdown("**Where every rand of the levy goes**")
+            st.dataframe(
+                pd.DataFrame(base["rand_split"])[["label", "amount", "pct"]],
+                hide_index=True,
+                use_container_width=True,
             )
-            st.caption("Open that file in Chrome. Arrow keys move on. Press F for full screen.")
-        if st.session_state.get("pptx"):
-            name = re.sub(r"\s+", "_", st.session_state.complex_name or "budget")
-            st.download_button(
-                "Download the PowerPoint — same slides",
-                data=st.session_state["pptx"],
-                file_name=f"Budget_presentation_{name}.pptx",
-                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            )
-            st.caption("Open it in PowerPoint and press F5. The logo fills the first screen, then zooms out onto the budget. The last page is unchanged. It only moves in the slideshow, not while you scroll in edit view.")
+            st.markdown("**One home's monthly bill**")
+            st.dataframe(pd.DataFrame(base["bill_lines"]), hide_index=True, use_container_width=True)
+            flags = [
+                ("Other income", base["show_other_income"]),
+                ("Recovery income", base["show_recovery_income"]),
+                ("Utilities recovered", base["show_utilities"]),
+                ("The people", base["show_personnel"]),
+                ("Cost shortfall", base["show_shortfall"]),
+                ("Reserve fund", base["show_reserve"]),
+            ]
+            st.caption("Slides included: " + ", ".join(n for n, on in flags if on) + ". Hidden: " + (", ".join(n for n, on in flags if not on) or "none") + ".")
+            st.markdown("**Words you can change**")
+            st.caption("These are the only words that change per complex. The pictures stay.")
+            st.text_input("One line under the rand bars", key="deck_rand_note")
+            a1, a2, a3 = st.columns(3)
+            for i, col in enumerate((a1, a2, a3)):
+                with col:
+                    st.text_input(f"Good news {i+1}", key=f"deck_ach_{i}_title")
+                    st.text_area(" ", key=f"deck_ach_{i}_text", height=68, label_visibility="collapsed")
+            b1, b2, b3 = st.columns(3)
+            for i, col in enumerate((b1, b2, b3)):
+                with col:
+                    st.text_input(f"What is changing {i+1}", key=f"deck_ch_{i}_title")
+                    st.text_area(" ", key=f"deck_ch_{i}_reason", height=68, label_visibility="collapsed")
+            st.text_input("The plan this year", key="deck_plan_this_year")
+            st.text_input("The plan soon", key="deck_plan_soon")
+            st.text_input("The plan later", key="deck_plan_later")
+            for i in range(len(base["reserve_items"])):
+                r1, r2 = st.columns([3, 1])
+                r1.text_input(f"Reserve project {i+1}", key=f"deck_res_{i}_name")
+                r2.text_input("Year", key=f"deck_res_{i}_year")
+            st.text_input("Vote — the budget", key="deck_approve_budget")
+            st.text_input("Vote — one home", key="deck_approve_levy")
+            st.text_input("Vote — the reserve", key="deck_approve_reserve")
+            copy = {"complex": name}
+            for k in flat:
+                copy[k] = st.session_state.get("deck_" + k, flat[k])
+            st.session_state.deck_copy = copy
+            if st.button("Play the presentation", type="primary"):
+                data = dict(base)
+                data["rand_note"] = copy["rand_note"]
+                data["plan_this_year"] = copy["plan_this_year"]
+                data["plan_soon"] = copy["plan_soon"]
+                data["plan_later"] = copy["plan_later"]
+                data["approve_budget"] = copy["approve_budget"]
+                data["approve_levy"] = copy["approve_levy"]
+                data["approve_reserve"] = copy["approve_reserve"]
+                data["achievements"] = [
+                    {"title": copy[f"ach_{i}_title"], "text": copy[f"ach_{i}_text"]} for i in range(3)
+                ]
+                data["changes"] = [
+                    {"title": copy[f"ch_{i}_title"], "reason": copy[f"ch_{i}_reason"]} for i in range(3)
+                ]
+                data["reserve_items"] = [
+                    {"name": copy.get(f"res_{i}_name") or "Project", "year": copy.get(f"res_{i}_year") or ""}
+                    for i in range(len(base["reserve_items"]))
+                ]
+                try:
+                    st.session_state["deck_html"] = render_budget_deck(data)
+                    st.session_state.pop("deck_error", None)
+                except Exception as e:
+                    st.session_state["deck_error"] = str(e)
+            if st.session_state.get("deck_error"):
+                st.error(st.session_state["deck_error"])
+            if st.session_state.get("deck_html"):
+                st.components.v1.html(st.session_state["deck_html"], height=800, scrolling=False)
+                safe = re.sub(r"\s+", "_", name or "budget")
+                st.download_button(
+                    "Download the presentation",
+                    data=st.session_state["deck_html"],
+                    file_name=f"{safe} budget.html",
+                    mime="text/html",
+                )
+                st.caption("Open it in Chrome. Press F for full screen. Arrow keys, a click, or a swipe moves the story.")
+        with st.expander("Older presentation"):
+            st.caption("The earlier deck. The new one above is the one for meetings.")
+            if st.session_state.complex_name and st.button("Build the older presentation"):
+                st.session_state["meeting_html"] = generate_meeting_html(st.session_state)
+                deck = generate_pptx(st.session_state)
+                st.session_state["pptx"] = deck.getvalue()
+            if st.session_state.get("meeting_html"):
+                safe = re.sub(r"\s+", "_", st.session_state.complex_name or "budget")
+                st.download_button(
+                    "Download the older presentation",
+                    data=st.session_state["meeting_html"],
+                    file_name=f"Budget_presentation_{safe}.html",
+                    mime="text/html",
+                )
+            if st.session_state.get("pptx"):
+                safe = re.sub(r"\s+", "_", st.session_state.complex_name or "budget")
+                st.download_button(
+                    "Download the older PowerPoint",
+                    data=st.session_state["pptx"],
+                    file_name=f"Budget_presentation_{safe}.pptx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                )
 
     with tabs[11]:
         st.subheader("Download Excel")
