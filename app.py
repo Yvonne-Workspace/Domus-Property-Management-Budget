@@ -443,13 +443,14 @@ def municipal_bucket(desc: str) -> str:
     return "Other municipal"
 
 
-def municipal_gaps(state: dict) -> list:
+def municipal_gaps(state: dict, field: str = "yearly") -> list:
     """Per-service gross vs recovered. Positive gap = under-recovery (levy pays the shortfall)."""
     buckets: dict[str, dict] = {}
     for r in state["sections"].get("municipal") or []:
         desc = r.get("desc") or ""
-        y = abs(float(r.get("yearly") or 0))
-        if y < 0.5 and abs(float(r.get("actual") or 0)) < 0.5:
+        y = abs(float(r.get(field) or 0))
+        other = abs(float(r.get("actual" if field == "yearly" else "yearly") or 0))
+        if y < 0.5 and other < 0.5:
             continue
         name = municipal_bucket(desc)
         slot = buckets.setdefault(name, {"name": name, "gross": 0.0, "rec": 0.0, "gross_descs": [], "rec_descs": []})
@@ -2601,27 +2602,27 @@ def generate_excel(state: dict) -> BytesIO:
     fml(ws.cell(r, 7), f"F{r}/12", RED)
     net_muni = r
     r += 1
-    ws.cell(r, 2, "UNDER-RECOVERY memo (already inside the net above — do not add it again)")
+    ws.cell(r, 2, "UNDER-RECOVERY this year (actuals: city bill minus recovered). Already inside the actual net — do not add it again.")
     ws.cell(r, 2).font = Font(italic=True, size=9, color="9C0006")
-    fml(ws.cell(r, 6), f"MAX(0,F{net_muni})", RED)
-    fml(ws.cell(r, 7), f"F{r}/12", RED)
+    fml(ws.cell(r, 4), f"MAX(0,D{net_muni})", RED)
+    fml(ws.cell(r, 7), f"D{r}/12", RED)
     r += 1
-    gaps = municipal_gaps(state)
-    under_rows = [g for g in gaps if g["gap"] > 1]
+    actual_gaps = municipal_gaps(state, "actual")
+    under_rows = [g for g in actual_gaps if g["gap"] > 1]
     if under_rows:
-        ws.cell(r, 2, "Under-recovery by service (city bill minus recovered)").font = Font(bold=True, size=10, color="9C0006")
+        ws.cell(r, 2, "Under-recovery by service — this year’s actuals (city bill minus recovered)").font = Font(bold=True, size=10, color="9C0006")
         r += 1
         for g in under_rows:
-            grefs = [f"F{named_rows[d]}" for d in g["gross_descs"] if d in named_rows]
-            rrefs = [f"F{named_rows[d]}" for d in g["rec_descs"] if d in named_rows]
-            ws.cell(r, 2, f"{g['name']} under-recovered")
+            grefs = [f"D{named_rows[d]}" for d in g["gross_descs"] if d in named_rows]
+            rrefs = [f"D{named_rows[d]}" for d in g["rec_descs"] if d in named_rows]
+            ws.cell(r, 2, f"{g['name']} under-recovered (actual)")
             if grefs or rrefs:
                 gf = "+".join(grefs) if grefs else "0"
                 rf = "+".join(rrefs) if rrefs else "0"
-                fml(ws.cell(r, 6), f"MAX(0,({gf})-({rf}))", RED)
+                fml(ws.cell(r, 4), f"MAX(0,({gf})-({rf}))", RED)
             else:
-                inp(ws.cell(r, 6), max(0.0, g["gap"]), MONEY)
-            fml(ws.cell(r, 7), f"F{r}/12")
+                inp(ws.cell(r, 4), max(0.0, g["gap"]), MONEY)
+            fml(ws.cell(r, 7), f"D{r}/12")
             r += 1
     r += 1
     bar("EXPENDITURE")
@@ -3903,7 +3904,7 @@ On **Municipal**, the city bill and the recovery are separate lines.
 - Type the city bill as a positive amount (electricity, water, sewerage, refuse, rates).
 - Type what owners pay back as a positive amount on the **Less: … recovered** line. Do not type a minus. Any line with the word **recovered** in the name is subtracted, including a sewer-plant recovery.
 - **Net municipal** = city bill minus recovered. That net is what goes into the levy.
-- If recovered is less than the city bill, the difference is an **under-recovery**. It is already inside the net. Do not add it again. The sheet lists it so the trustees can see it and attend to it.
+- If recovered is less than the city bill, the difference is an **under-recovery**. It is already inside the net. Do not add it again. On the sheet, that memo is on the **Actual** column (this year). The **Budgeted yearly** net is what goes into the new levy.
 
 ### 8. Expenditure and repairs
 **Expenditure** is the operating costs (accounting, audit, security, legal, garden contract, and so on). Not repairs, not salaries, not tax.
