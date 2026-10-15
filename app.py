@@ -94,27 +94,32 @@ def _same_job(a: str, b: str) -> bool:
     return len(ta & tb) / max(len(ta), len(tb)) >= 0.6
 
 
-def refresh_special(state: dict) -> int:
-    """2026 and 2027 projects go on the tab. A later year stays on the plan only."""
+def refresh_special(state: dict, fill_only: bool = False) -> int:
+    """Add 2026 and 2027 plan lines. Never drop a line the user already typed."""
+    existing_list = list((state.get("sections") or {}).get("special") or [])
     existing = {}
-    for r in (state.get("sections") or {}).get("special") or []:
+    for r in existing_list:
         key = norm(r.get("desc") or "")
         if key:
             existing[key] = r
     wcu = [src for src in (state.get("wcu_rows") or []) if src.get("section") == "special"]
 
     def spend_for(desc: str):
-        names = [desc] + [p.strip() for p in re.split(r"\s+[—-]\s+", desc) if p.strip()]
-        best = None
-        for src in wcu + list(existing.values()):
+        for src in wcu:
             src_name = src.get("desc") or ""
-            if any(norm(n) == norm(src_name) or _same_job(n, src_name) for n in names):
-                best = src
-                if norm(src_name) == norm(desc):
-                    return src
-        return best
+            if norm(desc) == norm(src_name) or _same_job(desc, src_name):
+                return src
+        return {}
 
     rows = []
+    seen = set()
+    for old in existing_list:
+        desc = str(old.get("desc") or "").strip()
+        if not desc or re.fullmatch(r"special project \d+|maintenance project \d+", norm(desc)):
+            continue
+        rows.append(old)
+        seen.add(norm(desc))
+    auto = f"2026 is this year. {NOW_YEAR + 1} is the budget year. A later year stays on the plan only."
     for p in state.get("ymp") or []:
         desc = str(p.get("desc") or "").strip()
         if not desc or _plan_header_word(desc):
@@ -124,30 +129,29 @@ def refresh_special(state: dict) -> int:
         years = (list(p.get("years") or []) + [0.0] * 10)[:10]
         this_year = float(years[0] or 0)
         nxt = float(years[1] or 0)
-        if this_year < 0.5 and nxt < 0.5:
+        added = (p.get("note") or "") == "Added on 10-year projects"
+        if norm(desc) in seen:
+            if not fill_only:
+                old = existing.get(norm(desc)) or {}
+                if nxt > 0.5:
+                    old["yearly"] = nxt
+                if this_year > 0.5 and float(old.get("this_budget") or 0) < 0.5:
+                    old["this_budget"] = this_year
+            continue
+        if this_year < 0.5 and nxt < 0.5 and not added:
             continue
         src = spend_for(desc) or {}
-        old = existing.get(norm(desc)) or {}
-        budget = float(src.get("budget") or src.get("this_budget") or old.get("this_budget") or 0)
-        if budget < 0.5:
-            budget = this_year
-        auto = f"2026 is this year. {NOW_YEAR + 1} is the budget year. A later year stays on the plan only."
-        note = str(old.get("note") or "").strip()
-        if not note or note == auto:
-            note = str(p.get("note") or "").strip() or auto
+        note = str(p.get("note") or "").strip()
+        if not note or note == "Added on 10-year projects":
+            note = auto
         rec = row(desc, note)
-        rec["actual"] = float(src.get("actual") or old.get("actual") or 0)
-        rec["this_budget"] = budget
+        rec["manual"] = added
+        rec["actual"] = float(src.get("actual") or 0)
+        rec["this_budget"] = float(src.get("budget") or 0) or this_year
         rec["yearly"] = nxt
-        rec["gl"] = src.get("gl") or old.get("gl") or ""
+        rec["gl"] = src.get("gl") or ""
         rows.append(rec)
-    have = {norm(r.get("desc") or "") for r in rows}
-    for old in existing.values():
-        if not old.get("manual"):
-            continue
-        if norm(old.get("desc") or "") in have:
-            continue
-        rows.append(old)
+        seen.add(norm(desc))
     if rows:
         state.setdefault("sections", {})["special"] = rows
     return len(rows)
@@ -1692,6 +1696,8 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             "move_to": move_to,
             "gl": gl,
             "this_budget": this_budget,
+            "manual": True if not prev else bool(prev.get("manual")),
+            "note_edited": bool(prev.get("note_edited")) or (note != (prev.get("note") or "")),
         })
     return out
 
@@ -4086,7 +4092,8 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                     })
                 else:
                     hit["years"] = years
-                    hit["note"] = r.get("note") or hit.get("note") or ""
+                    hit["note"] = r.get("note") or ""
+                r["note_edited"] = True
         apply_levy_lines(st.session_state)
         if plan:
             st.success(f"Saved. Actual is what was spent this year. Next year is the {NOW_YEAR + 1} plan. There is no %.")
@@ -4146,7 +4153,7 @@ def main():
         st.caption("Load the financial statement PDF (line names) then WeConnectU Excel (rands). Either order is fine.")
 
     straighten_plan(st.session_state)
-    refresh_special(st.session_state)
+    refresh_special(st.session_state, fill_only=True)
     if st.session_state.pop("_unlock_tax", False):
         st.session_state.tax_auto = False
     apply_levy_lines(st.session_state)
@@ -4682,7 +4689,7 @@ Do these steps in this order.
    - Done this year only: Actual is filled, Next year is blank. It is not repeated.
    - Not done this year, but planned next year: Actual is 0, Next year is the plan amount.
    - **2026** shows as Budgeted this year. **2027** shows as Next year. A later year does not come onto this tab.
-6. You can type a new project on **10-year projects** and Save. You can change **Next year** and the **note** there and Save. Both are kept.
+6. On **10-year projects**, a line you type stays, even if it is not on the plan. Click the note, change it or delete it, then **Save this section**. A blank note stays blank. Saving the 10-year plan does not remove a line you added.
 7. Leave **Pay the 10-year projects from the ordinary levy** unticked. The reserve pays these jobs.
 
 **First cycle** is the year a job starts, for example 2025. Leave it blank if the rands are already under the years.
@@ -5303,6 +5310,24 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                     "estimate": float(r.get("Current estimate") or 0),
                     "years": years,
                     "note": str(r.get("Note") or "").strip(),
+                })
+            st.session_state.ymp = kept
+            for r in st.session_state.sections.get("special") or []:
+                desc = str(r.get("desc") or "").strip()
+                if not desc or norm(desc) in {norm(p.get("desc") or "") for p in kept}:
+                    continue
+                if not (r.get("manual") or r.get("note_edited")):
+                    continue
+                years = [0.0] * 10
+                years[0] = float(r.get("this_budget") or 0)
+                years[1] = float(r.get("yearly") or 0)
+                kept.append({
+                    "desc": desc,
+                    "first_cycle": "",
+                    "freq": "",
+                    "estimate": 0.0,
+                    "years": years,
+                    "note": r.get("note") or "Added on 10-year projects",
                 })
             st.session_state.ymp = kept
             straighten_plan(st.session_state)
