@@ -119,6 +119,8 @@ def refresh_special(state: dict) -> int:
         desc = str(p.get("desc") or "").strip()
         if not desc or _plan_header_word(desc):
             continue
+        if re.search(r"\b(total|subtotal|sub-total|grand total)\b", desc, re.I):
+            continue
         years = (list(p.get("years") or []) + [0.0] * 10)[:10]
         this_year = float(years[0] or 0)
         nxt = float(years[1] or 0)
@@ -134,6 +136,13 @@ def refresh_special(state: dict) -> int:
         rec["yearly"] = nxt
         rec["gl"] = src.get("gl") or ""
         rows.append(rec)
+    have = {norm(r.get("desc") or "") for r in rows}
+    for old in existing.values():
+        if not old.get("manual"):
+            continue
+        if norm(old.get("desc") or "") in have:
+            continue
+        rows.append(old)
     if rows:
         state.setdefault("sections", {})["special"] = rows
     return len(rows)
@@ -1779,6 +1788,8 @@ def parse_ymp_sheet(df, start_year: int | None = None) -> list:
             continue
         desc = " — ".join(dict.fromkeys(texts))
         if all(_plan_header_word(part) for part in texts):
+            continue
+        if re.search(r"\b(total|subtotal|sub-total|grand total)\b", desc, re.I):
             continue
         if year_cols:
             years = []
@@ -4048,6 +4059,28 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                 st.session_state["_unlock_tax"] = True
                 st.session_state[f"_nonce_{key}"] = nonce + 1
                 st.rerun()
+        if key == "special":
+            plan_rows = st.session_state.setdefault("ymp", [])
+            for r in st.session_state.sections["special"]:
+                desc = str(r.get("desc") or "").strip()
+                if not desc:
+                    continue
+                hit = next((p for p in plan_rows if norm(p.get("desc") or "") == norm(desc)), None)
+                years = (list((hit or {}).get("years") or []) + [0.0] * 10)[:10]
+                years[1] = float(r.get("yearly") or 0)
+                if hit is None:
+                    r["manual"] = True
+                    years[0] = float(r.get("this_budget") or 0)
+                    plan_rows.append({
+                        "desc": desc,
+                        "years": years,
+                        "first_cycle": "",
+                        "freq": "",
+                        "estimate": 0.0,
+                        "note": "Added on 10-year projects",
+                    })
+                else:
+                    hit["years"] = years
         apply_levy_lines(st.session_state)
         if plan:
             st.success(f"Saved. Actual is what was spent this year. Next year is the {NOW_YEAR + 1} plan. There is no %.")
@@ -4635,7 +4668,7 @@ The schedule uses the **approved** ordinary levy once the meeting has set one. U
 Do these steps in this order.
 
 1. On the left, choose the WeConnectU **Actual vs Budget** file and click **Load Excel**.
-2. Open **10-year projects**. A **2026** project (this year) is listed, and so is a **2027** project (the budget year). **Budgeted this year** is the 2026 column. **Next year** is the 2027 column. A 2028 or later project stays on the 10-year plan and does not come onto this tab.
+2. Open **10-year projects**. A **2026** project shows as **Budgeted this year**. A **2027** project shows as **Next year**. A later year stays on the plan. To add a project that is not on the plan, type it on a new row, enter the amount, and click **Save this section**. It stays, and it is written onto the plan. A total line is not a project.
 3. Open **10-year plan**. Upload the Excel, or copy from the row that says **2025  2026  2027** down to the last project and paste it. Every project line comes through, including a line with no amount yet. The app does not add a total, and it does not fill Current estimate unless that column is on your sheet.
 4. To remove a project, click the trash can on that row, then click **Save 10-year plan**. It stays deleted. Click a project name to read the full words. Scroll right for the later years. A note that sat to the right of the years is in the **Note** column.
 5. Open **10-year projects** again.
@@ -4643,7 +4676,7 @@ Do these steps in this order.
    - Done this year only: Actual is filled, Next year is blank. It is not repeated.
    - Not done this year, but planned next year: Actual is 0, Next year is the plan amount.
    - **2026** shows as Budgeted this year. **2027** shows as Next year. A later year does not come onto this tab.
-6. Change a next-year amount on the **10-year plan**, then Save. Do not type it on the projects table. The table follows the plan.
+6. You can type a new project on **10-year projects** and Save. You can also change **Next year** there and Save. It is written back to the plan.
 7. Leave **Pay the 10-year projects from the ordinary levy** unticked. The reserve pays these jobs.
 
 **First cycle** is the year a job starts, for example 2025. Leave it blank if the rands are already under the years.
@@ -5179,8 +5212,9 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         if ymp_up and st.button("Load 10-year plan"):
             try:
                 xl = pd.ExcelFile(ymp_up)
+                named = [n for n in xl.sheet_names if re.search(r"ymp|10\s*year|ten\s*year|maintenance", n, re.I)]
                 parsed = []
-                for sheet in xl.sheet_names:
+                for sheet in (named or xl.sheet_names):
                     trial = parse_ymp_sheet(pd.read_excel(xl, sheet_name=sheet, header=None), plan_start_year(st.session_state))
                     if len(trial) > len(parsed):
                         parsed = trial
