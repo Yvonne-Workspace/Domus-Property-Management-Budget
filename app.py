@@ -3337,7 +3337,7 @@ def generate_excel(state: dict) -> BytesIO:
                 fml(res.cell(rr, 6), f"'10 YMP'!F{src}")
             else:
                 inp(res.cell(rr, 6), float(it.get("yearly") or 0), MONEY)
-            fml(res.cell(rr, 9), f"D{rr}-E{rr}", RED if spent - allowed > 0.5 else MONEY)
+            fml(res.cell(rr, 9), f"D{rr}-E{rr}", RED if spent - allowed > 0.5 else None)
             if allowed < 0.5 and spent < 0.5:
                 note = f"Planned for {NOW_YEAR + 1}."
             elif spent - allowed > 0.5:
