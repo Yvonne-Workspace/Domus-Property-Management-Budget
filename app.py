@@ -13,6 +13,7 @@ import pandas as pd
 import pdfplumber
 import streamlit as st
 from openpyxl import Workbook, load_workbook
+from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Protection, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.workbook.defined_name import DefinedName
@@ -2391,6 +2392,36 @@ def generate_excel(state: dict) -> BytesIO:
     wb = Workbook()
     ws = wb.active
     ws.title = "BUDGET"
+
+    def brand(sheet, anchor="H1", width=168, height=73):
+        path = Path(__file__).parent / "domus_logo.jpeg"
+        if path.exists():
+            img = XLImage(str(path))
+            img.width = width
+            img.height = height
+            sheet.add_image(img, anchor)
+        name = (state.get("complex_name") or "").strip()
+        year = (state.get("fin_year") or "").strip()
+        foot = "Domus Property Management  /  Eiendomsbestuur"
+        right = "   ·   ".join(x for x in (name, year) if x)
+        for footer in (sheet.oddFooter, sheet.evenFooter):
+            footer.left.text = foot
+            footer.left.font = "Calibri"
+            footer.left.size = 8
+            footer.right.text = right
+            footer.right.font = "Calibri"
+            footer.right.size = 8
+        sheet.page_setup.orientation = "landscape"
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 0
+        sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        sheet.page_margins.left = 0.45
+        sheet.page_margins.right = 0.45
+        sheet.page_margins.top = 0.4
+        sheet.page_margins.bottom = 0.45
+        sheet.page_margins.footer = 0.28
+
     # Old pack: Description | GL Code | Actual | % | Budgeted Yearly | Monthly | Comments
     for i, w in enumerate([3, 42, 12, 14, 10, 16, 14, 36], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
@@ -2416,6 +2447,8 @@ def generate_excel(state: dict) -> BytesIO:
             fill(c, bg)
 
     ws.merge_cells("B2:G2")
+    ws.row_dimensions[1].height = 58
+    brand(ws, "H1")
     ws["B2"] = state.get("complex_name") or "BODY CORPORATE / HOA BUDGET"
     ws["B2"].font = Font(name="Calibri", bold=True, size=16, color=NAVY)
     ws["B3"] = state.get("fin_year") or ""
@@ -2904,6 +2937,8 @@ def generate_excel(state: dict) -> BytesIO:
     pq.column_dimensions["D"].width = 18
     pq.column_dimensions["E"].width = 20
     pq.column_dimensions["F"].width = 14
+    pq.row_dimensions[1].height = 50
+    brand(pq, "H1", 150, 58)
 
     ymp = wb.create_sheet("10 YMP")
     start_y = plan_start_year(state)
@@ -2911,6 +2946,8 @@ def generate_excel(state: dict) -> BytesIO:
     ymp["A1"].font = Font(bold=True, size=14, color=NAVY)
     ymp["A2"] = "10 YEAR MAINTENANCE PLAN"
     ymp["A2"].font = Font(bold=True, size=12, color=NAVY)
+    ymp.row_dimensions[1].height = 50
+    brand(ymp, "H1", 150, 58)
     headers = ["PROJECTS", "First Cycle", "Frequency of Cycles", "Current Estimate"] + [str(start_y + i) for i in range(10)]
     sub = ["", "", "", ""] + [f"Year {i+1}" for i in range(10)]
     for i, h in enumerate(headers, 1):
@@ -2961,6 +2998,8 @@ def generate_excel(state: dict) -> BytesIO:
     res["B3"] = state.get("complex_name") or ""
     res["B3"].font = Font(bold=True, size=12)
     res["B4"] = state.get("fin_year") or ""
+    res.row_dimensions[1].height = 58
+    brand(res, "H1")
     res["B6"] = "Same columns as the levy budget. Actual is this year. Budgeted yearly is next year. Yellow cells can be typed. The % is locked. Password to unlock: domus."
     res["B6"].font = Font(italic=True, size=9, color="666666")
     res["B8"] = "Opening reserve balance"
@@ -4235,7 +4274,7 @@ The names do not have to be identical. Sand beds, tree felling, windows, stairca
 ### 18. The meeting
 You prepare the budget. The trustees decide in the meeting.
 
-**Download Excel** on the Download tab. The file is a normal workbook. **BUDGET** is the levy only. **RESERVE** is the reserve fund, in the same columns. **PQ** and **10 YMP** are unchanged.
+**Download Excel** on the Download tab. The file is a normal workbook. **BUDGET** is the levy only. **RESERVE** is the reserve fund, in the same columns. **PQ** and **10 YMP** are unchanged. The Domus logo is at the top of each sheet. When you print, the bottom of every page reads Domus Property Management / Eiendomsbestuur, plus the complex name and the year.
 
 The meeting block is at the top of **BUDGET**. Type the yearly rand on **Approved**. The % is locked. **What the costs need** and **Gap** are locked. The bank balance is not on this sheet. It is on **RESERVE**.
 
