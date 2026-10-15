@@ -95,55 +95,60 @@ def _same_job(a: str, b: str) -> bool:
 
 
 def refresh_special(state: dict) -> int:
-    """Actual = Special Projects spend from Actual vs Budget. Budgeted yearly = the 2027 column only."""
+    """10-year projects tab follows the plan. Next year is the 2027 column. Actual is what was spent."""
+    existing = {}
+    for r in (state.get("sections") or {}).get("special") or []:
+        key = norm(r.get("desc") or "")
+        if key:
+            existing[key] = r
+    wcu = [src for src in (state.get("wcu_rows") or []) if src.get("section") == "special"]
+
+    def spend_for(desc: str):
+        names = [desc] + [p.strip() for p in re.split(r"\s+[—-]\s+", desc) if p.strip()]
+        best = None
+        for src in wcu + list(existing.values()):
+            src_name = src.get("desc") or ""
+            if any(norm(n) == norm(src_name) or _same_job(n, src_name) for n in names):
+                best = src
+                if norm(src_name) == norm(desc):
+                    return src
+        return best
+
     rows = []
-    seen = set()
-    for src in state.get("wcu_rows") or []:
-        if src.get("section") != "special":
+    used = set()
+    plan = [p for p in (state.get("ymp") or []) if str(p.get("desc") or "").strip()]
+    for p in plan:
+        desc = str(p.get("desc") or "").strip()
+        if _plan_header_word(desc):
             continue
+        years = (list(p.get("years") or []) + [0.0] * 10)[:10]
+        if not any(abs(float(y or 0)) > 0.5 for y in years):
+            continue
+        src = spend_for(desc) or {}
+        actual = float(src.get("actual") or 0)
+        budget = float(src.get("budget") or src.get("this_budget") or 0)
+        if budget < 0.5:
+            budget = float(years[0] or 0)
+        rec = row(desc, f"Next year is the {NOW_YEAR + 1} column of the 10-year plan. Actual is what was spent this year.")
+        rec["actual"] = actual
+        rec["this_budget"] = budget
+        rec["yearly"] = float(years[1] or 0)
+        rec["gl"] = src.get("gl") or ""
+        rows.append(rec)
+        if src.get("desc"):
+            used.add(norm(src.get("desc")))
+    for src in wcu:
+        desc = str(src.get("desc") or "").strip()
         actual = float(src.get("actual") or 0)
         budget = float(src.get("budget") or 0)
-        desc = str(src.get("desc") or "").strip()
-        if not desc or norm(desc) in seen or (actual < 0.5 and budget < 0.5):
+        if not desc or norm(desc) in used or (actual < 0.5 and budget < 0.5):
             continue
-        seen.add(norm(desc))
-        rec = row(desc, "Spent this year. Next year stays blank unless this job is also in next year's column.")
+        rec = row(desc, "Spent this year. It is not on the 10-year plan, so Next year is blank until you add it there.")
         rec["actual"] = actual
         rec["this_budget"] = budget
         rec["yearly"] = 0.0
         rec["gl"] = src.get("gl") or ""
         rows.append(rec)
-    if not rows:
-        for r in (state.get("sections") or {}).get("special") or []:
-            actual = float(r.get("actual") or 0)
-            budget = float(r.get("this_budget") or 0)
-            desc = str(r.get("desc") or "").strip()
-            if desc and (actual > 0.5 or budget > 0.5) and norm(desc) not in seen and not re.fullmatch(r"special project \d+|maintenance project \d+", norm(desc)):
-                seen.add(norm(desc))
-                rec = row(desc, r.get("note") or "Spent this year.")
-                rec["actual"] = actual
-                rec["this_budget"] = budget
-                rec["yearly"] = 0.0
-                rec["gl"] = r.get("gl") or ""
-                rows.append(rec)
-    used = set()
-    for p in state.get("ymp") or []:
-        desc = str(p.get("desc") or "").strip()
-        if not desc or re.match(r"^(planned maintenance|total|projects)$", desc, re.I):
-            continue
-        years = (list(p.get("years") or []) + [0.0] * 10)[:10]
-        y2027 = float(years[1] or 0)
-        if y2027 < 0.5:
-            continue
-        hit = next((i for i, r in enumerate(rows) if i not in used and _same_job(desc, r.get("desc") or "")), None)
-        if hit is None:
-            rec = row(desc, f"On the {NOW_YEAR + 1} plan. Nothing was spent on this job this year.")
-            rec["yearly"] = y2027
-            rows.append(rec)
-        else:
-            rows[hit]["yearly"] = y2027
-            rows[hit]["note"] = f"Actual is what was spent this year. Next year is the {NOW_YEAR + 1} column."
-            used.add(hit)
     if rows:
         state.setdefault("sections", {})["special"] = rows
     return len(rows)
@@ -4645,14 +4650,14 @@ The schedule uses the **approved** ordinary levy once the meeting has set one. U
 Do these steps in this order.
 
 1. On the left, choose the WeConnectU **Actual vs Budget** file and click **Load Excel**.
-2. Open **10-year projects**. The GL code comes from WeConnectU. **Budgeted this year** is what was allowed. **Actual** is what was spent. **Over / under** is Actual minus Budgeted. Above zero means we overspent. **Next year** is still blank until the plan is pasted. There is no %.
+2. Open **10-year projects**. Each project that has an amount on the plan is listed. **Next year** is the 2027 column. **Budgeted this year** is the accounts budget, or the 2026 column if the accounts file had none. **Actual** is what was spent. A heading with no amount stays on the plan only.
 3. Open **10-year plan**. Upload the Excel, or copy from the row that says **2025  2026  2027** down to the last project and paste it. Every project line comes through, including a line with no amount yet. The app does not add a total, and it does not fill Current estimate unless that column is on your sheet.
 4. To remove a project, click the trash can on that row, then click **Save 10-year plan**. It stays deleted. Click a project name to read the full words. Scroll right for the later years. A note that sat to the right of the years is in the **Note** column.
 5. Open **10-year projects** again.
    - Done this year and also planned next year: Actual and Next year are both filled.
    - Done this year only: Actual is filled, Next year is blank. It is not repeated.
    - Not done this year, but planned next year: Actual is 0, Next year is the plan amount.
-   - Not done, and nothing next year: it is not on this list. A later year on the 10-year plan keeps it.
+   - **Next year** is the 2027 figure from the plan, including when nothing was spent this year.
 6. Change a next-year amount on the **10-year plan**, then Save. Do not type it on the projects table. The table follows the plan.
 7. Leave **Pay the 10-year projects from the ordinary levy** unticked. The reserve pays these jobs.
 
@@ -5088,8 +5093,8 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             "special",
             "10 Year Maintenance Projects",
             f"Actual is what was spent this year. Budgeted this year is what the current budget allowed, so Actual minus that shows an overspend. "
-            f"Next year is the {NOW_YEAR + 1} column of the 10-year plan. There is no %. The GL code is the WeConnectU code. "
-            "A job with no spend and nothing next year is not on this list. Leave the sidebar tick off if the reserve pays these jobs.",
+            f"Next year is the {NOW_YEAR + 1} column of the 10-year plan, for every project that has an amount on the plan. "
+            "A heading with no amount stays on the plan only. Leave the sidebar tick off if the reserve pays these jobs.",
             plan=True,
         )
         act_sum = sum(float(r.get("actual") or 0) for r in (st.session_state.sections.get("special") or []))
