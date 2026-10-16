@@ -2787,8 +2787,15 @@ def generate_excel(state: dict) -> BytesIO:
     else:
         _approved_year = float(next((it.get("yearly") or 0) for it in s["levy"] if family(it.get("desc") or "") == "ordinary"))
     approved_row = 7
-    ws["B9"] = "Yellow cells can be typed. On the lines, Budgeted yearly is yellow and the % is locked. On Approved, the % is yellow and the yearly rand is locked. Monthly = Yearly ÷ 12. To unlock the sheet: Review, Unprotect Sheet, password domus."
+    ws["B9"] = (
+        "Colours. Yellow with blue numbers: type here. White: locked formula, do not type. "
+        "Pink: a result to check (the levy, a gap, a shortfall or an overspend). It is not added again. "
+        "Pale blue: a total. Dark blue with white words: a heading. Green: the monthly levy the meeting approved."
+    )
+    ws["B9"].alignment = Alignment(wrap_text=True, vertical="center")
+    ws.row_dimensions[9].height = 32
     ws["B9"].font = Font(italic=True, size=9, color="666666")
+    ws.merge_cells("B9:H9")
 
     r = 11
 
@@ -3255,6 +3262,10 @@ def generate_excel(state: dict) -> BytesIO:
         for col in range(first_amt, last_amt + 2):
             letter = get_column_letter(col)
             pq.cell(tot_row, col, f"=SUM({letter}7:{letter}{last_u})").number_format = MONEY
+    note_row = tot_row + 2
+    pq.merge_cells(start_row=note_row, start_column=2, end_row=note_row, end_column=max(6, last_amt + 1))
+    pq.cell(note_row, 2, "Colours. Yellow with blue numbers: type here. White: locked formula, do not type. Dark blue with white words: a heading.")
+    pq.cell(note_row, 2).font = Font(italic=True, size=9, color="666666")
     pq.column_dimensions["A"].width = 6
     pq.column_dimensions["B"].width = 22
     pq.column_dimensions["C"].width = 14
@@ -3270,6 +3281,8 @@ def generate_excel(state: dict) -> BytesIO:
     ymp["A1"].font = Font(bold=True, size=14, color=NAVY)
     ymp["A2"] = "10 YEAR MAINTENANCE PLAN"
     ymp["A2"].font = Font(bold=True, size=12, color=NAVY)
+    ymp["A3"] = "Colours. Yellow with blue numbers: type here. White: do not type. Dark blue with white words: a heading. A red figure in the first year is this year’s project."
+    ymp["A3"].font = Font(italic=True, size=9, color="666666")
     ymp.row_dimensions[1].height = 50
     brand(ymp, "H1", 150, 58)
     headers = ["PROJECTS", "First Cycle", "Frequency of Cycles", "Current Estimate"] + [str(start_y + i) for i in range(10)] + ["Notes"]
@@ -3345,6 +3358,15 @@ def generate_excel(state: dict) -> BytesIO:
     fml(res["F11"], "F8+F9-F10", TOTAL)
     res["B12"] = "Still to be accumulated"
     fml(res["F12"], "MAX(0,-F11)", RED)
+    res["B13"] = (
+        "Colours. Yellow with blue numbers: type here. White: locked formula, do not type. "
+        "Pink: a result to check. On a project it means spent is higher than budgeted. It is not added again. "
+        "Pale blue: a total. Dark blue with white words: a heading."
+    )
+    res["B13"].font = Font(italic=True, size=9, color="666666")
+    res["B13"].alignment = Alignment(wrap_text=True, vertical="center")
+    res.merge_cells("B13:H13")
+    res.row_dimensions[13].height = 32
     if reserve_inside_levy(state):
         res["B14"] = "The contribution is inside the ordinary levy. Owners do not get a separate reserve line. Do not add it again."
     else:
@@ -4706,7 +4728,7 @@ You prepare the budget. The trustees decide in the meeting.
 
 The meeting block is at the top of **BUDGET**. On **Approved**, type the %. The yearly rand calculates from last year’s levies. **What the costs need** and **Gap** are locked. The bank balance is not on this sheet. It is on **RESERVE**.
 
-Yellow cells can be typed. White cells are locked. To unlock: Review, Unprotect Sheet, password **domus**.
+Yellow cells can be typed. White cells are locked. Yellow with blue numbers: type here. Pink: a result to check, not a second charge. Pale blue: a total. Dark blue: a heading. Green: the monthly levy the meeting approved. To unlock: Review, Unprotect Sheet, password **domus**.
 
 On a cost line, type **Budgeted yearly**. The % updates and cannot be typed over. **Cost recoveries** come off that bill. **Recovery against actual** is this year's recovery. A trustee can type 0, or a higher rand. It does not change Budgeted yearly. **Funded by reserve** is the rand that moves to the reserve sheet.
 
