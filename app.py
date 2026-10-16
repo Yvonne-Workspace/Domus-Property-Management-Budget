@@ -560,6 +560,14 @@ def approved_ordinary(state: dict) -> float:
     return costs
 
 
+def ordinary_change_rate(state: dict) -> float:
+    """How much the ordinary levy moves against last year. 0.10 means 10%."""
+    actual = ordinary_actual(state)
+    if actual > 0.5:
+        return approved_ordinary(state) / actual - 1.0
+    return 0.0
+
+
 def levy_pieces(state: dict) -> list:
     s = state["sections"]
     return [
@@ -707,6 +715,12 @@ def apply_levy_lines(state: dict) -> None:
             r["yearly"] = reserve_contribution(state)
             a = float(r.get("actual") or 0)
             r["pct"] = 0.0 if a == 0 else (float(r["yearly"]) / a) * 100 - 100
+        if f in ("boathouse", "boatport"):
+            rate = ordinary_change_rate(state)
+            a = float(r.get("actual") or 0)
+            if a > 0.5:
+                r["yearly"] = a * (1 + rate)
+            r["pct"] = rate * 100
     charged = approved_ordinary(state)
     if state.get("auto_csos", True):
         csos_y = scheme_csos_yearly(state, charged)
@@ -2979,6 +2993,8 @@ def generate_excel(state: dict) -> BytesIO:
                 fml(ws.cell(r, 6), f"0.25*D{levy_rows['ordinary']}{scale}")
             elif fam == "reserve" and state.get("reserve_mode") == "rm100":
                 inp(ws.cell(r, 6), float(reserve_contribution(state) or y or 0), MONEY)
+            elif fam in ("boathouse", "boatport"):
+                levy_rows[fam] = r
             elif linked_csos:
                 fml(ws.cell(r, 6), f"F{levy_rows['csos']}")
             elif rec and not recovery_as_income:
@@ -2986,6 +3002,9 @@ def generate_excel(state: dict) -> BytesIO:
             else:
                 inp(ws.cell(r, 6), abs(y), MONEY)
             note = clean_note(it.get("note"))
+            if fam in ("boathouse", "boatport"):
+                extra = "Same % as the ordinary levy. Locked. Do not type on it."
+                note = f"{note} | {extra}".strip(" |") if note else extra
             if ins:
                 extra = "Insurance payout " + f"{ins:,.2f}"
                 note = f"{note} | {extra}".strip(" |") if note else extra
@@ -3271,6 +3290,15 @@ def generate_excel(state: dict) -> BytesIO:
         fml(ws.cell(12, 7), "F12/12", "C6EFCE")
         fml(ws.cell(res_row, 6), "F12")
         fml(ws.cell(res_row, 7), "F12/12")
+    for fam in ("boathouse", "boatport"):
+        row = levy_rows.get(fam)
+        if not row:
+            continue
+        pct_cell = ws.cell(row, 5)
+        fml(pct_cell, "E7")
+        pct_cell.number_format = "0.00%"
+        fml(ws.cell(row, 6), f"IF(D{row}=0,0,D{row}*(1+E7))")
+        fml(ws.cell(row, 7), f"F{row}/12")
 
     pq = wb.create_sheet("PQ")
     pq["A1"] = "PQ / LEVY SCHEDULE"
@@ -4832,7 +4860,7 @@ Upload the unit file in the sidebar or on **PQ / Levies**. If the PQ column is 0
 
 Each owner’s share of a levy column = their PQ × that column’s monthly total.
 
-Boathouse and boatport stay on the budget, under Levy Income. They are not on the PQ. Not every owner pays them, so they are not split here. The meeting approves the ordinary levy % on the budget sheet.
+Boathouse and boatport stay on the budget, under Levy Income. They are not on the PQ. They take the same % as the ordinary levy. On the Excel sheet those cells are locked.
 
 On **Municipal charges**, **Expenditure**, **Repair and Maintenance** and **Personnel**, **A to Z** sorts by the name and **By GL code** sorts by the code. A line with no code goes last. The amounts do not change. Download Excel after you sort if the sheet must match.
 
@@ -4870,7 +4898,7 @@ You prepare the budget. The trustees decide in the meeting.
 
 **Download Excel** on the Download tab. The file is a normal workbook. **BUDGET** is the levy only. **RESERVE** is the reserve fund, in the same columns. **PQ** and **10 YMP** are unchanged. The Domus logo is at the top of each sheet. When you print, the bottom of every page reads Domus Property Management / Eiendomsbestuur, plus the complex name and the year.
 
-The meeting block is at the top of **BUDGET**. On **Approved**, type the levy %. On **Reserve approved**, type the reserve %. 10% means last year’s figure plus 10%. The yearly rand calculates. **What the costs need**, **Last year’s contribution** and **Gap** are locked. The bank balance is not on this sheet. It is on **RESERVE**.
+The meeting block is at the top of **BUDGET**. On **Approved**, type the levy %. On **Reserve approved**, type the reserve %. 10% means last year’s figure plus 10%. The yearly rand calculates. Boathouse and boatport use that same levy %. Those cells are locked. **What the costs need**, **Last year’s contribution** and **Gap** are locked. The bank balance is not on this sheet. It is on **RESERVE**.
 
 Yellow cells can be typed. White cells are locked. Yellow with blue numbers: type here. Pink: a result to check, not a second charge. Pale blue: a total. Dark blue: a heading. Green: the monthly levy the meeting approved. To unlock: Review, Unprotect Sheet, password **domus**.
 
@@ -4997,7 +5025,8 @@ Click the picture to move on. For the meeting, **Download the presentation**, op
             "levy",
             "Levy Income",
             "Ordinary levies, the reserve levy and CSOS cannot lower the ordinary levy. "
-            "Boathouse, boatport and any other levy can: tick Lowers the ordinary levy when that money helps pay repairs. "
+            "Boathouse and boatport use the same % as the ordinary levy. Do not type their Budgeted yearly. Save puts it back. "
+            "Any other levy can lower the ordinary levy: tick that box when the money helps pay repairs. "
             "Add a row, then Save.",
             income=True,
         )
