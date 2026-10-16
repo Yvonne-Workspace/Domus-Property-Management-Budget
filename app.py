@@ -816,10 +816,10 @@ def pq_bill_lines(state: dict) -> list:
             break
     for r in s.get("levy", []):
         d = r["desc"].lower()
-        if any(x in d for x in ("boathouse", "boatport", "special levy")) and (
-            float(r.get("yearly") or 0) or float(r.get("actual") or 0)
-        ):
-            add(r["desc"], r.get("yearly"), "count" if facility_kind(r["desc"]) else "pq")
+        if any(x in d for x in ("boathouse", "boatport")):
+            continue
+        if "special levy" in d and (float(r.get("yearly") or 0) or float(r.get("actual") or 0)):
+            add(r["desc"], r.get("yearly"))
     for r in s.get("fixed") or []:
         y = float(r.get("yearly") or 0)
         if y < 0.5:
@@ -3303,7 +3303,7 @@ def generate_excel(state: dict) -> BytesIO:
         cell = pq.cell(6, i, h)
         fill(cell, NAVY)
         cell.font = Font(bold=True, color="FFFFFF")
-    pq["A3"] = "Ordinary levy only. These two columns are not in the Total. A boathouse or boatport is charged only where the number is above zero."
+    pq["A3"] = "Ordinary levy only. These two columns are not in the Total."
     pq["A3"].font = Font(italic=True, size=9, color="666666")
     for j, (name, yearly, split) in enumerate(bills):
         col = bill_start + j
@@ -4832,7 +4832,7 @@ Upload the unit file in the sidebar or on **PQ / Levies**. If the PQ column is 0
 
 Each owner’s share of a levy column = their PQ × that column’s monthly total.
 
-Boathouse and boatport are not split by PQ. On **PQ / Levies**, upload the WeConnectU utility reading. A unit that is not on that file pays nothing. Double the usual rand on the file means that unit has two. The budget total is shared by that number, so one boathouse pays the same as any other.
+Boathouse and boatport stay on the budget, under Levy Income. They are not on the PQ. Not every owner pays them, so they are not split here. The meeting approves the ordinary levy % on the budget sheet.
 
 On **Municipal charges**, **Expenditure**, **Repair and Maintenance** and **Personnel**, **A to Z** sorts by the name and **By GL code** sorts by the code. A line with no code goes last. The amounts do not change. Download Excel after you sort if the sheet must match.
 
@@ -5380,36 +5380,6 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             else:
                 st.caption("Monthly column totals: " + " · ".join(f"{n} {money(y/12)}" for n, y, _s in bills))
             st.caption(f"{len(prev)} units. PQ total {float(prev['PQ'].sum()):.6f} (should be about 1.000).")
-            fac = st.session_state.get("facilities") or {}
-            if any(facility_kind(n) for n, _y, s in bills if s == "count"):
-                if not fac:
-                    st.warning("Boathouse and boatport are not charged to anyone yet. Upload the utility reading below. Until then those columns stay at 0.")
-                else:
-                    bits = []
-                    for kind, label in (("boathouse", "boathouses"), ("boatport", "boatports")):
-                        slots = facility_slots(st.session_state, kind)
-                        owners = len((fac.get(kind) or {}))
-                        if slots:
-                            bits.append(f"{slots} {label} across {owners} units")
-                    if bits:
-                        st.caption("Charged only to those units: " + " · ".join(bits) + ". A unit with two pays double.")
-            util_files = st.file_uploader(
-                "Who pays a boathouse or boatport (WeConnectU utility reading)",
-                type=["xlsx", "xls", "xlsm"],
-                accept_multiple_files=True,
-                key="util_reading",
-            )
-            if util_files and st.button("Load who pays"):
-                try:
-                    merged = dict(st.session_state.get("facilities") or {})
-                    for one in util_files:
-                        got = parse_utility_reading(one)
-                        merged.update(got)
-                    st.session_state.facilities = merged
-                    st.success("Loaded. Only the units on those files are charged, and a higher rand means more than one.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(str(e))
             if current_m > 0.5:
                 st.caption(
                     f"Paid last year is the ordinary levy only ({money(current_m)} for the whole complex). "
