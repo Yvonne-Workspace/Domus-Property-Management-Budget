@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 import zipfile
+import base64
 from io import BytesIO
 from pathlib import Path
 
@@ -2507,6 +2511,72 @@ def as_ppsx(pptx_bytes: bytes) -> bytes:
     return out.getvalue()
 
 
+def _chromium_bin() -> str | None:
+    for path in (
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+    ):
+        if Path(path).exists():
+            return path
+    return shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
+
+
+def html_to_ppsx(full_html: str) -> bytes:
+    """One PowerPoint slide per HTML slide, so the show matches the pictures."""
+    browser = _chromium_bin()
+    if not browser:
+        raise RuntimeError("The show could not be built on this server. Use Download the presentation and open it in Chrome.")
+    script_at = full_html.rfind("<script>")
+    body = full_html[:script_at] if script_at > 0 else full_html
+    sections = re.findall(r"<section\b.*?</section>", body, flags=re.S)
+    if not sections:
+        raise RuntimeError("The presentation has no slides.")
+    logo_path = Path(__file__).parent / "domus_logo.jpeg"
+    logo_src = ""
+    if logo_path.exists():
+        logo_src = "data:image/jpeg;base64," + base64.b64encode(logo_path.read_bytes()).decode()
+    css = (
+        "html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:#0F4C4C}"
+        "section{position:absolute;left:0;top:0;width:1920px;height:1080px;opacity:1!important;visibility:visible!important}"
+        ".bi,.bo{animation:none!important;opacity:1!important;transform:none!important}"
+    )
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    prs.core_properties.author = "Domus Property Management"
+    blank = prs.slide_layouts[6]
+    fade = (
+        '<p:transition xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" spd="med">'
+        "<p:fade/></p:transition>"
+    )
+    for sec in sections:
+        if logo_src:
+            sec = sec.replace("<img data-logo", f'<img data-logo src="{logo_src}"')
+        sec = sec.replace("data-srcdoc=", "srcdoc=")
+        page = f"<!doctype html><html><head><meta charset='utf-8'><style>{css}</style></head><body>{sec}</body></html>"
+        with tempfile.TemporaryDirectory() as folder:
+            src = Path(folder) / "slide.html"
+            png = Path(folder) / "slide.png"
+            src.write_text(page, encoding="utf-8")
+            subprocess.run(
+                [
+                    browser, "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--hide-scrollbars",
+                    "--force-device-scale-factor=1", "--window-size=1920,1080",
+                    f"--screenshot={png}", src.as_uri(),
+                ],
+                check=True, timeout=40, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            shot = png.read_bytes()
+        sld = prs.slides.add_slide(blank)
+        sld.shapes.add_picture(BytesIO(shot), 0, 0, prs.slide_width, prs.slide_height)
+        sld._element.append(etree.fromstring(fade))
+    buf = BytesIO()
+    prs.save(buf)
+    return as_ppsx(buf.getvalue())
+
+
 def _child_plain(desc: str) -> str:
     d = (desc or "").lower()
     if "secur" in d or "gate" in d or "camera" in d:
@@ -4763,7 +4833,7 @@ Check the numbers. Change the words if you want — the three good-news lines, w
 
 Click the picture to move on. For the meeting, **Download the presentation**, open it in Chrome, and press F for full screen. Arrow keys, click, or a swipe move the story. The pictures already move.
 
-**Download the PowerPoint show** is the same story as a PPS file. Open it in PowerPoint. It starts as a slideshow. It does not move like the Chrome file. PowerPoint cannot play that one.
+**Download the PowerPoint show** saves the same slides as a PPS file. Open it in PowerPoint. It starts as a slideshow. The pictures match the Chrome presentation. The little movements inside a slide stay in the Chrome file.
 
 **Fill the words from this budget** writes the words again after you change figures. Do not put unit numbers or owner names on the slides.
             """
@@ -5384,17 +5454,6 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         if not st.session_state.complex_name:
             st.warning("Type the complex name in the sidebar first.")
         else:
-            if st.button("Build the PowerPoint show"):
-                st.session_state["ppsx"] = as_ppsx(generate_pptx(st.session_state).getvalue())
-            if st.session_state.get("ppsx"):
-                safe_pps = re.sub(r"\s+", "_", st.session_state.complex_name or "budget")
-                st.download_button(
-                    "Download the PowerPoint show (PPS)",
-                    data=st.session_state["ppsx"],
-                    file_name=f"{safe_pps}_budget.ppsx",
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.slideshow",
-                )
-                st.caption("Open this in PowerPoint. It starts as a slideshow. It is not the moving Chrome presentation.")
             base = presentation_data(st.session_state)
             name = st.session_state.complex_name
             flat = {
@@ -5476,25 +5535,26 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             for k in flat:
                 copy[k] = st.session_state.get("deck_" + k, flat[k])
             st.session_state.deck_copy = copy
+            data = dict(base)
+            data["rand_note"] = copy["rand_note"]
+            data["plan_this_year"] = copy["plan_this_year"]
+            data["plan_soon"] = copy["plan_soon"]
+            data["plan_later"] = copy["plan_later"]
+            data["approve_budget"] = copy["approve_budget"]
+            data["approve_levy"] = copy["approve_levy"]
+            data["approve_reserve"] = copy["approve_reserve"]
+            data["achievements"] = [
+                {"title": copy[f"ach_{i}_title"], "text": copy[f"ach_{i}_text"]} for i in range(3)
+            ]
+            data["changes"] = [
+                {"title": copy[f"ch_{i}_title"], "reason": copy[f"ch_{i}_reason"]} for i in range(3)
+            ]
+            data["reserve_items"] = [
+                {"name": copy.get(f"res_{i}_name") or "Project", "year": copy.get(f"res_{i}_year") or ""}
+                for i in range(len(base["reserve_items"]))
+            ]
+            safe = re.sub(r"\s+", "_", name or "budget")
             if st.button("Play the presentation", type="primary"):
-                data = dict(base)
-                data["rand_note"] = copy["rand_note"]
-                data["plan_this_year"] = copy["plan_this_year"]
-                data["plan_soon"] = copy["plan_soon"]
-                data["plan_later"] = copy["plan_later"]
-                data["approve_budget"] = copy["approve_budget"]
-                data["approve_levy"] = copy["approve_levy"]
-                data["approve_reserve"] = copy["approve_reserve"]
-                data["achievements"] = [
-                    {"title": copy[f"ach_{i}_title"], "text": copy[f"ach_{i}_text"]} for i in range(3)
-                ]
-                data["changes"] = [
-                    {"title": copy[f"ch_{i}_title"], "reason": copy[f"ch_{i}_reason"]} for i in range(3)
-                ]
-                data["reserve_items"] = [
-                    {"name": copy.get(f"res_{i}_name") or "Project", "year": copy.get(f"res_{i}_year") or ""}
-                    for i in range(len(base["reserve_items"]))
-                ]
                 try:
                     st.session_state["deck_html"] = render_budget_deck(data)
                     st.session_state.pop("deck_error", None)
@@ -5504,7 +5564,6 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 st.error(st.session_state["deck_error"])
             if st.session_state.get("deck_html"):
                 st.components.v1.html(st.session_state["deck_html"], height=800, scrolling=False)
-                safe = re.sub(r"\s+", "_", name or "budget")
                 st.download_button(
                     "Download the presentation",
                     data=st.session_state["deck_html"],
@@ -5512,6 +5571,23 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                     mime="text/html",
                 )
                 st.caption("Open it in Chrome. Press F for full screen. Arrow keys, a click, or a swipe moves the story.")
+            if st.button("Build the PowerPoint show"):
+                try:
+                    with st.spinner("Building the same slides for PowerPoint…"):
+                        st.session_state["ppsx"] = html_to_ppsx(render_budget_deck(data))
+                    st.session_state.pop("ppsx_error", None)
+                except Exception as e:
+                    st.session_state["ppsx_error"] = str(e)
+            if st.session_state.get("ppsx_error"):
+                st.error(st.session_state["ppsx_error"])
+            if st.session_state.get("ppsx"):
+                st.download_button(
+                    "Download the PowerPoint show (PPS)",
+                    data=st.session_state["ppsx"],
+                    file_name=f"{safe}_budget.ppsx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+                )
+                st.caption("Open this in PowerPoint. It starts as a slideshow. The slides are the same pictures as the Chrome presentation.")
         with st.expander("Older presentation"):
             st.caption("The earlier deck. The new one above is the one for meetings.")
             if st.session_state.complex_name and st.button("Build the older presentation"):
