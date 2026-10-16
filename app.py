@@ -4,11 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
-import subprocess
-import tempfile
-import zipfile
-import base64
 from io import BytesIO
 from pathlib import Path
 
@@ -2495,88 +2490,6 @@ def generate_pptx(state: dict) -> BytesIO:
     return buf
 
 
-def as_ppsx(pptx_bytes: bytes) -> bytes:
-    """Same slides, saved so PowerPoint opens them as a show."""
-    src = BytesIO(pptx_bytes)
-    out = BytesIO()
-    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-        for info in zin.infolist():
-            data = zin.read(info.filename)
-            if info.filename == "[Content_Types].xml":
-                data = data.replace(
-                    b"presentationml.presentation.main+xml",
-                    b"presentationml.slideshow.main+xml",
-                )
-            zout.writestr(info.filename, data)
-    return out.getvalue()
-
-
-def _chromium_bin() -> str | None:
-    for path in (
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-    ):
-        if Path(path).exists():
-            return path
-    return shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
-
-
-def html_to_ppsx(full_html: str) -> bytes:
-    """One PowerPoint slide per HTML slide, so the show matches the pictures."""
-    browser = _chromium_bin()
-    if not browser:
-        raise RuntimeError("The show could not be built on this server. Use Download the presentation and open it in Chrome.")
-    script_at = full_html.rfind("<script>")
-    body = full_html[:script_at] if script_at > 0 else full_html
-    sections = re.findall(r"<section\b.*?</section>", body, flags=re.S)
-    if not sections:
-        raise RuntimeError("The presentation has no slides.")
-    logo_path = Path(__file__).parent / "domus_logo.jpeg"
-    logo_src = ""
-    if logo_path.exists():
-        logo_src = "data:image/jpeg;base64," + base64.b64encode(logo_path.read_bytes()).decode()
-    css = (
-        "html,body{margin:0;width:1920px;height:1080px;overflow:hidden;background:#0F4C4C}"
-        "section{position:absolute;left:0;top:0;width:1920px;height:1080px;opacity:1!important;visibility:visible!important}"
-        ".bi,.bo{animation:none!important;opacity:1!important;transform:none!important}"
-    )
-    prs = Presentation()
-    prs.slide_width = Inches(13.333)
-    prs.slide_height = Inches(7.5)
-    prs.core_properties.author = "Domus Property Management"
-    blank = prs.slide_layouts[6]
-    fade = (
-        '<p:transition xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" spd="med">'
-        "<p:fade/></p:transition>"
-    )
-    for sec in sections:
-        if logo_src:
-            sec = sec.replace("<img data-logo", f'<img data-logo src="{logo_src}"')
-        sec = sec.replace("data-srcdoc=", "srcdoc=")
-        page = f"<!doctype html><html><head><meta charset='utf-8'><style>{css}</style></head><body>{sec}</body></html>"
-        with tempfile.TemporaryDirectory() as folder:
-            src = Path(folder) / "slide.html"
-            png = Path(folder) / "slide.png"
-            src.write_text(page, encoding="utf-8")
-            subprocess.run(
-                [
-                    browser, "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--hide-scrollbars",
-                    "--force-device-scale-factor=1", "--window-size=1920,1080",
-                    f"--screenshot={png}", src.as_uri(),
-                ],
-                check=True, timeout=40, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            shot = png.read_bytes()
-        sld = prs.slides.add_slide(blank)
-        sld.shapes.add_picture(BytesIO(shot), 0, 0, prs.slide_width, prs.slide_height)
-        sld._element.append(etree.fromstring(fade))
-    buf = BytesIO()
-    prs.save(buf)
-    return as_ppsx(buf.getvalue())
-
-
 def _child_plain(desc: str) -> str:
     d = (desc or "").lower()
     if "secur" in d or "gate" in d or "camera" in d:
@@ -4833,8 +4746,6 @@ Check the numbers. Change the words if you want — the three good-news lines, w
 
 Click the picture to move on. For the meeting, **Download the presentation**, open it in Chrome, and press F for full screen. Arrow keys, click, or a swipe move the story. The pictures already move.
 
-**Download the PowerPoint show** saves the same slides as a PPS file. Open it in PowerPoint. It starts as a slideshow. The pictures match the Chrome presentation. The little movements inside a slide stay in the Chrome file.
-
 **Fill the words from this budget** writes the words again after you change figures. Do not put unit numbers or owner names on the slides.
             """
         )
@@ -5571,23 +5482,6 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                     mime="text/html",
                 )
                 st.caption("Open it in Chrome. Press F for full screen. Arrow keys, a click, or a swipe moves the story.")
-            if st.button("Build the PowerPoint show"):
-                try:
-                    with st.spinner("Building the same slides for PowerPoint…"):
-                        st.session_state["ppsx"] = html_to_ppsx(render_budget_deck(data))
-                    st.session_state.pop("ppsx_error", None)
-                except Exception as e:
-                    st.session_state["ppsx_error"] = str(e)
-            if st.session_state.get("ppsx_error"):
-                st.error(st.session_state["ppsx_error"])
-            if st.session_state.get("ppsx"):
-                st.download_button(
-                    "Download the PowerPoint show (PPS)",
-                    data=st.session_state["ppsx"],
-                    file_name=f"{safe}_budget.ppsx",
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.slideshow",
-                )
-                st.caption("Open this in PowerPoint. It starts as a slideshow. The slides are the same pictures as the Chrome presentation.")
         with st.expander("Older presentation"):
             st.caption("The earlier deck. The new one above is the one for meetings.")
             if st.session_state.complex_name and st.button("Build the older presentation"):
