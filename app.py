@@ -819,7 +819,7 @@ def pq_bill_lines(state: dict) -> list:
         if any(x in d for x in ("boathouse", "boatport", "special levy")) and (
             float(r.get("yearly") or 0) or float(r.get("actual") or 0)
         ):
-            add(r["desc"], r.get("yearly"))
+            add(r["desc"], r.get("yearly"), "count" if facility_kind(r["desc"]) else "pq")
     for r in s.get("fixed") or []:
         y = float(r.get("yearly") or 0)
         if y < 0.5:
@@ -828,6 +828,75 @@ def pq_bill_lines(state: dict) -> list:
         if "insurance" in d and insurance_on_pq(state):
             continue
         add(r.get("desc") or "Extra charge", y, "equal")
+    return out
+
+
+def unit_key(value) -> str:
+    s = str(value or "").strip()
+    if re.fullmatch(r"\d+\.0", s):
+        s = s[:-2]
+    return re.sub(r"\s+", "", s.lower())
+
+
+def facility_kind(desc: str) -> str | None:
+    d = (desc or "").lower()
+    if "boathouse" in d:
+        return "boathouse"
+    if "boatport" in d or "boat port" in d:
+        return "boatport"
+    return None
+
+
+def facility_qty(state: dict, kind: str, unit) -> int:
+    book = ((state.get("facilities") or {}).get(kind) or {})
+    return int(book.get(unit_key(unit)) or 0)
+
+
+def facility_slots(state: dict, kind: str) -> int:
+    return sum(int(v or 0) for v in ((state.get("facilities") or {}).get(kind) or {}).values())
+
+
+def parse_utility_reading(uploaded) -> dict:
+    """WeConnectU utility reading: who pays, and how many, from the rand charged."""
+    raw = uploaded.read() if hasattr(uploaded, "read") else uploaded
+    df = pd.read_excel(BytesIO(raw), header=None)
+    header = None
+    for i in range(min(15, len(df))):
+        vals = [str(v).strip().lower() for v in df.iloc[i].tolist()]
+        if any(v.startswith("unit") for v in vals) and any("desc" in v for v in vals) and any("cost" in v for v in vals):
+            header = i
+            break
+    if header is None:
+        raise ValueError("This is not a utility reading. It needs Unit No, Description and Cost.")
+    cols = [str(c).strip().lower() for c in df.iloc[header].tolist()]
+    ui = next(i for i, c in enumerate(cols) if c.startswith("unit"))
+    di = next(i for i, c in enumerate(cols) if "desc" in c)
+    ci = next(i for i, c in enumerate(cols) if "cost" in c)
+    grouped: dict[str, list] = {}
+    for r in range(header + 1, len(df)):
+        desc = str(df.iat[r, di] or "").strip()
+        kind = facility_kind(desc)
+        unit = unit_key(df.iat[r, ui])
+        if not kind or not unit or unit == "nan":
+            continue
+        text = str(df.iat[r, ci] or "").replace("R", "").replace(",", "").replace(" ", "")
+        try:
+            amount = abs(float(text))
+        except ValueError:
+            continue
+        if amount < 0.5:
+            continue
+        grouped.setdefault(kind, []).append((unit, round(amount, 2)))
+    if not grouped:
+        raise ValueError("No boathouse or boatport rows were found.")
+    out = {}
+    for kind, items in grouped.items():
+        base = max(set(a for _, a in items), key=lambda a: sum(1 for _, x in items if x == a))
+        book: dict[str, int] = {}
+        for unit, amount in items:
+            qty = max(1, int(round(amount / base))) if base else 1
+            book[unit] = book.get(unit, 0) + qty
+        out[kind] = book
     return out
 
 
@@ -1969,6 +2038,9 @@ def presentation_data(state: dict) -> dict:
             continue
         if split == "equal":
             monthly = float(yearly) / 12 / max(n_units, 1)
+        elif split == "count":
+            slots = facility_slots(state, facility_kind(name) or "")
+            monthly = float(yearly) / 12 / slots if slots else 0.0
         elif share:
             monthly = float(yearly) / 12 * share
         else:
@@ -1979,7 +2051,7 @@ def presentation_data(state: dict) -> dict:
         elif "insurance" in low:
             desc = blurbs["insurance"]
         elif "boat" in low:
-            desc = "Running of " + name.replace("Levy -", "").replace("Levy", "").strip().lower()
+            desc = "Only if this home has one. It is not added to every owner's levy."
         elif split == "equal":
             desc = "The same amount for every home"
         else:
@@ -1993,7 +2065,7 @@ def presentation_data(state: dict) -> dict:
         })
     monthly_total = 0.0
     for name, yearly, split in pq_bill_lines(state):
-        if abs(float(yearly or 0)) < 0.5:
+        if abs(float(yearly or 0)) < 0.5 or split == "count":
             continue
         if split == "equal":
             monthly_total += float(yearly) / 12 / max(n_units, 1)
@@ -2559,12 +2631,15 @@ def meeting_pack(state: dict) -> dict:
             continue
         if split == "equal":
             monthly = yearly / 12 / max(n_units, 1)
+        elif split == "count":
+            slots = facility_slots(state, facility_kind(name) or "")
+            monthly = yearly / 12 / slots if slots else 0.0
         elif share:
             monthly = yearly / 12 * share
         else:
             monthly = yearly / 12
         invoice.append({"name": name, "yearly": yearly, "monthly": monthly, "plain": _invoice_plain(name, split)})
-    owner_month = sum(x["monthly"] for x in invoice) or ((ordinary + reserve + csos) / 12 * (share or 1))
+    owner_month = sum(x["monthly"] for x in invoice if facility_kind(x["name"]) is None) or ((ordinary + reserve + csos) / 12 * (share or 1))
     collect_year = sum(x["yearly"] for x in invoice) or (ordinary + reserve + csos)
 
     last_actual = 0.0
@@ -3213,14 +3288,23 @@ def generate_excel(state: dict) -> BytesIO:
         nm = it.get("desc") or ""
         if nm in named_rows:
             name_to_budget[nm] = f"BUDGET!G{named_rows[nm]}"
-    headers = ["#", "Unit", "PQ", "Paid last year", "Will pay this year", "Change"] + [n for n, _, _s in bills] + ["Total"]
+    for name, _yearly, _split in bills:
+        if name in named_rows and name not in name_to_budget:
+            name_to_budget[name] = f"BUDGET!G{named_rows[name]}"
+    count_bills = [(n, y, s) for n, y, s in bills if s == "count"]
+    count_col = {}
+    for j, (name, _y, _s) in enumerate(count_bills):
+        count_col[name] = 7 + j
+    bill_start = 7 + len(count_bills)
+    headers = ["#", "Unit", "PQ", "Paid last year", "Will pay this year", "Change"]
+    headers += [("Boathouse no." if facility_kind(n) == "boathouse" else "Boatport no.") for n, _y, _s in count_bills]
+    headers += [n for n, _, _s in bills] + ["Total"]
     for i, h in enumerate(headers, 1):
         cell = pq.cell(6, i, h)
         fill(cell, NAVY)
         cell.font = Font(bold=True, color="FFFFFF")
-    pq["A3"] = "Ordinary levy only. These two columns are not in the Total."
+    pq["A3"] = "Ordinary levy only. These two columns are not in the Total. A boathouse or boatport is charged only where the number is above zero."
     pq["A3"].font = Font(italic=True, size=9, color="666666")
-    bill_start = 7
     for j, (name, yearly, split) in enumerate(bills):
         col = bill_start + j
         pq.cell(3, col, name)
@@ -3233,7 +3317,13 @@ def generate_excel(state: dict) -> BytesIO:
             pq.cell(4, col, float(yearly or 0) / 12)
         pq.cell(4, col).number_format = MONEY
         fill(pq.cell(4, col), YELLOW)
-        pq.cell(5, col, "equal / unit" if split == "equal" else "× PQ")
+        if split == "equal":
+            note = "equal / unit"
+        elif split == "count":
+            note = "only where the number is above 0"
+        else:
+            note = "× PQ"
+        pq.cell(5, col, note)
         pq.cell(5, col).font = Font(italic=True, size=8, color="666666")
     levy_col = bill_start + next((j for j, (name, _, _) in enumerate(bills) if name == "Levies"), 0)
     levy_letter = get_column_letter(levy_col)
@@ -3248,6 +3338,7 @@ def generate_excel(state: dict) -> BytesIO:
     pq.cell(5, 6).font = Font(italic=True, size=8, color="666666")
     units = state.get("pq") or [{"Unit": "UNIT-1", "PQ": 1.0}]
     n_units = max(len(units), 1)
+    last_u = 6 + len(units)
     first_amt, last_amt = bill_start, bill_start - 1 + len(bills)
     for i, u in enumerate(units):
         rr = 7 + i
@@ -3257,16 +3348,26 @@ def generate_excel(state: dict) -> BytesIO:
         fml(pq.cell(rr, 4), f"$C{rr}*D$4")
         fml(pq.cell(rr, 5), f"{levy_letter}{rr}")
         fml(pq.cell(rr, 6), f"E{rr}-D{rr}")
-        for j, (_n, _y, split) in enumerate(bills):
+        for name, _y, _s in count_bills:
+            col = count_col[name]
+            cell = pq.cell(rr, col, facility_qty(state, facility_kind(name) or "", u.get("Unit")))
+            cell.number_format = "0"
+            cell.font = Font(name="Calibri", size=10, color=BLUE)
+            fill(cell, YELLOW)
+            cell.border = THIN
+            cell.protection = Protection(locked=False)
+        for j, (name, _y, split) in enumerate(bills):
             col = bill_start + j
             letter = get_column_letter(col)
             if split == "equal":
                 pq.cell(rr, col, f"={letter}$4/{n_units}").number_format = MONEY
+            elif split == "count":
+                cl = get_column_letter(count_col[name])
+                pq.cell(rr, col, f"=IF(SUM({cl}$7:{cl}${last_u})=0,0,{cl}{rr}/SUM({cl}$7:{cl}${last_u})*{letter}$4)").number_format = MONEY
             else:
                 pq.cell(rr, col, f"=$C{rr}*{letter}$4").number_format = MONEY
         if bills:
             pq.cell(rr, last_amt + 1, f"=SUM({get_column_letter(first_amt)}{rr}:{get_column_letter(last_amt)}{rr})").number_format = MONEY
-    last_u = 6 + len(units)
     tot_row = last_u + 1
     pq.cell(tot_row, 2, "TOTAL")
     pq.cell(tot_row, 3, f"=SUM(C7:C{last_u})")
@@ -3274,6 +3375,11 @@ def generate_excel(state: dict) -> BytesIO:
     for col in range(4, 7):
         letter = get_column_letter(col)
         pq.cell(tot_row, col, f"=SUM({letter}7:{letter}{last_u})").number_format = MONEY
+    for name, _y, _s in count_bills:
+        col = count_col[name]
+        letter = get_column_letter(col)
+        pq.cell(tot_row, col, f"=SUM({letter}7:{letter}{last_u})")
+        pq.cell(tot_row, col).number_format = "0"
     if bills:
         for col in range(first_amt, last_amt + 2):
             letter = get_column_letter(col)
@@ -3509,6 +3615,7 @@ def generate_excel(state: dict) -> BytesIO:
         "actual_months": int(state.get("actual_months") or 12),
         "tax_auto": bool(state.get("tax_auto", True)),
         "deck_copy": state.get("deck_copy") or {},
+        "facilities": state.get("facilities") or {},
     }
     blob = json.dumps(payload, ensure_ascii=False)
     # Excel cell cap is 32767; split across rows if needed.
@@ -3938,6 +4045,7 @@ def init():
     ss.setdefault("estate_levy_name", "Estate / master HOA levy")
     ss.setdefault("estate_levy_mode", "separate")
     ss.setdefault("estate_split", "equal")
+    ss.setdefault("facilities", {})
 
 
 MOVE_TO = {
@@ -4389,7 +4497,7 @@ def main():
                     "reserve_mode", "reserve_amount", "reserve_balance", "reserve_bill", "scheme_type", "special_in_ordinary",
                     "current_monthly_levy", "actual_months", "tax_auto",
                     "levy_approve_mode", "levy_approved_pct", "levy_approved_amount",
-                    "deck_copy",
+                    "deck_copy", "facilities",
                 ):
                     if k in data and data[k] is not None:
                         st.session_state[k] = data[k]
@@ -4723,6 +4831,8 @@ A cost that is not on the plan can still be paid by the reserve. Type the rand i
 Upload the unit file in the sidebar or on **PQ / Levies**. If the PQ column is 0, the app uses **Ratio 1**. The ratios must add up to about 1.000.
 
 Each owner’s share of a levy column = their PQ × that column’s monthly total.
+
+Boathouse and boatport are not split by PQ. On **PQ / Levies**, upload the WeConnectU utility reading. A unit that is not on that file pays nothing. Double the usual rand on the file means that unit has two. The budget total is shared by that number, so one boathouse pays the same as any other.
 
 On **Municipal charges**, **Expenditure**, **Repair and Maintenance** and **Personnel**, **A to Z** sorts by the name and **By GL code** sorts by the code. A line with no code goes last. The amounts do not change. Download Excel after you sort if the sheet must match.
 
@@ -5220,12 +5330,24 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             extra_cols = []
             n_units = max(len(prev), 1)
             for name, yearly, split in bills:
+                if split != "count":
+                    continue
+                kind = facility_kind(name) or ""
+                label = "Boathouse no." if kind == "boathouse" else "Boatport no."
+                prev[label] = prev["Unit"].map(lambda u, k=kind: facility_qty(st.session_state, k, u))
+                extra_cols.append(label)
+            for name, yearly, split in bills:
                 col = str(name)
                 if col in ("Unit", "PQ"):
                     col = f"{name} levy"
                 monthly = float(yearly or 0) / 12
                 if split == "equal":
                     prev[col] = monthly / n_units
+                elif split == "count":
+                    kind = facility_kind(name) or ""
+                    slots = facility_slots(st.session_state, kind)
+                    qty = prev["Unit"].map(lambda u, k=kind: facility_qty(st.session_state, k, u))
+                    prev[col] = 0.0 if slots < 1 else qty.astype(float) / slots * monthly
                 else:
                     prev[col] = prev["PQ"].astype(float) * monthly
                 extra_cols.append(col)
@@ -5258,6 +5380,36 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             else:
                 st.caption("Monthly column totals: " + " · ".join(f"{n} {money(y/12)}" for n, y, _s in bills))
             st.caption(f"{len(prev)} units. PQ total {float(prev['PQ'].sum()):.6f} (should be about 1.000).")
+            fac = st.session_state.get("facilities") or {}
+            if any(facility_kind(n) for n, _y, s in bills if s == "count"):
+                if not fac:
+                    st.warning("Boathouse and boatport are not charged to anyone yet. Upload the utility reading below. Until then those columns stay at 0.")
+                else:
+                    bits = []
+                    for kind, label in (("boathouse", "boathouses"), ("boatport", "boatports")):
+                        slots = facility_slots(st.session_state, kind)
+                        owners = len((fac.get(kind) or {}))
+                        if slots:
+                            bits.append(f"{slots} {label} across {owners} units")
+                    if bits:
+                        st.caption("Charged only to those units: " + " · ".join(bits) + ". A unit with two pays double.")
+            util_files = st.file_uploader(
+                "Who pays a boathouse or boatport (WeConnectU utility reading)",
+                type=["xlsx", "xls", "xlsm"],
+                accept_multiple_files=True,
+                key="util_reading",
+            )
+            if util_files and st.button("Load who pays"):
+                try:
+                    merged = dict(st.session_state.get("facilities") or {})
+                    for one in util_files:
+                        got = parse_utility_reading(one)
+                        merged.update(got)
+                    st.session_state.facilities = merged
+                    st.success("Loaded. Only the units on those files are charged, and a higher rand means more than one.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
             if current_m > 0.5:
                 st.caption(
                     f"Paid last year is the ordinary levy only ({money(current_m)} for the whole complex). "
