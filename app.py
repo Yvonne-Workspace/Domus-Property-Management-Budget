@@ -2773,10 +2773,10 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B5"] = "MEETING DECISION — Levies received"
     ws["B5"].font = Font(bold=True, size=12, color=NAVY)
     ws["B6"] = "What the costs need"
-    ws["B7"] = "Approved — type the yearly rand"
+    ws["B7"] = "Approved — type the %"
     ws["B8"] = "Gap — costs minus approved. Above zero means the costs are still higher."
     ws["B8"].font = Font(italic=True, size=9, color="9C0006")
-    ws["H7"] = "Type the yearly rand the meeting agrees. The % is locked. Do not type on it."
+    ws["H7"] = "Type the % the meeting agrees. 10% means last year’s levies plus 10%. The yearly rand calculates. Do not type on it."
     ws["H7"].font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
     _ord_actual = ordinary_actual(state)
     _mode = state.get("levy_approve_mode") or "costs"
@@ -2786,9 +2786,8 @@ def generate_excel(state: dict) -> BytesIO:
         _approved_year = _ord_actual * (1 + float(state.get("levy_approved_pct") or 0) / 100.0)
     else:
         _approved_year = float(next((it.get("yearly") or 0) for it in s["levy"] if family(it.get("desc") or "") == "ordinary"))
-    inp(ws["F7"], _approved_year, MONEY)
     approved_row = 7
-    ws["B9"] = "Yellow cells can be typed. Everything else is locked. Budgeted yearly is yellow. The % cannot be changed. Monthly = Yearly ÷ 12. To unlock the sheet: Review, Unprotect Sheet, password domus."
+    ws["B9"] = "Yellow cells can be typed. On the lines, Budgeted yearly is yellow and the % is locked. On Approved, the % is yellow and the yearly rand is locked. Monthly = Yearly ÷ 12. To unlock the sheet: Review, Unprotect Sheet, password domus."
     ws["B9"].font = Font(italic=True, size=9, color="666666")
 
     r = 11
@@ -3168,9 +3167,9 @@ def generate_excel(state: dict) -> BytesIO:
         pct6 = ws.cell(6, 5)
         fml(pct6, f"IF(D{ord_row}=0,0,F6/D{ord_row}-1)")
         pct6.number_format = "0.00%"
-        pct7 = ws.cell(7, 5)
-        fml(pct7, "IF(OrdinaryActual=0,0,F7/OrdinaryActual-1)")
-        pct7.number_format = "0.00%"
+        seed_pct = (_approved_year / _ord_actual - 1) if _ord_actual > 0.5 and _approved_year > 0.5 else 0.0
+        inp(ws.cell(7, 5), seed_pct, "0.00%")
+        fml(ws.cell(7, 6), "IF(OrdinaryActual=0,F6,OrdinaryActual*(1+E7))")
         fml(ws.cell(7, 7), "F7/12", "C6EFCE")
         fml(ws.cell(8, 6), "F6-F7", RED)
         fml(ws.cell(8, 7), "F8/12", RED)
@@ -4705,7 +4704,7 @@ You prepare the budget. The trustees decide in the meeting.
 
 **Download Excel** on the Download tab. The file is a normal workbook. **BUDGET** is the levy only. **RESERVE** is the reserve fund, in the same columns. **PQ** and **10 YMP** are unchanged. The Domus logo is at the top of each sheet. When you print, the bottom of every page reads Domus Property Management / Eiendomsbestuur, plus the complex name and the year.
 
-The meeting block is at the top of **BUDGET**. Type the yearly rand on **Approved**. The % is locked. **What the costs need** and **Gap** are locked. The bank balance is not on this sheet. It is on **RESERVE**.
+The meeting block is at the top of **BUDGET**. On **Approved**, type the %. The yearly rand calculates from last year’s levies. **What the costs need** and **Gap** are locked. The bank balance is not on this sheet. It is on **RESERVE**.
 
 Yellow cells can be typed. White cells are locked. To unlock: Review, Unprotect Sheet, password **domus**.
 
@@ -4781,10 +4780,9 @@ Click the picture to move on. For the meeting, **Download the presentation**, op
         st.subheader("Meeting decision — Levies received")
         st.caption(
             "You do not set this before the meeting. Download the sheet. "
-            "In the meeting the trustees use one yellow line, **Approved — type a % or a rand**. "
-            "They type the % in the % column, or they type a rand over the yearly amount. "
-            "They can also change the other yellow cells. When they send the file back, use **Restore my budget**. "
-            "The % on the Levies received line itself still will not stick."
+            "In the meeting the trustees type the % on the yellow Approved line. "
+            "10% means last year’s levies plus 10%. The yearly rand calculates. "
+            "The % on each cost line stays locked. A yellow Budgeted yearly cell can still be typed. "
         )
         _mode = st.radio(
             "What should owners be charged?",
