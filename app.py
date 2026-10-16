@@ -2778,6 +2778,12 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B8"].font = Font(italic=True, size=9, color="9C0006")
     ws["H7"] = "Type the % the meeting agrees. 10% means last year’s levies plus 10%. The yearly rand calculates. Do not type on it."
     ws["H7"].font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
+    ws["B10"] = "MEETING DECISION — Reserve fund"
+    ws["B10"].font = Font(bold=True, size=12, color=NAVY)
+    ws["B11"] = "Last year’s contribution"
+    ws["B12"] = "Reserve approved — type the %"
+    ws["H12"] = "Type the % the meeting agrees. 10% means last year’s reserve contribution plus 10%. The yearly rand calculates. Do not type on it."
+    ws["H12"].font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
     _ord_actual = ordinary_actual(state)
     _mode = state.get("levy_approve_mode") or "costs"
     if _mode == "amount" and float(state.get("levy_approved_amount") or 0) > 0.5:
@@ -2787,17 +2793,17 @@ def generate_excel(state: dict) -> BytesIO:
     else:
         _approved_year = float(next((it.get("yearly") or 0) for it in s["levy"] if family(it.get("desc") or "") == "ordinary"))
     approved_row = 7
-    ws["B9"] = (
+    ws["B13"] = (
         "Colours. Yellow with blue numbers: type here. White: locked formula, do not type. "
         "Pink: a result to check (the levy, a gap, a shortfall or an overspend). It is not added again. "
         "Pale blue: a total. Dark blue with white words: a heading. Green: the monthly levy the meeting approved."
     )
-    ws["B9"].alignment = Alignment(wrap_text=True, vertical="center")
-    ws.row_dimensions[9].height = 32
-    ws["B9"].font = Font(italic=True, size=9, color="666666")
-    ws.merge_cells("B9:H9")
+    ws["B13"].alignment = Alignment(wrap_text=True, vertical="center")
+    ws.row_dimensions[13].height = 32
+    ws["B13"].font = Font(italic=True, size=9, color="666666")
+    ws.merge_cells("B13:H13")
 
-    r = 11
+    r = 15
 
     def bar(title):
         nonlocal r
@@ -3104,9 +3110,6 @@ def generate_excel(state: dict) -> BytesIO:
             return "0"
         return "+".join(f"N(J{n})" for n in rows)
 
-    if state.get("reserve_mode") == "rm100" and levy_rows.get("reserve"):
-        fml(ws.cell(levy_rows["reserve"], 6), f"MAX(0,F{rm_tot}-({yes_sum(rm_mark_rows)}))")
-        fml(ws.cell(levy_rows["reserve"], 7), f"F{levy_rows['reserve']}/12")
     bar("PERSONNEL")
     hdr()
     a, b = write(s.get("personnel") or [], in_levy=True, reserve_col=True)
@@ -3180,6 +3183,19 @@ def generate_excel(state: dict) -> BytesIO:
         fml(ws.cell(7, 7), "F7/12", "C6EFCE")
         fml(ws.cell(8, 6), "F6-F7", RED)
         fml(ws.cell(8, 7), "F8/12", RED)
+    if levy_rows.get("reserve"):
+        res_row = levy_rows["reserve"]
+        wb.defined_names.add(DefinedName(name="ReserveActual", attr_text=f"BUDGET!$D${res_row}"))
+        fml(ws.cell(11, 6), f"D{res_row}")
+        fml(ws.cell(11, 7), "F11/12")
+        _res_actual = float(next((it.get("actual") or 0) for it in s["levy"] if family(it.get("desc") or "") == "reserve"))
+        _res_year = float(reserve_contribution(state) or 0)
+        seed_res = (_res_year / _res_actual - 1) if _res_actual > 0.5 else 0.0
+        inp(ws.cell(12, 5), seed_res, "0.00%")
+        fml(ws.cell(12, 6), f"IF(F11=0,{_res_year},F11*(1+E12))")
+        fml(ws.cell(12, 7), "F12/12", "C6EFCE")
+        fml(ws.cell(res_row, 6), "F12")
+        fml(ws.cell(res_row, 7), "F12/12")
 
     pq = wb.create_sheet("PQ")
     pq["A1"] = "PQ / LEVY SCHEDULE"
@@ -3659,23 +3675,41 @@ def _read_meeting_from_sheet(wb, data: dict) -> None:
     rand_v = None
     for r in range(1, int(ws.max_row or 1) + 1):
         label = str(ws.cell(r, 2).value or "")
-        if label.startswith("Approved"):
+        if label.startswith("Approved — type"):
             pct_v = ws.cell(r, 5).value
             year_v = ws.cell(r, 6).value
             if isinstance(year_v, (int, float)) and float(year_v) > 0.5:
                 data["levy_approve_mode"] = "amount"
                 data["levy_approved_amount"] = float(year_v)
-                return
+                continue
             if isinstance(pct_v, str) and str(pct_v).startswith("="):
                 data["levy_approve_mode"] = "costs"
-                return
+                continue
             if isinstance(pct_v, (int, float)):
                 pct = float(pct_v)
                 if abs(pct) <= 2:
                     pct *= 100.0
                 data["levy_approve_mode"] = "pct"
                 data["levy_approved_pct"] = pct
-            return
+            continue
+        if label.startswith("Reserve approved"):
+            pct_v = ws.cell(r, 5).value
+            if isinstance(pct_v, str) and str(pct_v).startswith("="):
+                continue
+            if not isinstance(pct_v, (int, float)):
+                continue
+            pct = float(pct_v)
+            if abs(pct) <= 2:
+                pct *= 100.0
+            actual = 0.0
+            for it in (data.get("sections") or {}).get("levy") or []:
+                if family(it.get("desc") or "") == "reserve":
+                    actual = float(it.get("actual") or 0)
+                    break
+            data["reserve_mode"] = "amount"
+            data["reserve_approve_pct"] = pct
+            if actual > 0.5:
+                data["reserve_amount"] = actual * (1 + pct / 100.0)
 
 
 def _restore_from_domus_sheet(wb) -> dict | None:
@@ -4726,7 +4760,7 @@ You prepare the budget. The trustees decide in the meeting.
 
 **Download Excel** on the Download tab. The file is a normal workbook. **BUDGET** is the levy only. **RESERVE** is the reserve fund, in the same columns. **PQ** and **10 YMP** are unchanged. The Domus logo is at the top of each sheet. When you print, the bottom of every page reads Domus Property Management / Eiendomsbestuur, plus the complex name and the year.
 
-The meeting block is at the top of **BUDGET**. On **Approved**, type the %. The yearly rand calculates from last year’s levies. **What the costs need** and **Gap** are locked. The bank balance is not on this sheet. It is on **RESERVE**.
+The meeting block is at the top of **BUDGET**. On **Approved**, type the levy %. On **Reserve approved**, type the reserve %. 10% means last year’s figure plus 10%. The yearly rand calculates. **What the costs need**, **Last year’s contribution** and **Gap** are locked. The bank balance is not on this sheet. It is on **RESERVE**.
 
 Yellow cells can be typed. White cells are locked. Yellow with blue numbers: type here. Pink: a result to check, not a second charge. Pale blue: a total. Dark blue: a heading. Green: the monthly levy the meeting approved. To unlock: Review, Unprotect Sheet, password **domus**.
 
@@ -4804,6 +4838,7 @@ Click the picture to move on. For the meeting, **Download the presentation**, op
             "You do not set this before the meeting. Download the sheet. "
             "In the meeting the trustees type the % on the yellow Approved line. "
             "10% means last year’s levies plus 10%. The yearly rand calculates. "
+            "Under that, Reserve approved works the same way for the reserve fund. "
             "The % on each cost line stays locked. A yellow Budgeted yearly cell can still be typed. "
         )
         _mode = st.radio(
