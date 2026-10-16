@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import zipfile
 from io import BytesIO
 from pathlib import Path
 
@@ -2490,6 +2491,22 @@ def generate_pptx(state: dict) -> BytesIO:
     return buf
 
 
+def as_ppsx(pptx_bytes: bytes) -> bytes:
+    """Same slides, saved so PowerPoint opens them as a show."""
+    src = BytesIO(pptx_bytes)
+    out = BytesIO()
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if info.filename == "[Content_Types].xml":
+                data = data.replace(
+                    b"presentationml.presentation.main+xml",
+                    b"presentationml.slideshow.main+xml",
+                )
+            zout.writestr(info.filename, data)
+    return out.getvalue()
+
+
 def _child_plain(desc: str) -> str:
     d = (desc or "").lower()
     if "secur" in d or "gate" in d or "camera" in d:
@@ -4746,6 +4763,8 @@ Check the numbers. Change the words if you want — the three good-news lines, w
 
 Click the picture to move on. For the meeting, **Download the presentation**, open it in Chrome, and press F for full screen. Arrow keys, click, or a swipe move the story. The pictures already move.
 
+**Download the PowerPoint show** is the same story as a PPS file. Open it in PowerPoint. It starts as a slideshow. It does not move like the Chrome file. PowerPoint cannot play that one.
+
 **Fill the words from this budget** writes the words again after you change figures. Do not put unit numbers or owner names on the slides.
             """
         )
@@ -5365,6 +5384,17 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         if not st.session_state.complex_name:
             st.warning("Type the complex name in the sidebar first.")
         else:
+            if st.button("Build the PowerPoint show"):
+                st.session_state["ppsx"] = as_ppsx(generate_pptx(st.session_state).getvalue())
+            if st.session_state.get("ppsx"):
+                safe_pps = re.sub(r"\s+", "_", st.session_state.complex_name or "budget")
+                st.download_button(
+                    "Download the PowerPoint show (PPS)",
+                    data=st.session_state["ppsx"],
+                    file_name=f"{safe_pps}_budget.ppsx",
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+                )
+                st.caption("Open this in PowerPoint. It starts as a slideshow. It is not the moving Chrome presentation.")
             base = presentation_data(st.session_state)
             name = st.session_state.complex_name
             flat = {
