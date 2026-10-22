@@ -2820,13 +2820,14 @@ def generate_excel(state: dict) -> BytesIO:
     ws = wb.active
     ws.title = "BUDGET"
 
-    def brand(sheet, anchor="A1", width=180, height=78):
+    def brand(sheet, anchor="A1", width=340, height=148):
         path = Path(__file__).parent / "domus_logo.jpeg"
         if path.exists():
             img = XLImage(str(path))
             img.width = width
             img.height = height
             sheet.add_image(img, anchor)
+            sheet.row_dimensions[1].height = 130
         name = (state.get("complex_name") or "").strip()
         year = (state.get("fin_year") or "").strip()
         foot = "Domus Property Management  /  Eiendomsbestuur"
@@ -3751,9 +3752,12 @@ def _apply_budget_sheet(wb, data: dict, wb_values=None) -> None:
         if low in ("description", "gl code"):
             continue
         if low.startswith((
-            "meeting decision", "what the costs", "approved —", "approved %", "approved budget",
-            "approved monthly", "or type the rand", "gap", "total", "under-recovery",
-            "under recovery", "ordinary levies =",
+            "meeting decision", "what the costs", "approved", "gap", "total",
+            "colours", "colors", "ordinary levy", "last year", "reserve approved",
+            "type the",
+        )) or any(x in low for x in (
+            "shortfall", "under-recovery", "under recovery", "do not add it again",
+            "already inside the actual",
         )):
             continue
         d_val = ws.cell(r, 4).value
@@ -3771,6 +3775,13 @@ def _apply_budget_sheet(wb, data: dict, wb_values=None) -> None:
             continue
         items = sections.setdefault(current, [])
         found = next((it for it in items if norm(it.get("desc") or "") == norm(desc)), None)
+        if found is None:
+            for sec_items in sections.values():
+                if not isinstance(sec_items, list):
+                    continue
+                found = next((it for it in sec_items if norm(it.get("desc") or "") == norm(desc)), None)
+                if found is not None:
+                    break
         if found is None:
             found = row(desc, "")
             items.append(found)
@@ -3842,6 +3853,24 @@ def _apply_budget_sheet(wb, data: dict, wb_values=None) -> None:
                 seen.add(i)
                 ordered.append(by_id[i])
         sections[sec] = ordered + [it for it in items if id(it) not in seen]
+    for sec, items in list(sections.items()):
+        if not isinstance(items, list):
+            continue
+        seen = {}
+        cleaned = []
+        for it in items:
+            key = norm(it.get("desc") or "")
+            if not key:
+                continue
+            if key in seen:
+                prev = cleaned[seen[key]]
+                if float(it.get("yearly") or 0) or float(it.get("actual") or 0):
+                    cleaned[seen[key]] = it
+                    it["note"] = it.get("note") or prev.get("note") or ""
+                continue
+            seen[key] = len(cleaned)
+            cleaned.append(it)
+        sections[sec] = cleaned
 
 
 def _read_meeting_from_sheet(wb, data: dict) -> None:
@@ -4381,7 +4410,7 @@ def main():
     cols = st.columns([1, 5])
     with cols[0]:
         if logo.exists():
-            st.image(str(logo), width=110)
+            st.image(str(logo), width=260)
     with cols[1]:
         st.title("Domus Property Management Budget")
         st.caption("Load the financial statement PDF (line names) then WeConnectU Excel (rands). Either order is fine.")
@@ -4939,7 +4968,9 @@ The names do not have to be identical. Sand beds, tree felling, windows, stairca
 ### 18. The meeting
 You prepare the budget. The trustees decide in the meeting.
 
-**Download Excel** on the Download tab. The file is a normal workbook. **BUDGET** is the levy only. **RESERVE** is the reserve fund, in the same columns. **PQ** and **10 YMP** are unchanged. The Domus logo is at the top of each sheet. When you print, the bottom of every page reads Domus Property Management / Eiendomsbestuur, plus the complex name and the year.
+**Download Excel** on the Download tab. The file is a normal workbook. **BUDGET** is the levy only. **RESERVE** is the reserve fund, in the same columns. **PQ** and **10 YMP** are unchanged. The full Domus logo, including the words underneath, sits at the top left of each sheet. When you print, the bottom of every page reads Domus Property Management / Eiendomsbestuur, plus the complex name and the year.
+
+**Restore this app’s Excel** brings that file back. Totals, the cost-shortfall lines and the ordinary-levy result are not loaded as new accounts. A line that is already there is updated. It is not added a second time.
 
 The meeting block is at the top of **BUDGET**. On **Approved**, type the levy %. On **Reserve approved**, type the reserve %. 10% means last year’s figure plus 10%. The yearly rand calculates. Boathouse and boatport use that same levy %. Those cells are locked. **What the costs need**, **Last year’s contribution** and **Gap** are locked. The bank balance is not on this sheet. It is on **RESERVE**.
 
