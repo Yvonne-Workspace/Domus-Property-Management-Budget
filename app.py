@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import zipfile
 from io import BytesIO
 from pathlib import Path
 
@@ -2792,6 +2793,20 @@ def generate_meeting_html(state: dict) -> bytes:
     return render_meeting_html(meeting_pack(state), logo)
 
 
+def _fix_logo_links(bio: BytesIO) -> BytesIO:
+    """Excel hides a picture when the link inside the file is an absolute path."""
+    raw = bio.getvalue()
+    out = BytesIO()
+    with zipfile.ZipFile(BytesIO(raw)) as zin, zipfile.ZipFile(out, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename.startswith("xl/drawings/_rels/") and item.filename.endswith(".rels"):
+                data = data.replace(b'Target="/xl/media/', b'Target="../media/')
+            zout.writestr(item, data)
+    out.seek(0)
+    return out
+
+
 def generate_excel(state: dict) -> BytesIO:
     apply_levy_lines(state)
     s = state["sections"]
@@ -2799,7 +2814,7 @@ def generate_excel(state: dict) -> BytesIO:
     ws = wb.active
     ws.title = "BUDGET"
 
-    def brand(sheet, anchor="H1", width=168, height=73):
+    def brand(sheet, anchor="A1", width=180, height=78):
         path = Path(__file__).parent / "domus_logo.jpeg"
         if path.exists():
             img = XLImage(str(path))
@@ -2853,8 +2868,8 @@ def generate_excel(state: dict) -> BytesIO:
             fill(c, bg)
 
     ws.merge_cells("B2:G2")
-    ws.row_dimensions[1].height = 58
-    brand(ws, "H1")
+    ws.row_dimensions[1].height = 64
+    brand(ws)
     ws["B2"] = state.get("complex_name") or "BODY CORPORATE / HOA BUDGET"
     ws["B2"].font = Font(name="Calibri", bold=True, size=16, color=NAVY)
     ws["B3"] = state.get("fin_year") or ""
@@ -3422,19 +3437,19 @@ def generate_excel(state: dict) -> BytesIO:
     pq.column_dimensions["D"].width = 18
     pq.column_dimensions["E"].width = 20
     pq.column_dimensions["F"].width = 14
-    pq.row_dimensions[1].height = 50
-    brand(pq, "H1", 150, 58)
+    pq.row_dimensions[1].height = 64
+    brand(pq)
 
     ymp = wb.create_sheet("10 YMP")
     start_y = plan_start_year(state)
-    ymp["A1"] = (state.get("complex_name") or "").upper()
-    ymp["A1"].font = Font(bold=True, size=14, color=NAVY)
+    ymp["B1"] = (state.get("complex_name") or "").upper()
+    ymp["B1"].font = Font(bold=True, size=14, color=NAVY)
     ymp["A2"] = "10 YEAR MAINTENANCE PLAN"
     ymp["A2"].font = Font(bold=True, size=12, color=NAVY)
     ymp["A3"] = "Colours. Yellow with blue numbers: type here. White: do not type. Dark blue with white words: a heading. A red figure in the first year is this year’s project."
     ymp["A3"].font = Font(italic=True, size=9, color="666666")
-    ymp.row_dimensions[1].height = 50
-    brand(ymp, "H1", 150, 58)
+    ymp.row_dimensions[1].height = 64
+    brand(ymp)
     headers = ["PROJECTS", "First Cycle", "Frequency of Cycles", "Current Estimate"] + [str(start_y + i) for i in range(10)] + ["Notes"]
     sub = ["", "", "", ""] + [f"Year {i+1}" for i in range(10)] + [""]
     for i, h in enumerate(headers, 1):
@@ -3487,8 +3502,8 @@ def generate_excel(state: dict) -> BytesIO:
     res["B3"] = state.get("complex_name") or ""
     res["B3"].font = Font(bold=True, size=12)
     res["B4"] = state.get("fin_year") or ""
-    res.row_dimensions[1].height = 58
-    brand(res, "H1")
+    res.row_dimensions[1].height = 64
+    brand(res)
     res["B6"] = "Spent this year is what was paid. Next year is the next column of the 10-year plan. There is no %. A job with no spend and nothing next year stays on the 10-year plan only."
     res["B6"].font = Font(italic=True, size=9, color="666666")
     res["B8"] = "Opening reserve balance"
@@ -3659,7 +3674,7 @@ def generate_excel(state: dict) -> BytesIO:
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
-    return bio
+    return _fix_logo_links(bio)
 
 
 RESTORE_BARS = [
