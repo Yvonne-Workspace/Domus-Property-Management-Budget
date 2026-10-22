@@ -827,7 +827,7 @@ def pq_bill_lines(state: dict) -> list:
             break
     for r in s.get("levy", []):
         if family(r["desc"]) == "csos_inc" and (float(r.get("yearly") or 0) or float(r.get("actual") or 0)):
-            add("CSOS", r.get("yearly"))
+            add("CSOS", r.get("yearly"), "csos" if state.get("auto_csos", True) else "pq")
             break
     for r in s.get("levy", []):
         d = r["desc"].lower()
@@ -2056,6 +2056,8 @@ def presentation_data(state: dict) -> dict:
         elif split == "count":
             slots = facility_slots(state, facility_kind(name) or "")
             monthly = float(yearly) / 12 / slots if slots else 0.0
+        elif split == "csos":
+            monthly = csos_monthly_for_levy(ordinary / 12.0 * share) if share else 0.0
         elif share:
             monthly = float(yearly) / 12 * share
         else:
@@ -2084,6 +2086,8 @@ def presentation_data(state: dict) -> dict:
             continue
         if split == "equal":
             monthly_total += float(yearly) / 12 / max(n_units, 1)
+        elif split == "csos":
+            monthly_total += csos_monthly_for_levy(ordinary / 12.0 * share) if share else 0.0
         elif share:
             monthly_total += float(yearly) / 12 * share
         else:
@@ -2649,6 +2653,8 @@ def meeting_pack(state: dict) -> dict:
         elif split == "count":
             slots = facility_slots(state, facility_kind(name) or "")
             monthly = yearly / 12 / slots if slots else 0.0
+        elif split == "csos":
+            monthly = csos_monthly_for_levy(approved / 12.0 * share) if share else 0.0
         elif share:
             monthly = yearly / 12 * share
         else:
@@ -3370,6 +3376,8 @@ def generate_excel(state: dict) -> BytesIO:
             note = "equal / unit"
         elif split == "count":
             note = "only where the number is above 0"
+        elif split == "csos":
+            note = "2% of (levy − R500), max R40"
         else:
             note = "× PQ"
         pq.cell(5, col, note)
@@ -3413,10 +3421,22 @@ def generate_excel(state: dict) -> BytesIO:
             elif split == "count":
                 cl = get_column_letter(count_col[name])
                 pq.cell(rr, col, f"=IF(SUM({cl}$7:{cl}${last_u})=0,0,{cl}{rr}/SUM({cl}$7:{cl}${last_u})*{letter}$4)").number_format = MONEY
+            elif split == "csos":
+                pq.cell(rr, col, f"=MIN(40,MAX(0,({levy_letter}{rr}-500)*0.02))").number_format = MONEY
             else:
                 pq.cell(rr, col, f"=$C{rr}*{letter}$4").number_format = MONEY
         if bills:
             pq.cell(rr, last_amt + 1, f"=SUM({get_column_letter(first_amt)}{rr}:{get_column_letter(last_amt)}{rr})").number_format = MONEY
+    if state.get("auto_csos", True) and levy_rows.get("csos"):
+        csos_j = next((j for j, (_n, _y, split) in enumerate(bills) if split == "csos"), None)
+        if csos_j is not None:
+            letter = get_column_letter(bill_start + csos_j)
+            row = levy_rows["csos"]
+            fml(ws.cell(row, 6), f"SUM(PQ!{letter}7:{letter}{last_u})*12")
+            fml(ws.cell(row, 7), f"F{row}/12")
+            pct_cell = ws.cell(row, 5)
+            fml(pct_cell, f"IF(D{row}=0,0,F{row}/D{row}-1)")
+            pct_cell.number_format = "0.00%"
     tot_row = last_u + 1
     pq.cell(tot_row, 2, "TOTAL")
     pq.cell(tot_row, 3, f"=SUM(C7:C{last_u})")
@@ -4854,7 +4874,7 @@ In the sidebar you can also name that levy, type the yearly total, and split it 
 ### 13. CSOS
 We collect CSOS from owners and pay the same amount to CSOS. Income and expense are the same rand, so owners are not charged twice. It is its own PQ column, not inside ordinary levies.
 
-Leave **Calculate CSOS** ticked. The formula is 2% of (monthly admin levy − R500), maximum R40 per unit per month. It follows the **approved** levy, not only the cost total.
+Leave **Calculate CSOS** ticked. Each owner pays 2% of (their monthly levy − R500), and never more than **R40**. If the meeting types 10% on the levy, CSOS goes up with that levy, then stops at R40. It is not a share of one complex total, so one owner cannot be charged R43.
 
 Untick it only if you must type a different CSOS figure yourself.
 
@@ -4998,7 +5018,7 @@ Click the picture to move on. For the meeting, **Download the presentation**, op
         st.caption(
             "You do not set this before the meeting. Download the sheet. "
             "In the meeting the trustees type the % on the yellow Approved line. "
-            "10% means last year’s levies plus 10%. The yearly rand calculates. "
+            "10% means last year’s levies plus 10%. The yearly rand calculates. CSOS on the PQ moves with that levy, and no owner goes over R40 a month. "
             "Under that, Reserve approved works the same way for the reserve fund. "
             "The % on each cost line stays locked. A yellow Budgeted yearly cell can still be typed. "
         )
@@ -5400,6 +5420,9 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                     slots = facility_slots(st.session_state, kind)
                     qty = prev["Unit"].map(lambda u, k=kind: facility_qty(st.session_state, k, u))
                     prev[col] = 0.0 if slots < 1 else qty.astype(float) / slots * monthly
+                elif split == "csos":
+                    levy_m = prev["PQ"].astype(float) * (approved_ordinary(st.session_state) / 12.0)
+                    prev[col] = levy_m.map(csos_monthly_for_levy)
                 else:
                     prev[col] = prev["PQ"].astype(float) * monthly
                 extra_cols.append(col)
