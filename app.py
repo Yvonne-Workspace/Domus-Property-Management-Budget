@@ -2911,7 +2911,8 @@ def generate_excel(state: dict) -> BytesIO:
 
     def bar(title):
         nonlocal r
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=8)
+        # Do not merge across Budgeted Yearly or Monthly. A merge hides the amount.
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=5)
         for col in range(2, 9):
             fill(ws.cell(r, col), SECTION)
             ws.cell(r, col).border = THIN
@@ -3268,7 +3269,12 @@ def generate_excel(state: dict) -> BytesIO:
     levy_words = "Ordinary levies = net municipal + expenditure + repairs + personnel + tax, minus income marked Yes, minus the rand funded by the reserve."
     if reserve_inside_levy(state):
         levy_words += " The reserve contribution is included."
-    ws.cell(r, 2, levy_words)
+    label = ws.cell(r, 2, "Ordinary levy")
+    label.font = Font(name="Calibri", bold=True, size=11)
+    note = ws.cell(r, 8, levy_words)
+    note.font = Font(italic=True, size=9, color="666666")
+    note.alignment = Alignment(wrap_text=True, vertical="center")
+    ws.row_dimensions[r].height = 32
     fml(ws.cell(r, 6), f"MAX(0,{bits})", RED)
     fml(ws.cell(r, 7), f"F{r}/12", RED)
     ord_check = r
@@ -3671,6 +3677,8 @@ def generate_excel(state: dict) -> BytesIO:
     ws.protection.sheet = True
     ws.protection.password = "domus"
     ws.protection.enable()
+    wb.calculation.calcMode = "auto"
+    wb.calculation.fullCalcOnLoad = True
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
