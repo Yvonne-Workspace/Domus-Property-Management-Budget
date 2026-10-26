@@ -767,27 +767,16 @@ def apply_levy_lines(state: dict) -> None:
                 r["pct"] = 0.0 if a == 0 else (hoa_csos_y / a) * 100 - 100
     if insurance_on_pq(state):
         typed = float(state.get("insurance_bill_yearly") or 0)
-        found = False
+        kept = []
         for r in state["sections"]["levy"]:
             if not is_ins_bill_line(r.get("desc") or ""):
+                kept.append(r)
                 continue
-            found = True
-            current = float(r.get("yearly") or 0)
-            if typed > 0.5:
-                r["yearly"] = typed
-            elif current < 0.5:
-                r["yearly"] = insurance_expense_amount(state)
-            # else keep the amount the user typed on the line
-            a = float(r.get("actual") or 0)
             y = float(r.get("yearly") or 0)
-            r["pct"] = 0.0 if a == 0 else (y / a) * 100 - 100
-        if not found:
-            bill = typed if typed > 0.5 else insurance_expense_amount(state)
-            if bill:
-                rec = row("Insurance recovered", "Billed to owners on the PQ. Change this amount if the quote differs from last year’s premium.")
-                rec["yearly"] = bill
-                rec["actual"] = 0.0
-                state["sections"]["levy"].append(rec)
+            if typed < 0.5 and y > 0.5:
+                typed = y
+                state["insurance_bill_yearly"] = y
+        state["sections"]["levy"] = kept
     if state.get("tax_auto", True):
         tax = calculated_tax(state)
         lines = state["sections"].get("tax") or []
@@ -4891,7 +4880,7 @@ The body-corporate minimum on the side is guidance only, not legal advice. It do
 On the Income tab, choose one:
 
 - **Inside the ordinary levy** — no extra column. The premium on Expenditure is part of the levy.
-- **Extra on the owner invoice** — owners pay it on its own PQ column. Keep the premium on Expenditure. It is **not** inside ordinary levies. Type the yearly amount to bill, or leave 0 to use the premium.
+- **Extra on the owner invoice** — owners pay it on its own PQ column. Keep the premium on Expenditure. It is **not** inside ordinary levies, and it is **not** a line under Levy Income. Type the yearly amount in the box on Income. Leave it 0 to use the premium.
 
 ### 12. Master estate
 Tick **We still bill an estate levy to owners** only if owners pay another estate **through us**. Those amounts are extra PQ columns, not part of ordinary levies.
@@ -5019,11 +5008,11 @@ Click the picture to move on. For the meeting, **Download the presentation**, op
             if "insurance_bill_yearly" not in st.session_state:
                 st.session_state.insurance_bill_yearly = 0.0
             st.number_input(
-                "Insurance billed to owners this year (0 = use the Insurance recovered line, or the premium if that is 0)",
+                "Insurance billed to owners this year (0 = use the premium)",
                 min_value=0.0,
                 step=100.0,
                 key="insurance_bill_yearly",
-                help="Type the rand amount you want on the PQ. Save on Levy Income also keeps what you type on Insurance recovered.",
+                help="This is the PQ column. It is not a line under Levies.",
             )
             bill = insurance_bill_amount(st.session_state)
             st.caption(
