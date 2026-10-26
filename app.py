@@ -434,7 +434,7 @@ def skip_from_ordinary(r: dict, state: dict, ignore_reserve: bool = False) -> bo
         return True
     if "xanadu" in d or "eco park" in d or "csos" in d:
         return True
-    if f == "insurance" and insurance_on_pq(state):
+    if insurance_on_pq(state) and "insur" in d and not re.search(r"claim|payout", d):
         return True
     if billed_as_equal_charge(r.get("desc") or "", state):
         return True
@@ -979,7 +979,7 @@ def family(desc: str) -> str | None:
         return "refuse_g"
     if "management" in d and "fee" in d:
         return "mgmt"
-    if re.search(r"^insurance$|insurance\s*premium", d):
+    if "insur" in d and not re.search(r"claim|payout|recover|billed", d):
         return "insurance"
     if "security" in d or "guarding" in d:
         return "security"
@@ -4880,7 +4880,7 @@ The body-corporate minimum on the side is guidance only, not legal advice. It do
 On the Income tab, choose one:
 
 - **Inside the ordinary levy** — no extra column. The premium on Expenditure is part of the levy.
-- **Extra on the owner invoice** — owners pay it on its own PQ column. Keep the premium on Expenditure. It is **not** inside ordinary levies, and it is **not** a line under Levy Income. Type the yearly amount in the box on Income. Leave it 0 to use the premium.
+- **Extra on the owner invoice** — owners pay it on its own PQ column. Keep the premium on Expenditure, whatever the line is called. It is **not** inside ordinary levies, and it is **not** a line under Levy Income. Type the yearly amount in the box on Income. Leave it 0 to use the premium.
 
 ### 12. Master estate
 Tick **We still bill an estate levy to owners** only if owners pay another estate **through us**. Those amounts are extra PQ columns, not part of ordinary levies.
