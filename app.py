@@ -407,6 +407,115 @@ def equal_charge_keys(desc: str) -> set:
     return keys
 
 
+_CHARGE_STOP = {
+    "service", "services", "fixed", "monthly", "charge", "charges", "fee", "fees",
+    "levy", "from", "less", "owner", "owners", "additional", "item", "the", "and",
+    "recovery", "recovered", "recoveries", "invoice", "complex", "general", "with",
+}
+
+
+def charge_words(desc: str) -> set:
+    d = re.sub(r"recover(?:y|ed|ies)?", " ", (desc or "").lower())
+    words = {w for w in re.findall(r"[a-z][a-z]+", d) if w not in _CHARGE_STOP and len(w) > 3}
+    if "waste" in words or "rubbish" in words:
+        words.add("refuse")
+    if "gardening" in words:
+        words.add("garden")
+    return words
+
+
+def _garden_repair(desc: str) -> bool:
+    d = (desc or "").lower()
+    return bool(re.search(r"garden", d) and re.search(r"expense|repair|general", d) and "service" not in d)
+
+
+def _has_garden_contract(state: dict) -> bool:
+    for key in ("expenditure", "rm"):
+        for r in (state.get("sections") or {}).get(key) or []:
+            d = (r.get("desc") or "").lower()
+            if "garden" in d and re.search(r"service|contract", d):
+                return True
+    return False
+
+
+def fixed_matches(cost_desc: str, fixed_desc: str, state: dict | None = None) -> bool:
+    """True when this cost is the one owners pay as that fixed invoice line."""
+    if _garden_repair(cost_desc) and state is not None and _has_garden_contract(state):
+        return False
+    if equal_charge_keys(cost_desc) & equal_charge_keys(fixed_desc):
+        return True
+    return bool(charge_words(cost_desc) & charge_words(fixed_desc))
+
+
+def matching_fixed_lines(state: dict, desc: str) -> list:
+    """Fixed charges that come off this cost. One charge is used once, on the closest line."""
+    costs = []
+    for key in ("expenditure", "rm", "personnel", "tax"):
+        for r in (state.get("sections") or {}).get(key) or []:
+            name = r.get("desc") or ""
+            if name:
+                costs.append(name)
+    out = []
+    for r in (state.get("sections") or {}).get("fixed") or []:
+        if float(r.get("yearly") or 0) < 0.5:
+            continue
+        fd = r.get("desc") or ""
+        if not fixed_matches(desc, fd, state):
+            continue
+        best = desc
+        best_score = 3 if re.search(r"service|contract", desc, re.I) else 1
+        for other in costs:
+            if other == desc or not fixed_matches(other, fd, state):
+                continue
+            score = 3 if re.search(r"service|contract", other, re.I) else 1
+            if score > best_score:
+                best = other
+                best_score = score
+        if best == desc:
+            out.append(r)
+    return out
+
+
+def recovery_lines_for(state: dict, desc: str) -> list:
+    target = norm(desc)
+    if not target:
+        return []
+    out = []
+    for r in (state.get("sections") or {}).get("recoveries_other") or []:
+        if norm(r.get("claim_against") or "") != target:
+            continue
+        if abs(float(r.get("yearly") or 0)) < 0.5:
+            continue
+        out.append(r)
+    return out
+
+
+def fixed_cover(state: dict, desc: str) -> float:
+    """What owners pay aside for this cost. Taken out of the levy once, not twice."""
+    fixed = sum(float(r.get("yearly") or 0) for r in matching_fixed_lines(state, desc))
+    rec = sum(abs(float(r.get("yearly") or 0)) for r in recovery_lines_for(state, desc))
+    return max(fixed, rec)
+
+
+def line_in_levy(state: dict, r: dict) -> float:
+    """What this cost adds to the ordinary levy. Insurance on the invoice, and a garden contract billed aside, add nothing."""
+    if skip_from_ordinary(r, state):
+        return 0.0
+    return max(0.0, cost_for_levy(state, r) - fixed_cover(state, r.get("desc") or ""))
+
+
+def fixed_taken_out(state: dict) -> float:
+    """How much of the budgeted costs owners pay aside, so it is not in the levy."""
+    total = 0.0
+    for key in ("expenditure", "rm", "personnel", "tax"):
+        for r in (state.get("sections") or {}).get(key) or []:
+            if skip_from_ordinary(r, state):
+                continue
+            full = cost_for_levy(state, r)
+            total += max(0.0, full - line_in_levy(state, r))
+    return total
+
+
 def billed_as_equal_charge(desc: str, state: dict) -> bool:
     """True if this cost is billed as a same-rand extra on the invoice (not in ordinary levies)."""
     keys = equal_charge_keys(desc)
@@ -528,10 +637,8 @@ def municipal_net(state: dict) -> float:
 def ordinary_total(state: dict) -> float:
     s = state["sections"]
     total = municipal_net(state)
-    total += sum(cost_for_levy(state, r) for r in s["rm"] if not skip_from_ordinary(r, state))
-    total += sum(cost_for_levy(state, r) for r in s["personnel"] if not skip_from_ordinary(r, state))
-    total += sum(cost_for_levy(state, r) for r in s["tax"] if not skip_from_ordinary(r, state))
-    total += sum(cost_for_levy(state, r) for r in s["expenditure"] if not skip_from_ordinary(r, state))
+    for key in ("rm", "personnel", "tax", "expenditure"):
+        total += sum(line_in_levy(state, r) for r in s[key])
     if state.get("special_in_ordinary"):
         total += sum_net(s["special"])
     if reserve_inside_levy(state):
@@ -573,14 +680,13 @@ def levy_pieces(state: dict) -> list:
     s = state["sections"]
     return [
         ("Net municipal (gross minus recoveries)", municipal_net(state)),
-        ("Expenditure", sum(cost_for_levy(state, r) for r in s["expenditure"] if not skip_from_ordinary(r, state))),
-        ("R&M after insurance and recovery income", sum(cost_for_levy(state, r) for r in s["rm"] if not skip_from_ordinary(r, state))),
-        ("Personnel", sum(cost_for_levy(state, r) for r in s["personnel"] if not skip_from_ordinary(r, state))),
-        ("Tax", sum(cost_net(state, r) for r in s["tax"] if not skip_from_ordinary(r, state))),
+        ("Expenditure", sum(line_in_levy(state, r) for r in s["expenditure"])),
+        ("R&M after insurance and recovery income", sum(line_in_levy(state, r) for r in s["rm"])),
+        ("Personnel", sum(line_in_levy(state, r) for r in s["personnel"])),
+        ("Tax", sum(line_in_levy(state, r) for r in s["tax"])),
         ("Special (only if ticked into the levy)", sum_net(s["special"]) if state.get("special_in_ordinary") else 0.0),
         ("Reserve contribution (only if inside the levy)", reserve_contribution(state) if reserve_inside_levy(state) else 0.0),
         ("Income used to lower the levy", -income_used(state)),
-        ("Insurance premium (billed on PQ, not in levy)", insurance_expense_amount(state) if insurance_on_pq(state) else 0.0),
     ]
 
 
@@ -2873,37 +2979,47 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B5"] = "MEETING DECISION — Levies received"
     ws["B5"].font = Font(bold=True, size=12, color=NAVY)
     ws["B6"] = "What the costs need"
-    ws["B7"] = "Approved — type the %"
-    ws["B8"] = "Gap — costs minus approved. Above zero means the costs are still higher."
-    ws["B8"].font = Font(italic=True, size=9, color="9C0006")
-    ws["H7"] = "Type the % the meeting agrees. 10% means last year’s levies plus 10%. The yearly rand calculates. Do not type on it."
-    ws["H7"].font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
-    ws["B10"] = "MEETING DECISION — Reserve fund"
-    ws["B10"].font = Font(bold=True, size=12, color=NAVY)
-    ws["B11"] = "Last year’s contribution"
-    ws["B12"] = "Reserve approved — type the %"
-    ws["H12"] = "Type the % the meeting agrees. 10% means last year’s reserve contribution plus 10%. The yearly rand calculates. Do not type on it."
-    ws["H12"].font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
+    ws["B7"] = "Increase the costs need"
+    ws["B8"] = "Agreed increase — type the rand"
+    ws["B9"] = "What owners will be charged"
+    ws["B10"] = "Still short. Above zero means the costs are still higher."
+    ws["B10"].font = Font(italic=True, size=9, color="9C0006")
+    ws["H8"] = "Type the rand the meeting will add to last year’s levy. Not a %. If the costs need R50,000 more and they agree R30,000, type 30000. The shortfall shows on the next line."
+    ws["H8"].font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
+    ws["H8"].alignment = Alignment(wrap_text=True, vertical="center")
+    ws.row_dimensions[8].height = 32
+    ws["B11"] = "MEETING DECISION — Reserve fund"
+    ws["B11"].font = Font(bold=True, size=12, color=NAVY)
+    ws["B12"] = "Last year’s contribution"
+    ws["B13"] = "Agreed reserve — type the rand"
+    ws["H13"] = "Type the reserve contribution for the year, in rands. Not a %. This is what owners pay into the reserve."
+    ws["H13"].font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
     _ord_actual = ordinary_actual(state)
+    _costs_need = float(next((it.get("yearly") or 0) for it in s["levy"] if family(it.get("desc") or "") == "ordinary"))
     _mode = state.get("levy_approve_mode") or "costs"
     if _mode == "amount" and float(state.get("levy_approved_amount") or 0) > 0.5:
         _approved_year = float(state.get("levy_approved_amount") or 0)
     elif _mode == "pct":
         _approved_year = _ord_actual * (1 + float(state.get("levy_approved_pct") or 0) / 100.0)
     else:
-        _approved_year = float(next((it.get("yearly") or 0) for it in s["levy"] if family(it.get("desc") or "") == "ordinary"))
-    approved_row = 7
-    ws["B13"] = (
+        _approved_year = _costs_need
+    if _ord_actual > 0.5:
+        _seed_increase = _approved_year - _ord_actual
+    else:
+        _seed_increase = _approved_year
+    approved_row = 9
+    ws["B14"] = (
         "Colours. Yellow with blue numbers: type here. White: locked formula, do not type. "
         "Pink: a result to check (the levy, a gap, a shortfall or an overspend). It is not added again. "
-        "Pale blue: a total. Dark blue with white words: a heading. Green: the monthly levy the meeting approved."
+        "Pale blue: a total. Dark blue with white words: a heading. Green: the monthly levy the meeting approved. "
+        "There is no % column."
     )
-    ws["B13"].alignment = Alignment(wrap_text=True, vertical="center")
-    ws.row_dimensions[13].height = 32
-    ws["B13"].font = Font(italic=True, size=9, color="666666")
-    ws.merge_cells("B13:H13")
+    ws["B14"].alignment = Alignment(wrap_text=True, vertical="center")
+    ws.row_dimensions[14].height = 32
+    ws["B14"].font = Font(italic=True, size=9, color="666666")
+    ws.merge_cells("B14:H14")
 
-    r = 15
+    r = 16
 
     def bar(title):
         nonlocal r
@@ -2918,7 +3034,7 @@ def generate_excel(state: dict) -> BytesIO:
 
     def hdr():
         nonlocal r
-        labs = ["Description", "GL Code", "Actual", "%", "Budgeted Yearly", "Monthly", "Comments / Notes"]
+        labs = ["Description", "GL Code", "Actual", "", "Budgeted Yearly", "Monthly", "Comments / Notes"]
         for i, lab in enumerate(labs, 2):
             c = ws.cell(r, i, lab)
             fill(c, NAVY)
@@ -2929,11 +3045,15 @@ def generate_excel(state: dict) -> BytesIO:
     levy_rows = {}
     named_rows = {}
     levy_comp_rows = []
+    levy_buckets = {"expenditure": [], "rm": [], "personnel": [], "tax": [], "special": []}
+    cover_pending = []
+    recovery_excel_rows = {}
     reserve_mark_rows = []
+    write_bucket = {"name": None}
 
     def write(items, recovery_as_income=False, in_levy=False, owner_box=False, levy_tick=False, claim_col=False, reserve_col=False, mains=None, l_rows=None, no_pct=False):
         """Old pack formulas: F = D*(1+E), G = F/12. Recoveries shown as positive income when asked."""
-        nonlocal r, reserve_mark_rows
+        nonlocal r, reserve_mark_rows, cover_pending, recovery_excel_rows
         if not items:
             start = r
             r += 1
@@ -2974,6 +3094,8 @@ def generate_excel(state: dict) -> BytesIO:
             if fam == "ins_bill" or re.search(r"insurance recovered|levy\s*[-–]\s*insurance", desc, re.I):
                 levy_rows["insurance"] = r
             named_rows[desc] = r
+            if claim_col:
+                recovery_excel_rows[desc] = r
             if mains is not None:
                 mains.append(r)
             if reserve_col:
@@ -2983,16 +3105,7 @@ def generate_excel(state: dict) -> BytesIO:
             inp(ws.cell(r, 4), act, MONEY)
             ins = float(it.get("insurance") or 0)
             linked_csos = is_own_scheme_csos(desc) and fam == "csos_exp" and levy_rows.get("csos")
-            # % is always a formula. Budgeted Yearly is the number you type, except a few totals.
-            pct_f = f"IF(D{r}=0,0,IF(D{r}<0,ABS(F{r})/ABS(D{r})-1,F{r}/D{r}-1))"
-            if no_pct:
-                ws.cell(r, 5, None)
-            elif fam != "ordinary":
-                fml(ws.cell(r, 5), pct_f)
-                ws.cell(r, 5).number_format = "0.00%"
-            else:
-                fml(ws.cell(r, 5), pct_f)
-                ws.cell(r, 5).number_format = "0.00%"
+            ws.cell(r, 5, None)
             if fam == "ordinary":
                 pass  # F filled after the cost total
             elif fam == "reserve" and state.get("reserve_mode") in ("pct15", "15pct", "legal") and levy_rows.get("ordinary"):
@@ -3059,11 +3172,24 @@ def generate_excel(state: dict) -> BytesIO:
                 fml(ws.cell(r, 7), f"MAX(0,F{r}{deduct})/12")
             else:
                 fml(ws.cell(r, 7), f"F{r}/12")
+            covers = matching_fixed_lines(state, desc)
+            recs = recovery_lines_for(state, desc)
+            if covers or recs:
+                names = [c.get("desc") or "fixed charge" for c in covers] + [c.get("desc") or "recovery" for c in recs]
+                extra = "Owners pay this aside (" + ", ".join(names) + "). That amount is left out of the ordinary levy once."
+                note = f"{note} | {extra}".strip(" |") if note else extra
             if in_levy and not skip_from_ordinary(it, state, ignore_reserve=True):
-                if deduct:
-                    levy_comp_rows.append(f"MAX(0,F{r}{deduct})")
+                piece = None
+                if covers or recs:
+                    cover_pending.append((r, [c.get("desc") or "" for c in covers], [c.get("desc") or "" for c in recs], deduct, write_bucket["name"]))
+                elif deduct:
+                    piece = f"MAX(0,F{r}{deduct})"
                 else:
-                    levy_comp_rows.append(f"F{r}")
+                    piece = f"F{r}"
+                if piece:
+                    levy_comp_rows.append(piece)
+                    if write_bucket["name"] in levy_buckets:
+                        levy_buckets[write_bucket["name"]].append(piece)
             if levy_tick and (levy_tick is True or levy_line_can_reduce(desc)):
                 inp(ws.cell(r, 9), "Yes" if it.get("reduces_levy") else "No")
             if claim_col:
@@ -3192,6 +3318,7 @@ def generate_excel(state: dict) -> BytesIO:
         exp_items = exp_items + list(s.get("hoa_expense") or [])
     exp_mains = []
     exp_l = []
+    write_bucket["name"] = "expenditure"
     a, b = write(exp_items, in_levy=True, owner_box=True, reserve_col=True, mains=exp_mains, l_rows=exp_l)
     exp_tot = tot("TOTAL EXPENDITURE", a, b, exp_mains or None)
     if exp_l:
@@ -3203,6 +3330,7 @@ def generate_excel(state: dict) -> BytesIO:
     rm_from = len(reserve_mark_rows)
     rm_mains = []
     rm_l = []
+    write_bucket["name"] = "rm"
     a, b = write(s.get("rm") or [], in_levy=True, owner_box=True, reserve_col=True, mains=rm_mains, l_rows=rm_l)
     rm_mark_rows = reserve_mark_rows[rm_from:]
     rm_tot = tot("Total Repair and Maintenance", a, b, rm_mains or None)
@@ -3218,10 +3346,12 @@ def generate_excel(state: dict) -> BytesIO:
 
     bar("PERSONNEL")
     hdr()
+    write_bucket["name"] = "personnel"
     a, b = write(s.get("personnel") or [], in_levy=True, reserve_col=True)
     per_tot = tot("Total Personnel Expenses", a, b)
     bar("INCOME TAX")
     hdr()
+    write_bucket["name"] = "tax"
     a, b = write(s.get("tax") or [], in_levy=True, reserve_col=True)
     tax_tot = tot("TOTAL TAX", a, b)
     if state.get("special_in_ordinary"):
@@ -3233,6 +3363,7 @@ def generate_excel(state: dict) -> BytesIO:
             c.font = Font(bold=True, color="FFFFFF", size=10)
             c.border = THIN
         r += 1
+        write_bucket["name"] = "special"
         a, b = write(s.get("special") or [], in_levy=True, no_pct=True)
         tot("Total 10-year maintenance projects", a, b)
     charged = [x for x in (s.get("fixed") or []) if float(x.get("yearly") or 0) > 0.5]
@@ -3241,6 +3372,30 @@ def generate_excel(state: dict) -> BytesIO:
         hdr()
         a, b = write(charged)
         tot("TOTAL EQUAL CHARGES", a, b)
+
+    for cost_r, fixed_descs, rec_descs, deduct, bucket in cover_pending:
+        fixed_refs = [f"N(F{named_rows[d]})" for d in fixed_descs if d in named_rows]
+        rec_refs = [f"N(F{recovery_excel_rows[d]})" for d in rec_descs if d in recovery_excel_rows]
+        bits = []
+        if fixed_refs:
+            bits.append("+".join(fixed_refs) if len(fixed_refs) > 1 else fixed_refs[0])
+        if rec_refs:
+            bits.append("+".join(rec_refs) if len(rec_refs) > 1 else rec_refs[0])
+        if len(bits) == 2:
+            taken = f"MAX({bits[0]},{bits[1]})"
+        elif bits:
+            taken = bits[0]
+        else:
+            taken = "0"
+        if bits:
+            piece = f"MAX(0,F{cost_r}{deduct}-{taken})"
+        elif deduct:
+            piece = f"MAX(0,F{cost_r}{deduct})"
+        else:
+            piece = f"F{cost_r}"
+        levy_comp_rows.append(piece)
+        if bucket in levy_buckets:
+            levy_buckets[bucket].append(piece)
 
     # Ordinary = net municipal + each cost line that is not billed separately (estate / insurance / garden / CSOS)
     bits = f"F{net_muni}"
@@ -3262,7 +3417,7 @@ def generate_excel(state: dict) -> BytesIO:
     if reserve_inside_levy(state) and levy_rows.get("reserve"):
         bits += f"+F{levy_rows['reserve']}"
     bar("ORDINARY LEVY (what we charge)")
-    levy_words = "Ordinary levies = net municipal + expenditure + repairs + personnel + tax, minus income marked Yes, minus the rand funded by the reserve."
+    levy_words = "Ordinary levies = net municipal + expenditure + repairs + personnel + tax, minus income marked Yes, minus the rand funded by the reserve, minus fixed monthly charges the owners pay on the invoice."
     if reserve_inside_levy(state):
         levy_words += " The reserve contribution is included."
     label = ws.cell(r, 2, "Ordinary levy")
@@ -3285,37 +3440,30 @@ def generate_excel(state: dict) -> BytesIO:
         wb.defined_names.add(DefinedName(name="OrdinaryActual", attr_text=f"BUDGET!$D${ord_row}"))
         fml(ws.cell(6, 6), f"F{ord_check}")
         fml(ws.cell(6, 7), "F6/12")
-        pct6 = ws.cell(6, 5)
-        fml(pct6, f"IF(D{ord_row}=0,0,F6/D{ord_row}-1)")
-        pct6.number_format = "0.00%"
-        seed_pct = (_approved_year / _ord_actual - 1) if _ord_actual > 0.5 and _approved_year > 0.5 else 0.0
-        inp(ws.cell(7, 5), seed_pct, "0.00%")
-        fml(ws.cell(7, 6), "IF(OrdinaryActual=0,F6,OrdinaryActual*(1+E7))")
-        fml(ws.cell(7, 7), "F7/12", "C6EFCE")
-        fml(ws.cell(8, 6), "F6-F7", RED)
-        fml(ws.cell(8, 7), "F8/12", RED)
+        fml(ws.cell(7, 6), "IF(OrdinaryActual=0,F6,F6-OrdinaryActual)")
+        fml(ws.cell(7, 7), "F7/12")
+        inp(ws.cell(8, 6), _seed_increase, MONEY)
+        fml(ws.cell(9, 6), "IF(OrdinaryActual=0,F8,OrdinaryActual+F8)")
+        fml(ws.cell(9, 7), "F9/12", "C6EFCE")
+        fml(ws.cell(10, 6), "F6-F9", RED)
+        fml(ws.cell(10, 7), "F10/12", RED)
     if levy_rows.get("reserve"):
         res_row = levy_rows["reserve"]
         wb.defined_names.add(DefinedName(name="ReserveActual", attr_text=f"BUDGET!$D${res_row}"))
-        fml(ws.cell(11, 6), f"D{res_row}")
-        fml(ws.cell(11, 7), "F11/12")
-        _res_actual = float(next((it.get("actual") or 0) for it in s["levy"] if family(it.get("desc") or "") == "reserve"))
+        fml(ws.cell(12, 6), f"D{res_row}")
+        fml(ws.cell(12, 7), "F12/12")
         _res_year = float(reserve_contribution(state) or 0)
-        seed_res = (_res_year / _res_actual - 1) if _res_actual > 0.5 else 0.0
-        inp(ws.cell(12, 5), seed_res, "0.00%")
-        fml(ws.cell(12, 6), f"IF(F11=0,{_res_year},F11*(1+E12))")
-        fml(ws.cell(12, 7), "F12/12", "C6EFCE")
-        fml(ws.cell(res_row, 6), "F12")
-        fml(ws.cell(res_row, 7), "F12/12")
+        inp(ws.cell(13, 6), _res_year, MONEY)
+        fml(ws.cell(13, 7), "F13/12", "C6EFCE")
+        fml(ws.cell(res_row, 6), "F13")
+        fml(ws.cell(res_row, 7), "F13/12")
     for fam in ("boathouse", "boatport"):
         row = levy_rows.get(fam)
         if not row:
             continue
-        pct_cell = ws.cell(row, 5)
-        fml(pct_cell, "E7")
-        pct_cell.number_format = "0.00%"
-        fml(ws.cell(row, 6), f"IF(D{row}=0,0,D{row}*(1+E7))")
+        fml(ws.cell(row, 6), f"IF(OrdinaryActual=0,0,D{row}*F9/OrdinaryActual)")
         fml(ws.cell(row, 7), f"F{row}/12")
+    ws.column_dimensions["E"].hidden = True
 
     pq = wb.create_sheet("PQ")
     pq["A1"] = "PQ / LEVY SCHEDULE"
@@ -3424,9 +3572,6 @@ def generate_excel(state: dict) -> BytesIO:
             row = levy_rows["csos"]
             fml(ws.cell(row, 6), f"SUM(PQ!{letter}7:{letter}{last_u})*12")
             fml(ws.cell(row, 7), f"F{row}/12")
-            pct_cell = ws.cell(row, 5)
-            fml(pct_cell, f"IF(D{row}=0,0,F{row}/D{row}-1)")
-            pct_cell.number_format = "0.00%"
     tot_row = last_u + 1
     pq.cell(tot_row, 2, "TOTAL")
     pq.cell(tot_row, 3, f"=SUM(C7:C{last_u})")
@@ -3455,6 +3600,107 @@ def generate_excel(state: dict) -> BytesIO:
     pq.column_dimensions["F"].width = 14
     pq.row_dimensions[1].height = 64
     brand(pq)
+
+    eu = wb.create_sheet("EACH UNIT")
+    eu["A1"] = "WHAT EACH UNIT PAYS"
+    eu["A1"].font = Font(bold=True, size=14, color=NAVY)
+    eu["A2"] = state.get("complex_name") or ""
+    eu["A3"] = "Monthly rand for that unit. Municipal is only the part not recovered. Personnel and tax are left off when they are zero. The total is what that unit pays."
+    eu["A3"].font = Font(italic=True, size=9, color="666666")
+    eu.merge_cells("A3:L3")
+    eu["A4"] = "Still short for the whole complex. Not inside the totals below."
+    eu["A4"].font = Font(italic=True, size=9, color="9C0006")
+    fml(eu["C4"], "BUDGET!F10", RED)
+
+    def _budget_expr(expr: str) -> str:
+        return re.sub(r"\b([A-Z]{1,3})(\d+)\b", lambda m: f"BUDGET!{m.group(1)}{m.group(2)}", expr)
+
+    def _bucket_year(parts: list) -> str:
+        parts = [p for p in parts if p]
+        if not parts:
+            return "0"
+        return "+".join(_budget_expr(p) for p in parts)
+
+    income_refs = []
+    for it in list(s.get("other") or []) + list(s.get("levy") or []):
+        if not it.get("reduces_levy") or abs(float(it.get("yearly") or 0)) < 0.5:
+            continue
+        if not levy_line_can_reduce(it.get("desc") or ""):
+            continue
+        n = named_rows.get(it.get("desc") or "")
+        if n:
+            income_refs.append(f"BUDGET!F{n}")
+    eu_cols = [("Municipal", f"BUDGET!F{net_muni}"), ("Expenditure", _bucket_year(levy_buckets["expenditure"])), ("Repairs", _bucket_year(levy_buckets["rm"]))]
+    if sum(max(0.0, float(it.get("yearly") or 0)) for it in s.get("personnel") or []) > 0.5:
+        eu_cols.append(("Personnel", _bucket_year(levy_buckets["personnel"])))
+    if sum(max(0.0, float(it.get("yearly") or 0)) for it in s.get("tax") or []) > 0.5:
+        eu_cols.append(("Tax", _bucket_year(levy_buckets["tax"])))
+    if state.get("special_in_ordinary") and levy_buckets["special"]:
+        eu_cols.append(("10-year projects", _bucket_year(levy_buckets["special"])))
+    if reserve_mark_rows and any(funded_by_reserve(state, it) > 0.5 for key in ("expenditure", "rm", "personnel", "tax") for it in s.get(key) or []):
+        eu_cols.append(("Reserve pays", "-(" + "+".join(f"BUDGET!J{n}" for n in reserve_mark_rows) + ")"))
+    if income_refs:
+        eu_cols.append(("Income off", "-(" + "+".join(income_refs) + ")"))
+    extra_cols = []
+    for name, yearly, split in bills:
+        if name == "Levies":
+            continue
+        src = name_to_budget.get(name)
+        extra_cols.append((name, src, split, yearly))
+    headers = ["#", "Unit", "PQ"] + [n for n, _ in eu_cols] + [n for n, *_ in extra_cols] + ["Total"]
+    for i, h in enumerate(headers, 1):
+        cell = eu.cell(6, i, h)
+        fill(cell, NAVY)
+        cell.font = Font(bold=True, color="FFFFFF", size=9)
+        cell.alignment = Alignment(wrap_text=True, horizontal="center")
+    eu.cell(5, 3, "Whole complex, a year")
+    eu.cell(5, 3).font = Font(italic=True, size=8, color="666666")
+    for j, (_name, expr) in enumerate(eu_cols):
+        fml(eu.cell(5, 4 + j), expr)
+    scale = f"IF(BUDGET!F{ord_check}=0,1,BUDGET!F9/BUDGET!F{ord_check})"
+    first_u = 7
+    for i, u in enumerate(units):
+        rr = first_u + i
+        eu.cell(rr, 1, i + 1)
+        eu.cell(rr, 2, str(u.get("Unit", "")))
+        eu.cell(rr, 3, float(u.get("PQ") or 0)).number_format = "0.000000"
+        for j in range(len(eu_cols)):
+            letter = get_column_letter(4 + j)
+            fml(eu.cell(rr, 4 + j), f"$C{rr}*{letter}$5/12*({scale})")
+        levy_letters = [get_column_letter(4 + j) for j in range(len(eu_cols))]
+        levy_sum = "+".join(f"{c}{rr}" for c in levy_letters) if levy_letters else "0"
+        for j, (name, src, split, yearly) in enumerate(extra_cols):
+            col = 4 + len(eu_cols) + j
+            if split == "csos":
+                fml(eu.cell(rr, col), f"MIN(40,MAX(0,({levy_sum})-500)*0.02)")
+            elif split == "equal":
+                if src:
+                    fml(eu.cell(rr, col), f"{src}/{n_units}")
+                else:
+                    fml(eu.cell(rr, col), f"{float(yearly or 0)/12}/{n_units}")
+            elif src:
+                fml(eu.cell(rr, col), f"$C{rr}*{src}")
+            else:
+                fml(eu.cell(rr, col), f"$C{rr}*{float(yearly or 0)/12}")
+        last_col = 3 + len(eu_cols) + len(extra_cols)
+        fml(eu.cell(rr, last_col + 1), f"SUM(D{rr}:{get_column_letter(last_col)}{rr})", TOTAL)
+    tot = first_u + len(units)
+    eu.cell(tot, 2, "TOTAL").font = Font(bold=True)
+    eu.cell(tot, 3, f"=SUM(C{first_u}:C{tot-1})").number_format = "0.000000"
+    for col in range(4, 4 + len(eu_cols) + len(extra_cols) + 1):
+        letter = get_column_letter(col)
+        fml(eu.cell(tot, col), f"SUM({letter}{first_u}:{letter}{tot-1})", TOTAL)
+    eu.column_dimensions["A"].width = 5
+    eu.column_dimensions["B"].width = 18
+    eu.column_dimensions["C"].width = 12
+    for col in range(4, 4 + len(eu_cols) + len(extra_cols) + 1):
+        eu.column_dimensions[get_column_letter(col)].width = 16
+    eu.row_dimensions[1].height = 64
+    eu.row_dimensions[6].height = 30
+    brand(eu)
+    eu.protection.sheet = True
+    eu.protection.password = "domus"
+    eu.protection.enable()
 
     ymp = wb.create_sheet("10 YMP")
     start_y = plan_start_year(state)
@@ -3524,7 +3770,7 @@ def generate_excel(state: dict) -> BytesIO:
     res["B6"].font = Font(italic=True, size=9, color="666666")
     res["B8"] = "Opening reserve balance"
     inp(res["D8"], float(state.get("reserve_balance") or 0), MONEY)
-    fml(res["F8"], "D8")
+    fml(res["F8"], "D11")
     res["B9"] = "Reserve contributions"
     if levy_rows.get("reserve"):
         fml(res["D9"], f"BUDGET!D{levy_rows['reserve']}")
@@ -3537,8 +3783,12 @@ def generate_excel(state: dict) -> BytesIO:
     res["B11"].font = Font(bold=True)
     fml(res["D11"], "D8+D9-D10", TOTAL)
     fml(res["F11"], "F8+F9-F10", TOTAL)
-    res["B12"] = "Still to be accumulated"
+    res["B12"] = "Overspent this year (D) and still to be accumulated next year (F)"
+    fml(res["D12"], "MAX(0,-D11)", RED)
     fml(res["F12"], "MAX(0,-F11)", RED)
+    res["H8"] = "Opening is the bank balance now. Do not include this year's contribution in that figure. Contribution is the next line. Next year's opening is what is left after this year, so an overspend is carried forward."
+    res["H8"].font = Font(italic=True, size=9, color="1F4E79")
+    res["H8"].alignment = Alignment(wrap_text=True, vertical="center")
     res["B13"] = (
         "Colours. Yellow with blue numbers: type here. White: locked formula, do not type. "
         "Pink: a result to check. On a project it means spent is higher than budgeted. It is not added again. "
@@ -3871,41 +4121,23 @@ def _read_meeting_from_sheet(wb, data: dict) -> None:
     rand_v = None
     for r in range(1, int(ws.max_row or 1) + 1):
         label = str(ws.cell(r, 2).value or "")
-        if label.startswith("Approved — type"):
-            pct_v = ws.cell(r, 5).value
+        if label.startswith("Agreed increase"):
             year_v = ws.cell(r, 6).value
-            if isinstance(year_v, (int, float)) and float(year_v) > 0.5:
+            if isinstance(year_v, (int, float)):
+                actual = 0.0
+                for it in (data.get("sections") or {}).get("levy") or []:
+                    if family(it.get("desc") or "") == "ordinary":
+                        actual = float(it.get("actual") or 0)
+                        break
                 data["levy_approve_mode"] = "amount"
-                data["levy_approved_amount"] = float(year_v)
-                continue
-            if isinstance(pct_v, str) and str(pct_v).startswith("="):
-                data["levy_approve_mode"] = "costs"
-                continue
-            if isinstance(pct_v, (int, float)):
-                pct = float(pct_v)
-                if abs(pct) <= 2:
-                    pct *= 100.0
-                data["levy_approve_mode"] = "pct"
-                data["levy_approved_pct"] = pct
+                data["levy_approved_amount"] = actual + float(year_v) if actual > 0.5 else float(year_v)
             continue
-        if label.startswith("Reserve approved"):
-            pct_v = ws.cell(r, 5).value
-            if isinstance(pct_v, str) and str(pct_v).startswith("="):
-                continue
-            if not isinstance(pct_v, (int, float)):
-                continue
-            pct = float(pct_v)
-            if abs(pct) <= 2:
-                pct *= 100.0
-            actual = 0.0
-            for it in (data.get("sections") or {}).get("levy") or []:
-                if family(it.get("desc") or "") == "reserve":
-                    actual = float(it.get("actual") or 0)
-                    break
-            data["reserve_mode"] = "amount"
-            data["reserve_approve_pct"] = pct
-            if actual > 0.5:
-                data["reserve_amount"] = actual * (1 + pct / 100.0)
+        if label.startswith("Agreed reserve"):
+            year_v = ws.cell(r, 6).value
+            if isinstance(year_v, (int, float)):
+                data["reserve_mode"] = "amount"
+                data["reserve_amount"] = float(year_v)
+            continue
 
 
 def _restore_from_domus_sheet(wb) -> dict | None:
@@ -4285,7 +4517,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                 "Comes off this cost": st.column_config.SelectboxColumn(
                     "Comes off this cost",
                     options=cost_names,
-                    help="Pick the expense or repair. The Actual of this recovery comes off that cost's actual. It does not reduce Budgeted yearly.",
+                    help="Pick Garden Services, the insurance repair, or the legal expense. The Budgeted yearly comes out of the levy once. It is not added again.",
                 ),
                 "Funded by reserve": st.column_config.NumberColumn(
                     "Funded by reserve",
@@ -4376,17 +4608,41 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                 if act > 0.5:
                     bit += f" actual {money(act)} comes off {r.get('claim_against')} this year"
                 if y > 0.5:
-                    bit += f"; budget {money(y)} comes off the levy" if act > 0.5 else f" budget {money(y)} comes off the levy"
+                    bit += f"; budget {money(y)} comes out of the levy once" if act > 0.5 else f" budget {money(y)} comes out of the levy"
                 bits.append(bit)
             st.caption(" · ".join(bits))
         else:
-            st.caption("Pick the cost each recovery pays, then Save. Actual comes off this year. Budgeted yearly comes off the new levy.")
+            st.caption("Pick the cost each recovery pays, then Save. Actual comes off this year. The fixed monthly charge, not this recovery, is what comes out of the new levy.")
+    elif key == "fixed":
+        left = []
+        for sec in ("expenditure", "rm", "personnel"):
+            for it in st.session_state.sections.get(sec) or []:
+                if skip_from_ordinary(it, st.session_state):
+                    continue
+                cover = fixed_cover(st.session_state, it.get("desc") or "")
+                if cover > 0.5:
+                    left.append(f"{it.get('desc')} {money(min(cover, cost_for_levy(st.session_state, it)))}")
+        if left:
+            st.caption("Left out of the ordinary levy: " + "; ".join(left) + ". The cost stays on its line. Each owner pays the same rand on the PQ.")
+        else:
+            st.caption("Type the yearly total for the whole complex. Name it like the cost (Garden Services, Refuse). That amount is left out of the levy. Each owner pays total ÷ 12 ÷ units.")
     else:
-        paid = [r for r in (st.session_state.sections.get(key) or []) if r.get("reserve_pays") and float(r.get("yearly") or 0) > 0.5]
-        extra = ""
-        if paid:
-            extra = " Reserve pays " + ", ".join(r.get("desc") or "" for r in paid) + ". Those lines are not in the ordinary levy."
-        st.caption(f"Section net total: {money(sum_net(st.session_state.sections[key]))}  ·  Monthly total: {money(sum_net(st.session_state.sections[key]) / 12)}.{extra}")
+        if key in ("expenditure", "rm", "personnel", "tax"):
+            rows = st.session_state.sections.get(key) or []
+            books = sum(cost_for_levy(st.session_state, r) for r in rows)
+            in_levy = sum(line_in_levy(st.session_state, r) for r in rows)
+            left = []
+            for it in rows:
+                full = cost_for_levy(st.session_state, it)
+                kept = line_in_levy(st.session_state, it)
+                if full - kept > 0.5:
+                    left.append(f"{it.get('desc')} {money(full - kept)}")
+            extra = (" Left out of the levy: " + "; ".join(left) + ".") if left else ""
+            if key == "expenditure" and not insurance_on_pq(st.session_state) and insurance_expense_amount(st.session_state) > 1:
+                extra += " Insurance is still in the levy. On Income, choose Extra on the owner invoice."
+            st.caption(f"On the books: {money(books)}. In the levy: {money(in_levy)}.{extra}")
+        else:
+            st.caption(f"Section net total: {money(sum_net(st.session_state.sections[key]))}  ·  Monthly total: {money(sum_net(st.session_state.sections[key]) / 12)}.")
 
 
 def main():
@@ -4468,12 +4724,23 @@ def main():
         )
         st.write(
             "**Left out of ordinary:** estate pass-through, CSOS (own PQ column), "
-            "insurance when it is extra on the invoice, and any line you set to R0 (for example garden service if owners pay the gardener themselves)."
+            "insurance when it is extra on the invoice, and a fixed monthly charge "
+            "(garden, refuse and the like). The cost stays on Expenditure. "
+            "Only the amount owners pay on the invoice is left out. Garden repairs stay in the levy."
         )
         for label, amt in levy_pieces(st.session_state):
             if amt or "Special" not in label:
                 st.write(f"- {label}: **{money(amt)}**")
         st.write(f"- **What the costs need: {money(ord_amt)}** for the year ({money(ord_amt / 12)} a month).")
+        left_bits = []
+        for sec in ("expenditure", "rm", "personnel", "tax"):
+            for it in s.get(sec) or []:
+                full = cost_for_levy(st.session_state, it)
+                kept = line_in_levy(st.session_state, it)
+                if full - kept > 0.5:
+                    left_bits.append(f"{it.get('desc')} {money(full - kept)}")
+        if left_bits:
+            st.write("**Not in the levy** (still on the books): " + "; ".join(left_bits) + ".")
         if abs(ord_amt - approved) > 1:
             st.write(
                 f"- **What the meeting approves: {money(approved)}** "
@@ -4770,32 +5037,28 @@ If the WeConnectU file only covers part of the year, set **Months covered by the
 ### 3. Type this year’s amounts
 On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly, and Notes.
 
-- Press **Enter** in the cell (so the number is kept), then **Save this section**.
-- Type **%** and Save → Budgeted yearly = Actual × (1 + %). Example: 10 means plus 10%.
-- Type **Budgeted yearly** and Save → the % fills in. % = (yearly ÷ actual) × 100 − 100.
-- If Actual is 0, a % cannot make a rand. Type the **Budgeted yearly** instead.
-- **Monthly** is always yearly ÷ 12. You cannot type it.
-- **Notes** go to the Comments column on the Excel sheet. Save after you type them.
+- Press **Enter** in the cell, then **Save this section**.
+- Type a **%** here in the app and Save, and Budgeted yearly fills in. Type a **Budgeted yearly** and the % fills in.
+- The Excel sheet the trustees get has **no % column**. They only see rands. Yellow cells are Budgeted yearly.
+- If Actual is 0, type the Budgeted yearly. A % cannot make a rand from nothing.
+- **Monthly** is yearly ÷ 12. You cannot type it.
+- **Notes** go to the Comments column on the Excel sheet.
 - A new line: type it on the blank row at the bottom, then Save.
 
 ### 4. What ordinary levies are
-Ordinary levies are **not** last year’s levy plus a %.
+Ordinary levies are the rands the costs need. They are not last year’s levy plus a %.
 
-**Ordinary = net municipal + expenditure + repairs and maintenance + personnel + tax − only the other income you tick**
+**Ordinary = net municipal + expenditure + repairs + personnel + tax − income you tick − fixed charges owners pay on the invoice − rand the reserve pays**
 
-The 10-year projects are added only if you tick **Pay the 10-year projects from the ordinary levy**.
+The box **Why is the levy this amount?** lists each piece in rand.
 
-The **% on Levies received** is the result of that sum. Do not type over it. It will not stick.
-
-The box **Why is the levy this amount?** at the top lists each piece in rand.
-
-**Left out of ordinary** (own column, or R0):
+**Left out of ordinary** (they have their own column — the cost stays on the sheet):
 
 - Reserve fund
 - CSOS
 - Insurance, when owners pay it on its own invoice line
 - A master-estate levy, when owners pay another estate through us
-- Garden service, when owners pay the gardener themselves (set that Expenditure line to R0)
+- Garden service, when owners pay the gardener on the invoice (Fixed monthly charges). The Expenditure line stays. Only that invoice amount is left out of the levy. Garden repairs stay in.
 - Income you did **not** tick
 
 ### 5. Other income — you tick it
@@ -4815,12 +5078,12 @@ On the Excel sheet the same choice is the column **Lowers the levy** (Yes or No)
 
 Type this year's recovery in **Actual**. Pick the cost. That amount comes off that cost's actual. It is already in the net row on the sheet. Do not add it again.
 
-Type next year's recovery in **Budgeted yearly**, if you expect it again. That amount comes off the new levy. If you leave Budgeted yearly at 0, next year's levy is not reduced.
+The recovery's **Budgeted yearly** comes out of the ordinary levy when you pick the cost. So does **Fixed monthly charges**. If you enter both for the same amount, it comes out **once**. The percentage should not jump.
 
-On the Excel sheet this block is **RECOVERY INCOME**. The cost line keeps the full spend in Actual, so the % stays on the full amount. Under the expenditure total and the repairs total, **ACTUAL after this year's recoveries** is the actual minus those recoveries.
+On the Excel sheet this block is **RECOVERY INCOME**. The cost line keeps the full spend in Actual. Under the expenditure total and the repairs total, **ACTUAL after this year's recoveries** is the actual minus those recoveries.
 
 - **Legal fees recovered:** type this year's amount in Actual and pick **Legal Expense**. Type the same amount in Budgeted yearly only if you expect it again next year.
-- **A repair invoiced to an owner** (a broken window): use **Charged to an owner**, or add a row. Pick the repair line. Actual comes off this year. Budgeted yearly comes off the levy only if you type one.
+- **A repair invoiced to an owner** (a broken window): put it in **Cost recoveries** on that repair. That comes off the levy. A recovery-income row is only for the books.
 - **Insurance:** either type the payout on the repair line, **or** put the recovery here and pick that repair. Do not do both, or it comes off twice.
 
 Until you pick a cost, the recovery does not come off anything.
@@ -4847,9 +5110,15 @@ On both:
 - **Breakdown**, at the bottom of Expenditure and of Repairs, is the detail inside a main account (for example Accounting fees: annual statements, tax return). Pick the main account, type the name, the Actual and the Budgeted yearly, then **Save breakdown**. On the sheet those lines sit under the main account. They are for the trustees. They are not added to the levy. Only the main account is used.
 
 ### 9. Garden and other equal charges
-If owners pay the gardener themselves, set **Garden service** on Expenditure to **R0**. Do not also put it under Fixed monthly charges. **Garden Expenses** on Repair and Maintenance stays in the levy (small garden repairs).
+Add the garden contract in **all three** places. Do not set Expenditure to 0.
 
-**Fixed monthly charges** on the Income tab are extras that are the **same rand for every unit** (prepaid meters, an Eskom fixed charge, a communal charge). Type the **yearly total for the whole complex**. Each owner pays that total ÷ 12 ÷ number of units, not by PQ. Do not put insurance or garden here.
+1. **Expenditure → Garden Services** — the full contract. Leave it.
+2. **Recovery income** — the same amount, so WeConnectU still shows the recovery. This does not come off the levy.
+3. **Fixed monthly charges** — the yearly total for the whole complex. This is the one that comes out of the ordinary levy and shows on the invoice.
+
+Each owner pays that total ÷ 12 ÷ the number of units. The same rand, not by PQ. **Gardening repairs** on Repair and Maintenance stay in the levy.
+
+Do the same for a private refuse contract when every unit pays the same rand. Do not put insurance on Fixed monthly charges. Insurance uses **Extra on the owner invoice**.
 
 ### 10. Reserve fund
 Type **How much is already in the reserve fund?** That is the bank balance now, not this year’s contribution.
@@ -4870,7 +5139,11 @@ Then choose how owners pay it. Pick one:
 
 On Expenditure, Repairs, Personnel or Tax, type a rand in **Funded by reserve** when the reserve pays that line, or only a part of it. Leave it at 0 if the levy pays it. The rand you type leaves the ordinary levy and shows on the reserve sheet.
 
-**Closing reserve balance** = opening balance + contributions − the maintenance plan − every rand funded by the reserve. **Still to be accumulated** is how much more is needed if that closing balance would go below zero.
+**Closing reserve balance this year** = opening + this year’s contribution − what was spent.
+
+**Overspent this year** shows when that closing figure is below zero. Example: R18,000 in the bank plus R5,000 collected is R23,000 available. Spend R28,000 and the sheet shows **R5,000 overspent**. Do not type the contribution inside the opening balance as well. That would count it twice.
+
+**Next year** starts from what is left, including a minus. Then it adds next year’s contribution and takes off next year’s plan. **Still to be accumulated** is the minus, if there is one.
 
 Interest already sits inside the opening balance. It is not added again. Leave the interest line under Other Income for the tax estimate, and leave **Lowers the ordinary levy** off.
 
@@ -4892,7 +5165,7 @@ In the sidebar you can also name that levy, type the yearly total, and split it 
 ### 13. CSOS
 We collect CSOS from owners and pay the same amount to CSOS. Income and expense are the same rand, so owners are not charged twice. It is its own PQ column, not inside ordinary levies.
 
-Leave **Calculate CSOS** ticked. Each owner pays 2% of (their monthly levy − R500), and never more than **R40**. If the meeting types 10% on the levy, CSOS goes up with that levy, then stops at R40. It is not a share of one complex total, so one owner cannot be charged R43.
+Leave **Calculate CSOS** ticked. Each owner pays 2% of (their monthly levy − R500), and never more than **R40**. If the meeting charges a higher levy, CSOS goes up with that levy, then stops at R40.
 
 Untick it only if you must type a different CSOS figure yourself.
 
@@ -4916,20 +5189,24 @@ A job you did not do, and that has no amount next year, is not on this list. It 
 
 A cost that is not on the plan can still be paid by the reserve. Type the rand in **Funded by reserve**. A part is allowed. Do not also leave that same rand in the levy.
 
-### 16. PQ / what each owner pays
+### 16. PQ and what each unit pays
 Upload the unit file in the sidebar or on **PQ / Levies**. If the PQ column is 0, the app uses **Ratio 1**. The ratios must add up to about 1.000.
 
-Each owner’s share of a levy column = their PQ × that column’s monthly total.
+The **PQ** sheet is the invoice: Levies, Reserve, CSOS, Insurance and any fixed charge. Each owner’s levy share = their PQ × the monthly total. A fixed charge (garden, private refuse) is the same rand for every unit.
 
-Boathouse and boatport stay on the budget, under Levy Income. They are not on the PQ. They take the same % as the ordinary levy. On the Excel sheet those cells are locked.
+**EACH UNIT** is a separate sheet. It does not change the PQ sheet. One row per unit, in rands a month:
 
-On **Municipal charges**, **Expenditure**, **Repair and Maintenance** and **Personnel**, **A to Z** sorts by the name and **By GL code** sorts by the code. A line with no code goes last. The amounts do not change. Download Excel after you sort if the sheet must match.
+- Municipal — only the part not recovered
+- Expenditure
+- Repairs
+- Personnel, only if there is a salary
+- Tax, only if there is tax
+- Reserve, CSOS, insurance and garden, where those are billed on their own
+- **Total** — what that unit pays
 
-Equal charges (and an estate levy set to “same amount”) are split by the number of units, not by PQ.
+If the meeting agrees less than the costs need, these rows use the lower rand. **Still short** at the top is the hole for the whole complex. It is not added again into the totals.
 
-The schedule uses the **approved** ordinary levy once the meeting has set one. Until then it uses what the costs need.
-
-**Paid last year** and **Will pay this year** are extra columns on this tab and on the Excel PQ sheet. They are the ordinary levy only. Paid last year is the sidebar amount × the unit’s ratio. Will pay this year is the new ordinary levy × the same ratio. They are not added into the Total, and they do not change any budget formula.
+Boathouse and boatport stay on the budget, under Levy Income. They move with the agreed levy, in the same proportion as last year. They are not on the PQ.
 
 ### 17. 10-year plan and the projects
 Do these steps in this order.
@@ -4957,15 +5234,19 @@ The names do not have to be identical. Sand beds, tree felling, windows, stairca
 ### 18. The meeting
 You prepare the budget. The trustees decide in the meeting.
 
-**Download Excel** on the Download tab. The file is a normal workbook. **BUDGET** is the levy only. **RESERVE** is the reserve fund, in the same columns. **PQ** and **10 YMP** are unchanged. The full Domus logo, including the words underneath, sits at the top left of each sheet. When you print, the bottom of every page reads Domus Property Management / Eiendomsbestuur, plus the complex name and the year.
+**Download Excel** on the Download tab. **BUDGET** is the levy. **RESERVE** is the reserve fund. **PQ** is the invoice. **EACH UNIT** is what each owner pays, split into municipal, expenditure, repairs and the rest. **10 YMP** is the plan. There is no % anywhere on these sheets.
 
-**Restore this app’s Excel** brings that file back. Totals, the cost-shortfall lines and the ordinary-levy result are not loaded as new accounts. A line that is already there is updated. It is not added a second time.
+The meeting block is at the top of **BUDGET**.
 
-The meeting block is at the top of **BUDGET**. On **Approved**, type the levy %. On **Reserve approved**, type the reserve %. 10% means last year’s figure plus 10%. The yearly rand calculates. Boathouse and boatport use that same levy %. Those cells are locked. **What the costs need**, **Last year’s contribution** and **Gap** are locked. The bank balance is not on this sheet. It is on **RESERVE**.
+- **What the costs need** is locked.
+- **Increase the costs need** is locked. Example: R50,000.
+- **Agreed increase** is yellow. Type the rand they agree, for example 30000. Not a %.
+- **What owners will be charged** and **Still short** calculate. Still short would be R20,000.
+- **Agreed reserve** is yellow. Type the reserve contribution in rands.
 
-Yellow cells can be typed. White cells are locked. Yellow with blue numbers: type here. Pink: a result to check, not a second charge. Pale blue: a total. Dark blue: a heading. Green: the monthly levy the meeting approved. To unlock: Review, Unprotect Sheet, password **domus**.
+Yellow cells can be typed. White cells are locked. Pink is a result to check, not a second charge. Green is the monthly levy the meeting approved. To unlock: Review, Unprotect Sheet, password **domus**.
 
-On a cost line, type **Budgeted yearly**. The % updates and cannot be typed over. **Cost recoveries** come off that bill. **Recovery against actual** is this year's recovery. A trustee can type 0, or a higher rand. It does not change Budgeted yearly. **Funded by reserve** is the rand that moves to the reserve sheet.
+On a cost line, type **Budgeted yearly** only. **Cost recoveries** come off that bill. **Funded by reserve** moves that rand to the reserve sheet.
 
 If you already know the decision before you download, you can set the same choice on the Income tab under **Meeting decision**. The sheet still shows it, so the meeting can change it.
 
@@ -5037,10 +5318,10 @@ Click the picture to move on. For the meeting, **Download the presentation**, op
         st.subheader("Meeting decision — Levies received")
         st.caption(
             "You do not set this before the meeting. Download the sheet. "
-            "In the meeting the trustees type the % on the yellow Approved line. "
-            "10% means last year’s levies plus 10%. The yearly rand calculates. CSOS on the PQ moves with that levy, and no owner goes over R40 a month. "
-            "Under that, Reserve approved works the same way for the reserve fund. "
-            "The % on each cost line stays locked. A yellow Budgeted yearly cell can still be typed. "
+            "In the meeting the trustees type the rand on Agreed increase. "
+            "If the costs need R50,000 more and they agree R30,000, they type 30000. Still short shows R20,000. "
+            "There is no % on the sheet. Agreed reserve is also a rand. "
+            "EACH UNIT shows what each owner pays a month."
         )
         _mode = st.radio(
             "What should owners be charged?",
@@ -5124,20 +5405,23 @@ Click the picture to move on. For the meeting, **Download the presentation**, op
         section_form(
             "recoveries_other",
             "Recovery income",
-            "Legal fees recovered, an insurance recovery, or a repair invoiced to an owner. "
-            "The cost stays. This amount comes off the cost you pick. "
-            "Type the amount, pick Comes off this cost, then Save.",
+            "Add garden recovered here as well as on Fixed monthly charges. "
+            "Legal fees recovered and a repair invoiced to an owner also go here. "
+            "The cost stays on Expenditure. Do not set it to 0. "
+            "Type the amount, pick Comes off this cost, then Save. "
+            "This line matches the books. Fixed monthly charges is what comes off the levy.",
             claims=True,
         )
         st.divider()
         section_form(
             "fixed",
             "Fixed monthly charges on the owner invoice",
-            "Equal extra on the invoice (same rand each unit): prepaid / Eskom fixed / communal. "
-            "Type the YEARLY total for the complex, then Save. Each owner pays total ÷ 12 ÷ units. "
-            "Do **not** put garden here. If owners pay the gardener themselves, set **Garden service** on Expenditure to **R0** (omit it). "
-            "**Garden Expenses** on Repair & Maintenance stays in the levy (general garden repairs). "
-            "Do not put insurance here.",
+            "ADD the garden contract here. Do not set Garden Services on Expenditure to 0. "
+            "Also add it under Recovery income so the books match. "
+            "Type the YEARLY total for the whole complex, then Save. "
+            "Each owner pays that total ÷ 12 ÷ units. That amount is left out of the ordinary levy. "
+            "Same for private refuse when every unit pays the same rand. "
+            "Garden repairs stay in the levy. Do not put insurance here.",
         )
 
     with tabs[2]:
