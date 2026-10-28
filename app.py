@@ -195,7 +195,7 @@ def row(desc: str, note: str = "") -> dict:
     return {
         "id": uid(), "desc": desc, "actual": 0.0, "pct": 0.0, "yearly": 0.0,
         "insurance": 0.0, "owner_recovery": 0.0, "note": note, "is_recovery": False,
-        "reduces_levy": False, "claim_against": "", "edit_mode": "pct", "reserve_pays": False, "gl": "",
+        "reduces_levy": False, "claim_against": "", "goes_to": "", "edit_mode": "pct", "reserve_pays": False, "gl": "",
     }
 
 
@@ -329,6 +329,39 @@ def income_used(state: dict) -> float:
         if r.get("reduces_levy") and levy_line_can_reduce(r.get("desc") or ""):
             total += max(0.0, float(r.get("yearly") or 0))
     return total
+
+
+def goes_to_reserve(item: dict, state: dict) -> bool:
+    """True when this levy was collected for the reserve, even if WeConnectU filed it somewhere else."""
+    dest = norm(item.get("goes_to") or "")
+    if not dest or "stay" in dest or "invoice" in dest:
+        return False
+    if dest.startswith("reserve"):
+        return True
+    for key in ("special",):
+        for r in (state.get("sections") or {}).get(key) or []:
+            if norm(r.get("desc") or "") == dest:
+                return True
+    for p in state.get("ymp") or []:
+        if norm(p.get("desc") or "") == dest:
+            return True
+    return False
+
+
+def goes_to_options(state: dict) -> list:
+    opts = ["— stays on the invoice —", "Reserve fund"]
+    seen = {"reserve fund"}
+    for key in ("special", "expenditure", "rm"):
+        for r in (state.get("sections") or {}).get(key) or []:
+            name = (r.get("desc") or "").strip()
+            key_n = norm(name)
+            if not name or key_n in seen or len(key_n) < 3:
+                continue
+            if key_n in ("thornhill body corporate", "10 year maintenance plan"):
+                continue
+            seen.add(key_n)
+            opts.append(name)
+    return opts
 
 
 def levy_line_can_reduce(desc: str) -> bool:
@@ -483,6 +516,14 @@ def recovery_lines_for(state: dict, desc: str) -> list:
     out = []
     for r in (state.get("sections") or {}).get("recoveries_other") or []:
         if norm(r.get("claim_against") or "") != target:
+            continue
+        if abs(float(r.get("yearly") or 0)) < 0.5:
+            continue
+        out.append(r)
+    for r in (state.get("sections") or {}).get("levy") or []:
+        if goes_to_reserve(r, state):
+            continue
+        if norm(r.get("goes_to") or "") != target:
             continue
         if abs(float(r.get("yearly") or 0)) < 0.5:
             continue
@@ -1663,7 +1704,7 @@ def sort_lines(items: list, how: str) -> list:
     return rows
 
 
-def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = False, claims: bool = False, claim_map: dict | None = None, reserve_tick: bool = False, show_gl: bool = False, move: bool = False, plan: bool = False) -> pd.DataFrame:
+def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = False, claims: bool = False, claim_map: dict | None = None, reserve_tick: bool = False, show_gl: bool = False, move: bool = False, plan: bool = False, goes: bool = False) -> pd.DataFrame:
     recs = []
     show_extra = rm or recover
     for it in items:
@@ -1709,6 +1750,8 @@ def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = Fal
             rec["Funded by reserve"] = funded if funded > 0.5 else 0.0
         if income:
             rec["Lowers the ordinary levy"] = bool(it.get("reduces_levy")) and levy_line_can_reduce(it.get("desc") or "")
+        if goes:
+            rec["Goes to"] = (it.get("goes_to") or "").strip() or "— stays on the invoice —"
         if claims:
             rec["Comes off this cost"] = (it.get("claim_against") or "").strip() or "— none —"
         if move:
@@ -1722,6 +1765,8 @@ def items_to_df(items: list, rm: bool, recover: bool = False, income: bool = Fal
     cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Notes"]
     if income:
         cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Lowers the ordinary levy", "Notes"]
+    if goes:
+        cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Lowers the ordinary levy", "Goes to", "Notes"]
     if claims:
         cols = ["Description", "Actual", "% Increase", "Budgeted yearly", "Monthly", "Comes off this cost", "Notes"]
     if rm:
@@ -1815,6 +1860,14 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
                 against = ""
         else:
             against = prev.get("claim_against") or ""
+        if "Goes to" in rec:
+            goes = clean_note(rec.get("Goes to"))
+            if goes.lower() in ("", "— stays on the invoice —", "- stays on the invoice -", "none", "stays on the invoice"):
+                goes = ""
+        else:
+            goes = prev.get("goes_to") or ""
+        if family(desc) in ("ordinary", "reserve", "csos_inc"):
+            goes = ""
         if "GL code" in rec:
             gl = clean_note(rec.get("GL code"))
         else:
@@ -1868,6 +1921,7 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
             "is_recovery": recovery,
             "reduces_levy": reduces,
             "claim_against": against,
+            "goes_to": goes,
             "edit_mode": edit_mode,
             "reserve_pays": funded > 0.5,
             "reserve_funded": funded,
@@ -3048,12 +3102,13 @@ def generate_excel(state: dict) -> BytesIO:
     levy_buckets = {"expenditure": [], "rm": [], "personnel": [], "tax": [], "special": []}
     cover_pending = []
     recovery_excel_rows = {}
+    reserve_from_rows = []
     reserve_mark_rows = []
     write_bucket = {"name": None}
 
     def write(items, recovery_as_income=False, in_levy=False, owner_box=False, levy_tick=False, claim_col=False, reserve_col=False, mains=None, l_rows=None, no_pct=False):
         """Old pack formulas: F = D*(1+E), G = F/12. Recoveries shown as positive income when asked."""
-        nonlocal r, reserve_mark_rows, cover_pending, recovery_excel_rows
+        nonlocal r, reserve_mark_rows, cover_pending, recovery_excel_rows, reserve_from_rows
         if not items:
             start = r
             r += 1
@@ -3192,6 +3247,22 @@ def generate_excel(state: dict) -> BytesIO:
                         levy_buckets[write_bucket["name"]].append(piece)
             if levy_tick and (levy_tick is True or levy_line_can_reduce(desc)):
                 inp(ws.cell(r, 9), "Yes" if it.get("reduces_levy") else "No")
+            if levy_tick == "extra":
+                if r == start:
+                    hc = ws.cell(start - 1, 10, "Goes to")
+                    fill(hc, NAVY)
+                    hc.font = Font(bold=True, color="FFFFFF", size=10)
+                    hc.border = THIN
+                    ws.column_dimensions["J"].width = 28
+                dest = (it.get("goes_to") or "").strip()
+                inp(ws.cell(r, 10), dest or "— stays on the invoice —")
+                if goes_to_reserve(it, state):
+                    reserve_from_rows.append(r)
+                    extra = "Goes to the reserve fund. Added to the reserve contributions. Not part of the ordinary levy."
+                    note = f"{note} | {extra}".strip(" |") if note else extra
+                elif dest and norm(dest) not in ("", "stays on the invoice"):
+                    extra = "Goes to " + dest + ". Taken off that account, not added again."
+                    note = f"{note} | {extra}".strip(" |") if note else extra
             if claim_col:
                 inp(ws.cell(r, 9), it.get("claim_against") or "")
             if reserve_col:
@@ -3782,8 +3853,10 @@ def generate_excel(state: dict) -> BytesIO:
     fml(res["F8"], "D11")
     res["B9"] = "Reserve contributions"
     if levy_rows.get("reserve"):
-        fml(res["D9"], f"BUDGET!D{levy_rows['reserve']}")
-        fml(res["F9"], f"BUDGET!F{levy_rows['reserve']}")
+        d_bits = [f"BUDGET!D{levy_rows['reserve']}"] + [f"BUDGET!D{n}" for n in reserve_from_rows]
+        f_bits = [f"BUDGET!F{levy_rows['reserve']}"] + [f"BUDGET!F{n}" for n in reserve_from_rows]
+        fml(res["D9"], "+".join(d_bits))
+        fml(res["F9"], "+".join(f_bits))
     else:
         inp(res["D9"], 0, MONEY)
         inp(res["F9"], float(reserve_contribution(state) or 0), MONEY)
@@ -4049,6 +4122,12 @@ def _apply_budget_sheet(wb, data: dict, wb_values=None) -> None:
                 found["reduces_levy"] = float(got) >= 0.5
         elif current == "recoveries_other" and isinstance(got, str) and got.strip():
             found["claim_against"] = got.strip()
+        elif current == "levy":
+            if isinstance(got, str):
+                found["reduces_levy"] = got.strip().lower() in ("yes", "y", "true", "1")
+            goes = ws.cell(r, 10).value
+            if isinstance(goes, str) and goes.strip() and "stay" not in goes.lower() and "invoice" not in goes.lower():
+                found["goes_to"] = goes.strip()
         elif isinstance(got, (int, float)) and not isinstance(got, bool):
             found["owner_recovery"] = abs(float(got))
         gl_v = ws.cell(r, 3).value
@@ -4467,7 +4546,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
             name = (it.get("claim_against") or "").strip()
             if name and name not in cost_names:
                 cost_names.append(name)
-    df = items_to_df(items, rm, recover, income=income, claims=claims, claim_map=claim_map, reserve_tick=reserve_tick, show_gl=reorder, move=move, plan=plan)
+    df = items_to_df(items, rm, recover, income=income, claims=claims, claim_map=claim_map, reserve_tick=reserve_tick, show_gl=reorder, move=move, plan=plan, goes=(key == "levy"))
     if reorder:
         c1, c2 = st.columns(2)
         sort_name = c1.button("A to Z", key=f"sort_name_{key}")
@@ -4522,6 +4601,11 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                 "Lowers the ordinary levy": st.column_config.CheckboxColumn(
                     "Lowers the ordinary levy",
                     help="Tick when this money pays running costs, so the ordinary levy is lower. Ordinary levies, the reserve levy and CSOS cannot be ticked.",
+                ),
+                "Goes to": st.column_config.SelectboxColumn(
+                    "Goes to",
+                    options=goes_to_options(st.session_state),
+                    help="Where this money belongs. Reserve fund puts it into the reserve, even if WeConnectU did not. A project does the same. An expense takes it off that cost, like garden.",
                 ),
                 "Comes off this cost": st.column_config.SelectboxColumn(
                     "Comes off this cost",
@@ -5070,6 +5154,8 @@ The box **Why is the levy this amount?** lists each piece in rand.
 - Garden service, when owners pay the gardener on the invoice (Fixed monthly charges). The Expenditure line stays. Only that invoice amount is left out of the levy. Garden repairs stay in.
 - Income you did **not** tick
 
+On **Levy Income**, a special levy has **Goes to**. Choose **Reserve fund** when that money was for the reserve, even if WeConnectU did not put it there. A project name does the same. An expense takes it off that cost. **Stays on the invoice** leaves it as its own charge only.
+
 ### 5. Other income — you tick it
 On **Income → Other Income** each line has **Lower the levies**.
 
@@ -5378,6 +5464,8 @@ Click the picture to move on. For the meeting, **Download the presentation**, op
             "levy",
             "Levy Income",
             "Ordinary levies, the reserve levy and CSOS cannot lower the ordinary levy. "
+            "On a special levy, use Goes to. Reserve fund sends that money into the reserve. "
+            "A project does the same. An expense takes it off that cost. "
             "Boathouse and boatport use the same % as the ordinary levy. Do not type their Budgeted yearly. Save puts it back. "
             "Any other levy can lower the ordinary levy: tick that box when the money helps pay repairs. "
             "Add a row, then Save.",
