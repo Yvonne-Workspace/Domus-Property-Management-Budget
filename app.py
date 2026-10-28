@@ -2984,7 +2984,7 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B9"] = "What owners will be charged"
     ws["B10"] = "Still short. Above zero means the costs are still higher."
     ws["B10"].font = Font(italic=True, size=9, color="9C0006")
-    ws["H8"] = "Type the rand the meeting will add to last year’s levy. Not a %. If the costs need R50,000 more and they agree R30,000, type 30000. The shortfall shows on the next line."
+    ws["H8"] = "This follows the costs. Leave it. It changes when a yellow amount changes. Type a rand here only when the meeting agrees less, for example 30000. The shortfall shows on the line below."
     ws["H8"].font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
     ws["H8"].alignment = Alignment(wrap_text=True, vertical="center")
     ws.row_dimensions[8].height = 32
@@ -3442,7 +3442,16 @@ def generate_excel(state: dict) -> BytesIO:
         fml(ws.cell(6, 7), "F6/12")
         fml(ws.cell(7, 6), "IF(OrdinaryActual=0,F6,F6-OrdinaryActual)")
         fml(ws.cell(7, 7), "F7/12")
-        inp(ws.cell(8, 6), _seed_increase, MONEY)
+        agreed = ws.cell(8, 6)
+        if _mode == "amount" and float(state.get("levy_approved_amount") or 0) > 0.5:
+            inp(agreed, _seed_increase, MONEY)
+        else:
+            agreed.value = "=F7"
+            fill(agreed, YELLOW)
+            agreed.font = Font(name="Calibri", color=BLUE, size=10)
+            agreed.border = THIN
+            agreed.protection = Protection(locked=False)
+            agreed.number_format = MONEY
         fml(ws.cell(9, 6), "IF(OrdinaryActual=0,F8,OrdinaryActual+F8)")
         fml(ws.cell(9, 7), "F9/12", "C6EFCE")
         fml(ws.cell(10, 6), "F6-F9", RED)
@@ -5240,7 +5249,7 @@ The meeting block is at the top of **BUDGET**.
 
 - **What the costs need** is locked.
 - **Increase the costs need** is locked. Example: R50,000.
-- **Agreed increase** is yellow. Type the rand they agree, for example 30000. Not a %.
+- **Agreed increase** is yellow and it follows the costs. Change a yellow Budgeted yearly and this rand changes with it. Type over it only when the meeting agrees a different rand. Not a %.
 - **What owners will be charged** and **Still short** calculate. Still short would be R20,000.
 - **Agreed reserve** is yellow. Type the reserve contribution in rands.
 
