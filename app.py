@@ -3257,7 +3257,7 @@ def generate_excel(state: dict) -> BytesIO:
                 dest = (it.get("goes_to") or "").strip()
                 inp(ws.cell(r, 10), dest or "— stays on the invoice —")
                 if goes_to_reserve(it, state):
-                    reserve_from_rows.append(r)
+                    reserve_from_rows.append((r, desc))
                     extra = "Goes to the reserve fund. Added to the reserve contributions. Not part of the ordinary levy."
                     note = f"{note} | {extra}".strip(" |") if note else extra
                 elif dest and norm(dest) not in ("", "stays on the invoice"):
@@ -3685,7 +3685,7 @@ def generate_excel(state: dict) -> BytesIO:
     eu["A1"] = "WHAT EACH UNIT PAYS"
     eu["A1"].font = Font(bold=True, size=14, color=NAVY)
     eu["A2"] = state.get("complex_name") or ""
-    eu["A3"] = "Monthly rand for that unit. Municipal is only the part not recovered. Personnel and tax are left off when they are zero. The total is what that unit pays."
+    eu["A3"] = "Monthly rand for that unit. Municipal — common property is the city bill for the complex after owners have paid their own electricity and water. It is not their home's municipal account. Personnel and tax are left off when they are zero."
     eu["A3"].font = Font(italic=True, size=9, color="666666")
     eu.merge_cells("A3:L3")
     eu["A4"] = "Still short for the whole complex. Not inside the totals below."
@@ -3710,7 +3710,7 @@ def generate_excel(state: dict) -> BytesIO:
         n = named_rows.get(it.get("desc") or "")
         if n:
             income_refs.append(f"BUDGET!F{n}")
-    eu_cols = [("Municipal", f"BUDGET!F{net_muni}"), ("Expenditure", _bucket_year(levy_buckets["expenditure"])), ("Repairs", _bucket_year(levy_buckets["rm"]))]
+    eu_cols = [("Municipal — common property", f"BUDGET!F{net_muni}"), ("Expenditure", _bucket_year(levy_buckets["expenditure"])), ("Repairs", _bucket_year(levy_buckets["rm"]))]
     if sum(max(0.0, float(it.get("yearly") or 0)) for it in s.get("personnel") or []) > 0.5:
         eu_cols.append(("Personnel", _bucket_year(levy_buckets["personnel"])))
     if sum(max(0.0, float(it.get("yearly") or 0)) for it in s.get("tax") or []) > 0.5:
@@ -3775,6 +3775,7 @@ def generate_excel(state: dict) -> BytesIO:
     eu.column_dimensions["C"].width = 12
     for col in range(4, 4 + len(eu_cols) + len(extra_cols) + 1):
         eu.column_dimensions[get_column_letter(col)].width = 16
+    eu.column_dimensions["D"].width = 24
     eu.row_dimensions[1].height = 64
     eu.row_dimensions[6].height = 30
     brand(eu)
@@ -3850,56 +3851,73 @@ def generate_excel(state: dict) -> BytesIO:
     res["B6"].font = Font(italic=True, size=9, color="666666")
     res["B8"] = "Opening reserve balance"
     inp(res["D8"], float(state.get("reserve_balance") or 0), MONEY)
-    fml(res["F8"], "D11")
     res["B9"] = "Reserve contributions"
     if levy_rows.get("reserve"):
-        d_bits = [f"BUDGET!D{levy_rows['reserve']}"] + [f"BUDGET!D{n}" for n in reserve_from_rows]
-        f_bits = [f"BUDGET!F{levy_rows['reserve']}"] + [f"BUDGET!F{n}" for n in reserve_from_rows]
-        fml(res["D9"], "+".join(d_bits))
-        fml(res["F9"], "+".join(f_bits))
+        fml(res["D9"], f"BUDGET!D{levy_rows['reserve']}")
+        fml(res["F9"], f"BUDGET!F{levy_rows['reserve']}")
     else:
         inp(res["D9"], 0, MONEY)
         inp(res["F9"], float(reserve_contribution(state) or 0), MONEY)
-    res["B10"] = "Maintenance plan expenditure"
-    res["B11"] = "Closing reserve balance"
-    res["B11"].font = Font(bold=True)
-    fml(res["D11"], "D8+D9-D10", TOTAL)
-    fml(res["F11"], "F8+F9-F10", TOTAL)
-    res["B12"] = "Overspent this year (D) and still to be accumulated next year (F)"
-    fml(res["D12"], "MAX(0,-D11)", RED)
-    fml(res["F12"], "MAX(0,-F11)", RED)
-    res["H8"] = "Opening is the bank balance now. Do not include this year's contribution in that figure. Contribution is the next line. Next year's opening is what is left after this year, so an overspend is carried forward."
-    res["H8"].font = Font(italic=True, size=9, color="1F4E79")
-    res["H8"].alignment = Alignment(wrap_text=True, vertical="center")
-    res["B13"] = (
+    sr = 10
+    special_rows = []
+    for src_row, src_desc in reserve_from_rows:
+        label = src_desc or "Special levy"
+        res.cell(sr, 2, label).font = Font(name="Calibri", size=10)
+        res.cell(sr, 2).border = THIN
+        fml(res.cell(sr, 4), f"BUDGET!D{src_row}")
+        fml(res.cell(sr, 6), f"BUDGET!F{src_row}")
+        res.cell(sr, 8, "Special levy collected for the reserve. Shown on its own. Not inside the ordinary levy.").font = Font(italic=True, size=9, color="1F4E79")
+        special_rows.append(sr)
+        sr += 1
+    maint_summary = sr
+    res.cell(maint_summary, 2, "Maintenance plan expenditure")
+    close_row = maint_summary + 1
+    res.cell(close_row, 2, "Closing reserve balance").font = Font(bold=True)
+    in_parts = ["D8", "D9"] + [f"D{n}" for n in special_rows]
+    in_next = ["F8", "F9"] + [f"F{n}" for n in special_rows]
+    fml(res.cell(close_row, 4), "+".join(in_parts) + f"-D{maint_summary}", TOTAL)
+    fml(res.cell(close_row, 6), "+".join(in_next) + f"-F{maint_summary}", TOTAL)
+    fml(res["F8"], f"D{close_row}")
+    over_row = close_row + 1
+    res.cell(over_row, 2, "Overspent this year (D) and still to be accumulated next year (F)")
+    fml(res.cell(over_row, 4), f"MAX(0,-D{close_row})", RED)
+    fml(res.cell(over_row, 6), f"MAX(0,-F{close_row})", RED)
+    res.cell(8, 8, "Opening is the bank balance now. Do not include this year's contribution in that figure. Contribution is the next line. A special levy for the reserve is its own line. Next year's opening is what is left after this year.")
+    res.cell(8, 8).font = Font(italic=True, size=9, color="1F4E79")
+    res.cell(8, 8).alignment = Alignment(wrap_text=True, vertical="center")
+    note_row = over_row + 1
+    res.cell(note_row, 2, (
         "Colours. Yellow with blue numbers: type here. White: locked formula, do not type. "
         "Pink: a result to check. On a project it means spent is higher than budgeted. It is not added again. "
         "Pale blue: a total. Dark blue with white words: a heading."
-    )
-    res["B13"].font = Font(italic=True, size=9, color="666666")
-    res["B13"].alignment = Alignment(wrap_text=True, vertical="center")
-    res.merge_cells("B13:H13")
-    res.row_dimensions[13].height = 32
+    ))
+    res.cell(note_row, 2).font = Font(italic=True, size=9, color="666666")
+    res.cell(note_row, 2).alignment = Alignment(wrap_text=True, vertical="center")
+    res.merge_cells(start_row=note_row, start_column=2, end_row=note_row, end_column=8)
+    res.row_dimensions[note_row].height = 32
+    bill_row = note_row + 1
     if reserve_inside_levy(state):
-        res["B14"] = "The contribution is inside the ordinary levy. Owners do not get a separate reserve line. Do not add it again."
+        res.cell(bill_row, 2, "The contribution is inside the ordinary levy. Owners do not get a separate reserve line. Do not add it again.")
     else:
-        res["B14"] = "The contribution is its own line on the owner invoice. It is not inside the ordinary levy. Do not add it again."
-    res["B14"].font = Font(italic=True, size=9, color="666666")
+        res.cell(bill_row, 2, "The contribution is its own line on the owner invoice. It is not inside the ordinary levy. Do not add it again.")
+    res.cell(bill_row, 2).font = Font(italic=True, size=9, color="666666")
+    plan_title = bill_row + 1
     if state.get("special_in_ordinary"):
-        res["B15"] = "The maintenance plan is ticked into the ordinary levy, so it is not on this sheet."
-        res["B15"].font = Font(italic=True, size=9, color="9C0006")
+        res.cell(plan_title, 2, "The maintenance plan is ticked into the ordinary levy, so it is not on this sheet.")
+        res.cell(plan_title, 2).font = Font(italic=True, size=9, color="9C0006")
+        plan_title += 1
+    res.cell(plan_title, 2, "10 YEAR MAINTENANCE PROJECTS").font = Font(bold=True, size=12, color=NAVY)
+    plan_hdr = plan_title + 1
     for col, lab in enumerate(["Description", "GL Code", "Spent this year", "Budgeted this year", "Next year", "Monthly", "Comments / Notes"], 2):
-        c = res.cell(17, col, lab)
+        c = res.cell(plan_hdr, col, lab)
         fill(c, NAVY)
         c.font = Font(bold=True, color="FFFFFF", size=10)
         c.border = THIN
-    res.cell(17, 9, "Over / under").font = Font(bold=True, color="FFFFFF", size=10)
-    fill(res.cell(17, 9), NAVY)
-    res.cell(17, 9).border = THIN
+    res.cell(plan_hdr, 9, "Over / under").font = Font(bold=True, color="FFFFFF", size=10)
+    fill(res.cell(plan_hdr, 9), NAVY)
+    res.cell(plan_hdr, 9).border = THIN
     res.column_dimensions["I"].width = 16
-    res["B16"] = "10 YEAR MAINTENANCE PROJECTS"
-    res["B16"].font = Font(bold=True, size=12, color=NAVY)
-    rr = 18
+    rr = plan_hdr + 1
     plan_rows = []
     maint_rows = []
     if not state.get("special_in_ordinary"):
@@ -3973,8 +3991,8 @@ def generate_excel(state: dict) -> BytesIO:
     fml(res.cell(tot_r, 4), "+".join(f"D{n}" for n in plan_rows), TOTAL)
     fml(res.cell(tot_r, 6), "+".join(f"F{n}" for n in plan_rows), TOTAL)
     fml(res.cell(tot_r, 7), f"F{tot_r}/12", TOTAL)
-    fml(res["D10"], f"D{tot_r}")
-    fml(res["F10"], f"F{tot_r}")
+    fml(res.cell(maint_summary, 4), f"D{tot_r}")
+    fml(res.cell(maint_summary, 6), f"F{tot_r}")
     res.protection.sheet = True
     res.protection.password = "domus"
     res.protection.enable()
@@ -5154,7 +5172,7 @@ The box **Why is the levy this amount?** lists each piece in rand.
 - Garden service, when owners pay the gardener on the invoice (Fixed monthly charges). The Expenditure line stays. Only that invoice amount is left out of the levy. Garden repairs stay in.
 - Income you did **not** tick
 
-On **Levy Income**, a special levy has **Goes to**. Choose **Reserve fund** when that money was for the reserve, even if WeConnectU did not put it there. A project name does the same. An expense takes it off that cost. **Stays on the invoice** leaves it as its own charge only.
+On a special levy, open **Goes to** and choose **Reserve fund**. On the reserve sheet it shows on its own line, under the normal contribution. It is not added into the contribution line.
 
 ### 5. Other income — you tick it
 On **Income → Other Income** each line has **Lower the levies**.
@@ -5291,7 +5309,7 @@ The **PQ** sheet is the invoice: Levies, Reserve, CSOS, Insurance and any fixed 
 
 **EACH UNIT** is a separate sheet. It does not change the PQ sheet. One row per unit, in rands a month:
 
-- Municipal — only the part not recovered
+- Municipal — common property. This is the city bill for the complex after owners have paid their own electricity and water. It is not their home's municipal account.
 - Expenditure
 - Repairs
 - Personnel, only if there is a salary
