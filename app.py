@@ -3062,11 +3062,16 @@ def generate_excel(state: dict) -> BytesIO:
     else:
         _seed_increase = _approved_year
     approved_row = 9
+    pct_words = (
+        "The % column is worked out from the rand. Do not type on it. Type Budgeted Yearly."
+        if state.get("show_pct")
+        else "There is no % column."
+    )
     ws["B14"] = (
         "Colours. Yellow with blue numbers: type here. White: locked formula, do not type. "
         "Pink: a result to check (the levy, a gap, a shortfall or an overspend). It is not added again. "
         "Pale blue: a total. Dark blue with white words: a heading. Green: the monthly levy the meeting approved. "
-        "There is no % column."
+        + pct_words
     )
     ws["B14"].alignment = Alignment(wrap_text=True, vertical="center")
     ws.row_dimensions[14].height = 32
@@ -3088,7 +3093,7 @@ def generate_excel(state: dict) -> BytesIO:
 
     def hdr():
         nonlocal r
-        labs = ["Description", "GL Code", "Actual", "", "Budgeted Yearly", "Monthly", "Comments / Notes"]
+        labs = ["Description", "GL Code", "Actual", "%" if state.get("show_pct") else "", "Budgeted Yearly", "Monthly", "Comments / Notes"]
         for i, lab in enumerate(labs, 2):
             c = ws.cell(r, i, lab)
             fill(c, NAVY)
@@ -3161,6 +3166,13 @@ def generate_excel(state: dict) -> BytesIO:
             ins = float(it.get("insurance") or 0)
             linked_csos = is_own_scheme_csos(desc) and fam == "csos_exp" and levy_rows.get("csos")
             ws.cell(r, 5, None)
+            if state.get("show_pct"):
+                pct_cell = ws.cell(r, 5)
+                pct_cell.value = f'=IF(D{r}=0,"",F{r}/D{r}-1)'
+                pct_cell.number_format = "0.0%"
+                pct_cell.font = Font(name="Calibri", size=10)
+                pct_cell.border = THIN
+                pct_cell.alignment = Alignment(horizontal="center")
             if fam == "ordinary":
                 pass  # F filled after the cost total
             elif fam == "reserve" and state.get("reserve_mode") in ("pct15", "15pct", "legal") and levy_rows.get("ordinary"):
@@ -3543,7 +3555,9 @@ def generate_excel(state: dict) -> BytesIO:
             continue
         fml(ws.cell(row, 6), f"IF(OrdinaryActual=0,0,D{row}*F9/OrdinaryActual)")
         fml(ws.cell(row, 7), f"F{row}/12")
-    ws.column_dimensions["E"].hidden = True
+    ws.column_dimensions["E"].hidden = not bool(state.get("show_pct"))
+    if state.get("show_pct"):
+        ws.column_dimensions["E"].width = 12
 
     pq = wb.create_sheet("PQ")
     pq["A1"] = "PQ / LEVY SCHEDULE"
@@ -4472,7 +4486,7 @@ def init():
     ss.setdefault("estate_levy_name", "Estate / master HOA levy")
     ss.setdefault("estate_levy_mode", "separate")
     ss.setdefault("estate_split", "equal")
-    ss.setdefault("facilities", {})
+    ss.setdefault("show_pct", False)
 
 
 MOVE_TO = {
@@ -5150,7 +5164,9 @@ On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly, and Note
 
 - Press **Enter** in the cell, then **Save this section**.
 - Type a **%** here in the app and Save, and Budgeted yearly fills in. Type a **Budgeted yearly** and the % fills in.
-- The Excel sheet the trustees get has **no % column**. They only see rands. Yellow cells are Budgeted yearly.
+- The Excel sheet shows rands. Yellow cells are Budgeted yearly.
+- Some complexes also want the %. On **Download**, tick **Include the % column**, then click **Build Excel file**. The % is worked out from Actual and Budgeted yearly. Change the yellow rand and the % changes. Do not type on the %. Typing 10% on the sheet does not change the rand, so the meeting cannot underbudget.
+- Leave the tick off when the complex only wants rands.
 - If Actual is 0, type the Budgeted yearly. A % cannot make a rand from nothing.
 - **Monthly** is yearly ÷ 12. You cannot type it.
 - **Notes** go to the Comments column on the Excel sheet.
@@ -5347,7 +5363,9 @@ The names do not have to be identical. Sand beds, tree felling, windows, stairca
 ### 18. The meeting
 You prepare the budget. The trustees decide in the meeting.
 
-**Download Excel** on the Download tab. **BUDGET** is the levy. **RESERVE** is the reserve fund. **PQ** is the invoice. **EACH UNIT** is what each owner pays, split into municipal, expenditure, repairs and the rest. **10 YMP** is the plan. There is no % anywhere on these sheets.
+**Download Excel** on the Download tab. Tick **Include the % column** only when this complex wants the % shown, then click **Build Excel file**. **BUDGET** is the levy. **RESERVE** is the reserve fund. **PQ** is the invoice. **EACH UNIT** is what each owner pays, split into common-property municipal, expenditure, repairs and the rest. **10 YMP** is the plan.
+
+The % on the sheet follows the yellow rand. It does not drive the rand. The meeting still agrees a rand on **Agreed increase**, not a %.
 
 The meeting block is at the top of **BUDGET**.
 
@@ -5433,7 +5451,7 @@ Click the picture to move on. For the meeting, **Download the presentation**, op
             "You do not set this before the meeting. Download the sheet. "
             "In the meeting the trustees type the rand on Agreed increase. "
             "If the costs need R50,000 more and they agree R30,000, they type 30000. Still short shows R20,000. "
-            "There is no % on the sheet. Agreed reserve is also a rand. "
+            "There is no % driving the levy. Agreed reserve is also a rand. "
             "EACH UNIT shows what each owner pays a month."
         )
         _mode = st.radio(
@@ -6158,13 +6176,21 @@ Confirm the dates and the amount with the auditor or tax practitioner.
 
     with tabs[11]:
         st.subheader("Download Excel")
-        st.caption("Budget, Reserve, PQ and 10-year plan. Yellow cells are Budgeted Yearly. Type the rand. The % updates on its own. Save the file, then Restore it here and the amounts come back.")
+        st.caption("Budget, Reserve, PQ and 10-year plan. Yellow cells are Budgeted Yearly. Type the rand. The levy follows the rand.")
+        st.checkbox(
+            "Include the % column",
+            key="show_pct",
+            help="Shows the % next to each line. It is worked out from Actual and Budgeted yearly. Changing the yellow rand changes the %. Typing a % does not change the rand.",
+        )
         if not st.session_state.complex_name:
             st.warning("Type the complex name in the sidebar first.")
         elif st.button("Build Excel file", type="primary"):
             xls = generate_excel(st.session_state)
             st.session_state["xlsx"] = xls.getvalue()
-        if st.session_state.get("xlsx"):
+            st.session_state["_xlsx_pct"] = bool(st.session_state.get("show_pct"))
+        if st.session_state.get("xlsx") and st.session_state.get("_xlsx_pct") != bool(st.session_state.get("show_pct")):
+            st.info("The % tick changed. Click Build Excel file again, then download.")
+        elif st.session_state.get("xlsx"):
             name = re.sub(r"\s+", "_", st.session_state.complex_name)
             st.download_button(
                 "Download budget Excel",
