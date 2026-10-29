@@ -3286,17 +3286,27 @@ def generate_excel(state: dict) -> BytesIO:
             cnote.font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
             cnote.alignment = Alignment(wrap_text=True, vertical="top")
             cnote.border = THIN
+            bits = []
+            for sub in it.get("subs") or []:
+                sub_name = str(sub.get("desc") or "").strip()
+                if not sub_name:
+                    continue
+                bits.append(f"{sub_name} {float(sub.get('yearly') or 0):,.2f}")
+            if bits:
+                extra = "Breakdown: " + "; ".join(bits) + ". Already inside this line. Not added again."
+                cnote.value = f"{note} | {extra}".strip(" |") if note else extra
             r += 1
             for sub in it.get("subs") or []:
                 sub_name = str(sub.get("desc") or "").strip()
                 if not sub_name:
                     continue
-                sc = ws.cell(r, 2, "    " + sub_name)
+                sc = ws.cell(r, 2, f"{desc} — {sub_name}")
                 sc.font = Font(name="Calibri", size=9, italic=True, color="666666")
                 sc.border = THIN
                 inp(ws.cell(r, 4), float(sub.get("actual") or 0), MONEY)
                 inp(ws.cell(r, 6), float(sub.get("yearly") or 0), MONEY)
-                sn = ws.cell(r, 8, "Detail only. Not added to the levy.")
+                fml(ws.cell(r, 7), f"F{r}/12")
+                sn = ws.cell(r, 8, "Breakdown only. Already inside the line above. Not added again.")
                 sn.font = Font(name="Calibri", size=9, italic=True, color="666666")
                 r += 1
         return start, r - 1
@@ -4512,10 +4522,22 @@ def place_moved(key: str, rows: list) -> list:
     return kept
 
 
+def _take_breakdown(desc: str, pools: dict) -> list | None:
+    n = norm(desc)
+    if n in pools:
+        return pools.pop(n)
+    for k in list(pools):
+        if _same_job(k, n):
+            return pools.pop(k)
+        if "garden" in k and "garden" in n and "repair" not in k and "repair" not in n and "general" not in k and "general" not in n:
+            return pools.pop(k)
+    return None
+
+
 def subs_editor(key: str) -> None:
     """Breakdown under a main account. Shown on the sheet. Not added to the levy."""
     st.markdown("**Breakdown — for the trustees. Not added to the levy.**")
-    st.caption("Open a main account, such as Accounting fees, and list what sits inside it. The sheet shows the detail. Only the main line is used in the budget.")
+    st.caption("Pick the main account exactly as it is on the list, for example Garden Services. Type the period in Detail. Click Save breakdown. The sheet shows it under that line. It is not added again.")
     items = st.session_state.sections.get(key) or []
     names = [it.get("desc") or "" for it in items if (it.get("desc") or "").strip()]
     if not names:
@@ -4544,21 +4566,41 @@ def subs_editor(key: str) -> None:
             "Budgeted yearly": st.column_config.NumberColumn("Budgeted yearly", format="%.2f"),
         },
     )
+    held = [it.get("desc") for it in items if it.get("subs")]
+    if held:
+        st.caption("Saved under: " + ", ".join(held) + ".")
     if st.button("Save breakdown", key=f"save_subs_{key}"):
         grouped: dict[str, list] = {}
+        skipped = []
+        last_main = ""
         for rec in edited.to_dict("records"):
             main = str(rec.get("Main account") or "").strip()
+            if not main or main.lower() in ("none", "nan"):
+                main = last_main
             detail = str(rec.get("Detail") or "").strip()
-            if not main or not detail or detail.lower() in ("none", "nan"):
+            if not detail or detail.lower() in ("none", "nan"):
                 continue
+            if not main:
+                skipped.append(detail)
+                continue
+            last_main = main
             grouped.setdefault(norm(main), []).append({
                 "desc": detail,
                 "actual": abs(cell_num(rec.get("Actual"))),
                 "yearly": abs(cell_num(rec.get("Budgeted yearly"))),
             })
+        pools = dict(grouped)
         for it in st.session_state.sections.get(key) or []:
-            it["subs"] = grouped.get(norm(it.get("desc") or ""), [])
-        st.success("Breakdown saved. It shows under the main line on the sheet and is not added again.")
+            got = _take_breakdown(it.get("desc") or "", pools)
+            it["subs"] = got or []
+        if pools or skipped:
+            missed = []
+            for rows_left in pools.values():
+                missed.extend(s.get("desc") or "" for s in rows_left)
+            missed.extend(skipped)
+            st.error("These were not attached to a line: " + ", ".join(missed) + ". Pick the main account from the list, for example Garden Services, then Save breakdown again.")
+        else:
+            st.success("Breakdown saved. It shows under that line on the sheet and is not added again.")
 
 
 def section_form(key: str, title: str, help_text: str, rm: bool = False, recover: bool = False, income: bool = False, claims: bool = False, reserve_tick: bool = False, reorder: bool = False, move: bool = False, plan: bool = False):
@@ -5236,7 +5278,7 @@ On both:
 - **Cost recoveries** is what only some owners pay towards that same bill (for example a private refuse company for a few units). It is not income, not municipal, and not a column on the PQ. The levy carries the bill minus that amount.
 - On repairs, **Insurance payout** is what the insurer pays towards that job. It is a deduction. Do not type the new budget in the payout column.
 - **Move to** sends a line to another section when WeConnectU filed it in the wrong place. Choose the section and Save. The amounts go with it.
-- **Breakdown**, at the bottom of Expenditure and of Repairs, is the detail inside a main account (for example Accounting fees: annual statements, tax return). Pick the main account, type the name, the Actual and the Budgeted yearly, then **Save breakdown**. On the sheet those lines sit under the main account. They are for the trustees. They are not added to the levy. Only the main account is used.
+- **Breakdown**, at the bottom of Expenditure and of Repairs, is the detail inside a main account. For garden, the main account must be **Garden Services** (the same name as the expenditure line). Type the period in Detail, then **Save breakdown**. The sheet shows **Garden Services —** that period under the garden line, and the same words in the note. It is already inside the main amount. It is not added again. If Save says it was not attached, the main account was not on the list.
 
 ### 9. Garden and other equal charges
 Add the garden contract in **all three** places. Do not set Expenditure to 0.
