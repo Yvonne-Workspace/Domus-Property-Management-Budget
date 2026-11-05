@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import urllib.request
 import zipfile
 from io import BytesIO
 from pathlib import Path
@@ -4812,6 +4814,166 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
             st.caption(f"Section net total: {money(sum_net(st.session_state.sections[key]))}  ·  Monthly total: {money(sum_net(st.session_state.sections[key]) / 12)}.")
 
 
+def _xai_key() -> str:
+    key = os.environ.get("XAI_API_KEY") or ""
+    if key:
+        return key
+    try:
+        return str(st.secrets.get("XAI_API_KEY") or "")
+    except Exception:
+        return ""
+
+
+def _help_snapshot(state) -> str:
+    ordinary_actual = prev_admin_contributions(state)
+    yearly = float(reserve_contribution(state) or 0)
+    return (
+        f"Complex: {state.get('complex_name') or '(not typed)'}\n"
+        f"Financial year on the screen: {state.get('fin_year') or '(not typed)'}\n"
+        f"Current ordinary levy, all units, one month: {money(float(state.get('current_monthly_levy') or 0))}\n"
+        f"Months covered by Actual: {int(state.get('actual_months') or 12)}\n"
+        f"Scheme: {'HOA' if state.get('scheme_type') == 'hoa' else 'Body corporate'}\n"
+        f"Reserve bank balance typed: {money(float(state.get('reserve_balance') or 0))}\n"
+        f"Reserve choice: {state.get('reserve_mode') or 'amount'}\n"
+        f"Reserve contribution for the budget year: {money(yearly)} ({money(yearly / 12)} a month)\n"
+        f"Last year's ordinary levy in Actual: {money(ordinary_actual)}\n"
+        f"Owners pay the reserve: {'inside the ordinary levy' if reserve_inside_levy(state) else 'on its own invoice line'}\n"
+    )
+
+
+def local_box_help(key: str, state) -> str:
+    year = (state.get("fin_year") or "").strip() or "the year you typed above"
+    levy_m = float(state.get("current_monthly_levy") or 0)
+    months = int(state.get("actual_months") or 12)
+    bal = float(state.get("reserve_balance") or 0)
+    yearly = float(reserve_contribution(state) or 0)
+    mode = state.get("reserve_mode") or "amount"
+    if key == "name":
+        return "Type the complex name as it should appear on the budget. This does not change any figure."
+    if key == "year":
+        return (
+            "Type the **budget year you are preparing**, not the year that just ended. "
+            "Example: year end 30 June, and you are doing 2026/2027, type **01-07-2026 / 30-06-2027**. "
+            f"The screen currently says **{year}**."
+        )
+    if key == "levy_now":
+        return (
+            "This is what owners pay **this month**, ordinary levy only, all units added together. "
+            "Not the year total. Not the reserve, CSOS, insurance or garden.\n\n"
+            "Look at the billing run. Add only the ordinary levy column. "
+            f"You have typed **{money(levy_m)}**. That fills **Paid last year** on the PQ. It does not change the budget."
+        )
+    if key == "months":
+        return (
+            "How many months are in the file you load into **Actual**.\n\n"
+            "**12** means that file is a full year, such as 1 July 2025 to 30 June 2026. "
+            "If the file is only 9 months of that year, type **9**. "
+            "Do not type the months already gone in the new year. "
+            f"You have typed **{months}**."
+        )
+    if key == "scheme":
+        return (
+            "Body corporate or HOA. Both can use Own amount, 15%, 25% or 100% of repairs. "
+            "A body corporate also sees the Act’s minimum. An HOA follows its MOI or constitution. "
+            "The note does not change the amount."
+        )
+    if key == "balance":
+        return (
+            "Money **already in the reserve bank account**. Not the contribution on the billing run.\n\n"
+            "Use today’s balance. If you only have the year-end balance, use that. "
+            "Do not add this year’s contribution on top. "
+            f"You have typed **{money(bal)}**."
+        )
+    if key == "contrib":
+        bits = (
+            "This is the reserve for the **budget year**, the full year, not one month, and not last year.\n\n"
+            "**Own amount** — type the yearly rand.\n\n"
+            "**15% or 25%** — uses last year’s ordinary levy in the Actual column, after you load the file.\n\n"
+            "**100% of repairs** — uses this year’s repair budget.\n\n"
+            "If the billing run has a PQ reserve and an extra amount per owner, add the two months and multiply by 12 "
+            "only when the new budget keeps both. The extra per owner is not split by PQ. This one box is. "
+            "The R100 will not stay R100 each if you mix it in here."
+        )
+        if mode == "amount":
+            bits += f"\n\nYou have typed **{money(yearly)}** for the year, which is **{money(yearly / 12)}** a month."
+        else:
+            bits += f"\n\nThe screen works that out as **{money(yearly)}** for the year."
+        return bits
+    if key == "bill":
+        return (
+            "**Extra line on the owner invoice** — owners see Levies and Reserve as two amounts. "
+            "The reserve is not inside the ordinary levy.\n\n"
+            "**Added into the ordinary levy** — there is no reserve column. Do not also add it on the invoice."
+        )
+    if key == "plan":
+        return (
+            "Leave this **off**. The reserve pays the 10-year jobs. "
+            "Tick it only when this complex pays those jobs from the ordinary levy."
+        )
+    if key == "estate":
+        return (
+            "Use this only when owners also pay another estate.\n\n"
+            "If they pay that estate themselves, leave it on **Owners pay the estate themselves**. "
+            "It must not sit in our ordinary levy.\n\n"
+            "If we collect it and pay the estate, type the yearly rand for the whole complex, "
+            "and say if each unit pays the same rand or a share by PQ."
+        )
+    return "Type the figure for this box only. It will not change the other boxes."
+
+
+def ask_grok_box(key: str, state) -> str:
+    token = _xai_key()
+    if not token:
+        return ""
+    question = local_box_help(key, state)
+    payload = json.dumps({
+        "model": "grok-4.5",
+        "temperature": 0.2,
+        "max_tokens": 320,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You help a South African property manager fill in one sidebar box on a levy budget. "
+                    "Use only the rules and the numbers given. Plain English. Short. "
+                    "Do not change any figure. Do not invent a rand amount they did not type. "
+                    "If two reserve charges are on the billing run, say the PQ one and the equal per-owner one "
+                    "must not be mixed if the equal one must stay the same rand per owner. "
+                    "The Actual column is the closed year. The contribution box is the new budget year."
+                ),
+            },
+            {
+                "role": "user",
+                "content": "Numbers on the screen:\n" + _help_snapshot(state) + "\n\nRule for this box:\n" + question + "\n\nSay what to type in this box.",
+            },
+        ],
+    }).encode()
+    req = urllib.request.Request(
+        "https://api.x.ai/v1/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25) as res:
+            body = json.loads(res.read().decode())
+        return ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    except Exception:
+        return ""
+
+
+def box_help(key: str) -> None:
+    with st.popover("?", help="What do I type in the box above?"):
+        st.markdown(local_box_help(key, st.session_state))
+        st.caption("This only explains the box. It does not change your figures.")
+        if _xai_key():
+            if st.button("Ask Grok", key=f"ask_{key}"):
+                st.session_state[f"_help_ai_{key}"] = ask_grok_box(key, st.session_state) or "Grok could not answer just now. Use the note above."
+            extra = st.session_state.get(f"_help_ai_{key}")
+            if extra:
+                st.write(extra)
+
+
 def main():
     init()
     apply_falcon_view_notes(st.session_state)
@@ -4924,7 +5086,9 @@ def main():
     with st.sidebar:
         st.header("Complex")
         st.session_state.complex_name = st.text_input("Complex name", st.session_state.complex_name)
+        box_help("name")
         st.session_state.fin_year = st.text_input("Financial year", st.session_state.fin_year)
+        box_help("year")
         st.header("Load last year")
         st.caption(
             "1. Financial statement PDF — line names. "
@@ -5039,6 +5203,7 @@ def main():
             step=100.0,
             help="What the whole complex collects now, for one month, ordinary levy only. This fills Paid last year on the PQ. It does not change the budget.",
         )
+        box_help("levy_now")
         st.session_state.actual_months = st.number_input(
             "Months covered by the Actual column",
             min_value=1,
@@ -5046,6 +5211,7 @@ def main():
             value=int(st.session_state.actual_months),
             help="12 = a full year. If WeConnectU is only 6 months, put 6 and we scale up for the %.",
         )
+        box_help("months")
         st.header("Reserve fund")
         st.session_state.scheme_type = st.radio(
             "What kind of scheme is this?",
@@ -5053,6 +5219,7 @@ def main():
             format_func=lambda x: "Sectional title body corporate" if x == "bc" else "Homeowners association (HOA)",
             index=0 if st.session_state.get("scheme_type") != "hoa" else 1,
         )
+        box_help("scheme")
         st.session_state.reserve_balance = st.number_input(
             "How much is already in the reserve fund?",
             value=float(st.session_state.get("reserve_balance") or 0),
@@ -5060,6 +5227,7 @@ def main():
             step=1000.0,
             help="Money in the reserve bank account now. Not this year’s contribution.",
         )
+        box_help("balance")
         mode_now = st.session_state.get("reserve_mode") or "amount"
         if mode_now in ("15pct", "legal"):
             mode_now = "pct15"
@@ -5083,6 +5251,7 @@ def main():
                 step=1000.0,
                 min_value=0.0,
             )
+        box_help("contrib")
         contrib = reserve_contribution(st.session_state)
         st.caption(f"This year’s contribution: {money(contrib)}.")
         if st.session_state.reserve_mode in ("pct15", "pct25") and prev_admin_contributions(st.session_state) < 1:
@@ -5131,11 +5300,13 @@ def main():
             st.caption("The contribution is inside the ordinary levy. There is no reserve column on the PQ. Do not add it again.")
         else:
             st.caption("Owners see Levies and Reserve as two amounts. The contribution is not inside the ordinary levy.")
+        box_help("bill")
         st.session_state.special_in_ordinary = st.checkbox(
             "Pay the 10-year projects from the ordinary levy",
             value=st.session_state.special_in_ordinary,
             help="Leave this off. The reserve pays these jobs. Tick it only when this complex pays the plan from the levy.",
         )
+        box_help("plan")
         st.header("Second levy (master estate)")
         st.caption("Use this when owners also pay another estate / HOA.")
         st.session_state.estate_levy_name = st.text_input(
@@ -5164,6 +5335,7 @@ def main():
             format_func=lambda x: "Same amount each unit" if x == "equal" else "By PQ",
             index=0 if st.session_state.estate_split == "equal" else 1,
         )
+        box_help("estate")
         st.caption("This wipes the screen. Download Excel first if you still need the numbers.")
         if st.button("Erase everything"):
             for k in list(st.session_state.keys()):
@@ -5189,6 +5361,8 @@ def main():
 In the sidebar, type the **complex name** and the **financial year** (for example 1 March 2027 – 28 February 2028).
 
 Choose **body corporate** or **HOA**. The four reserve choices work for both. The note under the reserve box changes: a body corporate also sees the Act’s minimum, an HOA follows its MOI or constitution. The note does not change the amount. You do.
+
+On each sidebar box there is a **?**. Click it when you are not sure what to type. It explains that box only, using the numbers already on the screen. It does not change a figure.
 
 ### 2. Load last year
 On the left, in this order:
