@@ -5198,30 +5198,34 @@ def pr_pack(state: dict) -> dict:
             "budget": money(net),
             "change": "This is what goes into the levy",
             "where": "Ordinary levy",
-            "say": f"After the owners pay back what they can, {money(net)} of the city bill stays in the ordinary levy.",
+            "say": f"Next year's levy carries {money(net)} of the city bill, after what owners are expected to pay back. That is the budget, not this year's shortfall.",
         }]
-        for gap in municipal_gaps(state, "yearly"):
+        for gap in municipal_gaps(state, "actual"):
             g = float(gap.get("gap") or 0)
             if g > 0.5:
                 extra_lines.append({
-                    "name": f"{gap['name']} shortfall",
-                    "last": "",
-                    "budget": money(g),
-                    "change": "Not paid back",
-                    "where": "Stays in the ordinary levy",
-                    "say": f"{gap['name']} is short by {money(g)}. Owners do not pay that part back, so it stays in the levy.",
+                    "name": f"{gap['name']} shortfall this year",
+                    "last": money(g),
+                    "budget": "",
+                    "change": "Actual, not the new budget",
+                    "where": "Already inside this year's net. Do not add it again.",
+                    "say": (
+                        f"This year {gap['name']} is short by {money(g)}. "
+                        f"The city bill was {money(float(gap.get('gross') or 0))} and owners paid back {money(float(gap.get('rec') or 0))}. "
+                        "That shortfall is already inside this year's net. Trustees should look at the meters, the billing, or raise what owners pay back."
+                    ),
                 })
             elif g < -0.5:
                 extra_lines.append({
                     "name": f"{gap['name']} — check this",
                     "last": money(float(gap.get("gross") or 0)),
                     "budget": money(float(gap.get("rec") or 0)),
-                    "change": "Owners pay back more than the city line",
+                    "change": "This year owners paid back more than the city line",
                     "where": "Check before you say it is a saving",
                     "say": (
-                        f"Owners pay back {money(float(gap.get('rec') or 0))} for {gap['name']}, "
-                        f"and the city line is {money(float(gap.get('gross') or 0))}. "
-                        "If the city also charges that amount and it is missing from the list, the levy is too low."
+                        f"This year owners paid back {money(float(gap.get('rec') or 0))} for {gap['name']}, "
+                        f"and the city line was {money(float(gap.get('gross') or 0))}. "
+                        "If the city also charges that amount and it is missing from the list, the figures are too low."
                     ),
                 })
         block["lines"].extend(extra_lines)
@@ -5871,7 +5875,7 @@ On **Municipal**, the city bill and the recovery are separate lines.
 - Type the city bill as a positive amount (electricity, water, sewerage, refuse, rates).
 - Type what owners pay back as a positive amount on the **Less: … recovered** line. Do not type a minus. Any line with the word **recovered** in the name is subtracted, including a sewer-plant recovery.
 - **Net municipal** = city bill minus recovered. That net is what goes into the levy.
-- If recovered is less than the city bill, the difference is a **cost shortfall**. It is already inside the net. Do not add it again. On the sheet, that memo is on the **Actual** column (this year). The **Budgeted yearly** net is what goes into the new levy.
+- If recovered is less than the city bill, the difference is a **cost shortfall**. It is this year's **Actual**, not Budgeted yearly. It is already inside the actual net. Do not add it again. The **Budgeted yearly** net is what goes into the new levy. The same actual shortfall is shown on **Notes for the PR**.
 
 ### 8. Expenditure and repairs
 **Expenditure** is the operating costs (accounting, audit, security, legal, garden contract, and so on). Not repairs, not salaries, not tax.
@@ -6219,41 +6223,39 @@ Read it in the meeting, or click **Download these notes** and open the file in t
             kind = "subtract" if is_muni_recovery(r.get("desc") or "", r.get("is_recovery")) else "add"
             st.write(f"- {r.get('desc')}: Actual {money(act)} — **{kind}**")
         st.write(f"**{money(ag)} − {money(ar)} = {money(ag - ar)}**")
+        actual_gaps = municipal_gaps(st.session_state, "actual")
+        under = [x for x in actual_gaps if x["gap"] > 1]
+        over = [x for x in actual_gaps if x["gap"] < -1]
+        if under:
+            total_under = sum(x["gap"] for x in under)
+            st.warning(
+                f"**This year's shortfall {money(total_under)}** — on the actuals, the city bill is more than owners paid back. "
+                f"It is already inside the actual net. Do not add it again. Trustees should attend: meters, billing, or raise what owners pay back."
+            )
+            for x in under:
+                st.write(
+                    f"- **{x['name']}**: city {money(x['gross'])} − recovered {money(x['rec'])} = **shortfall {money(x['gap'])}** (actual)"
+                )
+        if over:
+            st.info("This year owners paid back more than the city bill. That credit is already in the actual net.")
+            for x in over:
+                st.write(
+                    f"- **{x['name']}**: recovered {money(x['rec'])} − city {money(x['gross'])} = **over {money(-x['gap'])}** (actual)"
+                )
+        if not under and not over and (ag > 1 or ar > 1):
+            st.success("This year the recoveries match the city bill. There is no current shortfall.")
         st.markdown("**This year — Budgeted yearly**")
         n1, n2, n3 = st.columns(3)
         n1.metric("Budget city bill", money(yg))
         n2.metric("Budget recovered", money(yr))
         n3.metric("Budget net (in the levy)", money(yg - yr))
-        g, rec = yg, yr
-        gaps = municipal_gaps(st.session_state)
-        under = [x for x in gaps if x["gap"] > 1]
-        over = [x for x in gaps if x["gap"] < -1]
-        if under:
-            total_under = sum(x["gap"] for x in under)
-            st.warning(
-                f"**Cost shortfall {money(total_under)}** — the city bill is more than owners paid back. "
-                f"That shortfall is **already in ordinary levies**. Trustees should attend: meters, billing, or raise recoveries."
-            )
-            for x in under:
-                st.write(
-                    f"- **{x['name']}**: city {money(x['gross'])} − recovered {money(x['rec'])} = **shortfall {money(x['gap'])}**"
-                )
-        if over:
-            st.info(
-                "Over-recovery (owners paid back more than the city bill). That credit reduces the levy."
-            )
-            for x in over:
-                st.write(
-                    f"- **{x['name']}**: recovered {money(x['rec'])} − city {money(x['gross'])} = **over {money(-x['gap'])}**"
-                )
-        if not under and not over and (g > 1 or rec > 1):
-            st.success("Municipal recoveries match the city bill. Nothing extra is sitting in the levy.")
-        gaps = municipal_gaps(st.session_state)
         st.caption(
-            f"City bill {money(g)} − recovered {money(rec)} = **net {money(g - rec)}**. "
+            f"Next year's levy uses the budget net: city bill {money(yg)} − recovered {money(yr)} = **{money(yg - yr)}**. "
+            "The shortfall above is this year's actuals. It is not the new budget. "
             "Every line on this tab is a positive rand. Monthly = Budgeted yearly ÷ 12. "
             "We subtract the lines named recovered. Do not add them to the city bill."
         )
+        gaps = municipal_gaps(st.session_state)
         missing_gross = [
             x["name"] for x in gaps
             if x["rec"] > 1 and x["gross"] < 1
