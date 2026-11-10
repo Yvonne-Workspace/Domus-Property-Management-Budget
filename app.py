@@ -4974,6 +4974,438 @@ def box_help(key: str) -> None:
                 st.write(extra)
 
 
+_NOTE_SKIP = (
+    "added from weconnectu",
+    "breakdown only",
+    "already inside",
+    "admin levy. does not",
+    "type the yearly amount",
+    "this complex",
+    "usually not budgeted",
+    "based on taxable",
+    "other income only",
+    "first r50",
+    "leave 0 if insurance",
+    "own column on the owner",
+    "same amount as csos",
+    "not the master-estate",
+    "master-estate",
+    "only if this complex",
+    "leave comes off blank",
+    "pick legal",
+    "we paid for the repair",
+    "paid to the master",
+)
+
+
+def _useful_note(note: str) -> str:
+    parts = [p.strip() for p in re.split(r"\s\|\s", note or "") if p.strip()]
+    kept = []
+    for p in parts:
+        low = p.lower()
+        if any(s in low for s in _NOTE_SKIP):
+            continue
+        kept.append(p)
+    return " ".join(kept)
+
+
+def _line_alive(r: dict) -> bool:
+    if abs(float(r.get("actual") or 0)) > 0.5 or abs(float(r.get("yearly") or 0)) > 0.5:
+        return True
+    for sub in r.get("subs") or []:
+        if abs(float(sub.get("actual") or 0)) > 0.5 or abs(float(sub.get("yearly") or 0)) > 0.5:
+            return True
+    return False
+
+
+def _move_words(actual: float, yearly: float) -> str:
+    if actual < 0.5 and yearly < 0.5:
+        return "No amount"
+    if actual < 0.5:
+        return "New this year"
+    if yearly < 0.5:
+        return f"{money(actual)} less"
+    diff = yearly - actual
+    if abs(diff) < 0.5:
+        return "The same as last year"
+    if diff > 0:
+        return f"{money(diff)} more"
+    return f"{money(-diff)} less"
+
+
+def _subs_sentence(r: dict) -> str:
+    parts = []
+    for sub in r.get("subs") or []:
+        label = (sub.get("desc") or "Detail").strip()
+        y = float(sub.get("yearly") or 0)
+        a = float(sub.get("actual") or 0)
+        if abs(y) > 0.5:
+            parts.append(f"{label} {money(y)}")
+        elif abs(a) > 0.5:
+            parts.append(f"{label} was {money(a)} last year and is not in this budget")
+    if not parts:
+        return ""
+    return "The split is already inside that total: " + "; ".join(parts) + ". Do not add the split again."
+
+
+def _say(name: str, actual: float, yearly: float, where: str, note: str = "", extra: str = "", subs: str = "") -> str:
+    if actual < 0.5 and yearly >= 0.5:
+        lead = f"There was no {name} last year. This budget is {money(yearly)}."
+    elif yearly < 0.5 and actual >= 0.5:
+        lead = f"{name} was {money(actual)}. This budget is R 0.00. That is {money(actual)} less."
+    elif actual < 0.5 and yearly < 0.5:
+        lead = f"{name} has no amount."
+    else:
+        diff = yearly - actual
+        if abs(diff) < 0.5:
+            move = "That is the same as last year."
+        elif diff > 0:
+            move = f"That is {money(diff)} more."
+        else:
+            move = f"That is {money(-diff)} less."
+        lead = f"{name} was {money(actual)}. This budget is {money(yearly)}. {move}"
+    bits = [lead]
+    if where:
+        bits.append(where)
+    if subs:
+        bits.append(subs)
+    if extra:
+        bits.append(extra)
+    if note:
+        bits.append("Your note: " + note)
+    return " ".join(bits)
+
+
+def _cost_where(state: dict, r: dict) -> str:
+    desc = r.get("desc") or ""
+    d = desc.lower()
+    if "csos" in d and "collect" not in d:
+        return "Its own column on the invoice. It is not inside the ordinary levy."
+    if insurance_on_pq(state) and "insur" in d and "claim" not in d and "payout" not in d:
+        return "Owners pay this on the invoice. It is not inside the ordinary levy. The cost stays on the books."
+    fund = funded_by_reserve(state, r)
+    full = cost_net(state, r)
+    if fund > 0.5 and full > 0.5 and fund >= full - 0.5:
+        return "The reserve pays this. It is not inside the ordinary levy."
+    if fund > 0.5:
+        return f"The reserve pays {money(fund)}. The rest is inside the ordinary levy."
+    aside = max(0.0, cost_for_levy(state, r) - line_in_levy(state, r))
+    if aside > 0.5:
+        return f"Owners pay {money(aside)} of this on the invoice, not by PQ. That part is not inside the ordinary levy. The cost stays on the books."
+    return "Inside the ordinary levy."
+
+
+def _levy_where(state: dict, r: dict) -> str:
+    desc = r.get("desc") or ""
+    f = family(desc)
+    if f == "ordinary":
+        return "This is the ordinary levy. It is what the costs need."
+    if f == "reserve":
+        if reserve_inside_levy(state):
+            return "Inside the ordinary levy. There is no separate reserve column."
+        return "Not inside the ordinary levy. Its own line on the invoice."
+    if f in ("csos_inc", "csos_exp") or is_own_scheme_csos(desc):
+        return "Its own column. Not inside the ordinary levy."
+    if goes_to_reserve(r, state):
+        return "This goes to the reserve fund. It is not ordinary levy income."
+    if r.get("reduces_levy") and levy_line_can_reduce(desc):
+        return "This lowers the ordinary levy."
+    return "On the invoice. It does not lower the ordinary levy."
+
+
+def _one(state: dict, r: dict, where: str, extra: str = "") -> dict | None:
+    if not _line_alive(r):
+        return None
+    name = (r.get("desc") or "Line").strip()
+    actual = float(r.get("actual") or 0)
+    yearly = float(r.get("yearly") or 0)
+    return {
+        "name": name,
+        "last": money(actual),
+        "budget": money(yearly),
+        "change": _move_words(actual, yearly),
+        "where": where,
+        "say": _say(name, actual, yearly, where, _useful_note(r.get("note") or ""), extra, _subs_sentence(r)),
+    }
+
+
+def _section(title: str, lines: list) -> dict | None:
+    lines = [x for x in lines if x]
+    if not lines:
+        return None
+    return {"title": title, "lines": lines}
+
+
+def pr_pack(state: dict) -> dict:
+    """Line-by-line notes for the PR. A section with nothing in it is left out."""
+    s = state.get("sections") or {}
+    name = (state.get("complex_name") or "This complex").strip()
+    year = (state.get("fin_year") or "").strip()
+    approved = approved_ordinary(state)
+    new_m = approved / 12.0
+    current_m = float(state.get("current_monthly_levy") or 0)
+    if current_m <= 0:
+        current_m = ordinary_actual(state) / 12.0
+    diff = new_m - current_m
+    if abs(diff) < 0.5:
+        diff_words = "the same as now"
+    elif diff > 0:
+        diff_words = f"{money(diff)} more a month"
+    else:
+        diff_words = f"{money(-diff)} less a month"
+
+    sections = []
+    levy_lines = []
+    for r in s.get("levy") or []:
+        levy_lines.append(_one(state, r, _levy_where(state, r)))
+    block = _section("Levy income", levy_lines)
+    if block:
+        sections.append(block)
+
+    other_lines = []
+    for r in s.get("other") or []:
+        if r.get("reduces_levy"):
+            where = "Ticked to lower the ordinary levy."
+        else:
+            where = "For information only. It does not change the levy."
+        other_lines.append(_one(state, r, where))
+    block = _section("Other income", other_lines)
+    if block:
+        sections.append(block)
+
+    rec_lines = []
+    for r in s.get("recoveries_other") or []:
+        against = (r.get("claim_against") or "").strip()
+        where = f"Comes off {against}. It is not extra income." if against else "A recovery. It is not extra income."
+        rec_lines.append(_one(state, r, where))
+    block = _section("Recovery income", rec_lines)
+    if block:
+        sections.append(block)
+
+    muni_lines = []
+    for r in s.get("municipal") or []:
+        if is_muni_recovery(r.get("desc") or "", r.get("is_recovery")):
+            where = "Owners pay this back. It comes off the city bill. It is not income."
+        else:
+            where = "City bill. What is not paid back stays in the ordinary levy."
+        muni_lines.append(_one(state, r, where))
+    block = _section("Municipal charges", muni_lines)
+    if block:
+        net = municipal_net(state)
+        extra_lines = [{
+            "name": "City bill after recoveries",
+            "last": "",
+            "budget": money(net),
+            "change": "This is what goes into the levy",
+            "where": "Ordinary levy",
+            "say": f"After the owners pay back what they can, {money(net)} of the city bill stays in the ordinary levy.",
+        }]
+        for gap in municipal_gaps(state, "yearly"):
+            g = float(gap.get("gap") or 0)
+            if g > 0.5:
+                extra_lines.append({
+                    "name": f"{gap['name']} shortfall",
+                    "last": "",
+                    "budget": money(g),
+                    "change": "Not paid back",
+                    "where": "Stays in the ordinary levy",
+                    "say": f"{gap['name']} is short by {money(g)}. Owners do not pay that part back, so it stays in the levy.",
+                })
+            elif g < -0.5:
+                extra_lines.append({
+                    "name": f"{gap['name']} — check this",
+                    "last": money(float(gap.get("gross") or 0)),
+                    "budget": money(float(gap.get("rec") or 0)),
+                    "change": "Owners pay back more than the city line",
+                    "where": "Check before you say it is a saving",
+                    "say": (
+                        f"Owners pay back {money(float(gap.get('rec') or 0))} for {gap['name']}, "
+                        f"and the city line is {money(float(gap.get('gross') or 0))}. "
+                        "If the city also charges that amount and it is missing from the list, the levy is too low."
+                    ),
+                })
+        block["lines"].extend(extra_lines)
+        sections.append(block)
+
+    for key, title in (
+        ("expenditure", "Expenditure"),
+        ("rm", "Repairs and maintenance"),
+        ("personnel", "Personnel"),
+        ("tax", "Tax"),
+    ):
+        lines = []
+        for r in s.get(key) or []:
+            extra = ""
+            if key == "tax" and abs(float(r.get("yearly") or 0)) < 0.5:
+                other = other_income_yearly(state)
+                if other <= 50000:
+                    extra = f"Other income budgeted is {money(other)}. The first R 50,000.00 is free, so no tax is budgeted."
+            lines.append(_one(state, r, _cost_where(state, r), extra))
+        block = _section(title, lines)
+        if block:
+            sections.append(block)
+
+    fixed_lines = []
+    for r in s.get("fixed") or []:
+        fixed_lines.append(_one(
+            state, r,
+            "Same amount for each owner, on the invoice. Not inside the ordinary levy.",
+        ))
+    block = _section("On the invoice, not in the levy", fixed_lines)
+    if block:
+        sections.append(block)
+
+    if state.get("has_master_hoa"):
+        hoa = []
+        for r in (s.get("hoa_income") or []) + (s.get("hoa_expense") or []):
+            hoa.append(_one(state, r, "This is the other estate. It is not inside our ordinary levy."))
+        block = _section("Other estate", hoa)
+        if block:
+            sections.append(block)
+
+    reserve_lines = []
+    opening = float(state.get("reserve_balance") or 0)
+    contrib = reserve_contribution(state)
+    last_contrib = 0.0
+    for r in s.get("levy") or []:
+        if family(r.get("desc") or "") == "reserve":
+            last_contrib = float(r.get("actual") or 0)
+    reserve_lines.append({
+        "name": "Already in the bank",
+        "last": "",
+        "budget": money(opening),
+        "change": "Do not add the contribution into this",
+        "where": "Reserve bank account",
+        "say": f"The reserve bank account has {money(opening)}. Do not add this year’s contribution into that balance.",
+    })
+    reserve_lines.append({
+        "name": "This year’s contribution",
+        "last": money(last_contrib),
+        "budget": money(contrib),
+        "change": _move_words(last_contrib, contrib),
+        "where": "Own line on the invoice" if not reserve_inside_levy(state) else "Inside the ordinary levy",
+        "say": _say(
+            "The reserve contribution",
+            last_contrib,
+            contrib,
+            "Not inside the ordinary levy. Its own line on the invoice." if not reserve_inside_levy(state) else "Inside the ordinary levy.",
+        ),
+    })
+    plan_from_levy = bool(state.get("special_in_ordinary"))
+    plan_where = "Paid from the ordinary levy." if plan_from_levy else "Comes out of the reserve, not the ordinary levy."
+    for r in s.get("special") or []:
+        if not _line_alive(r):
+            continue
+        actual = float(r.get("actual") or 0)
+        yearly = float(r.get("yearly") or 0)
+        extra = ""
+        if actual > 0.5 and yearly > 0.5:
+            extra = "Spent this year and planned again next year."
+        elif actual > 0.5:
+            extra = "Spent this year. Not planned again next year."
+        elif yearly > 0.5:
+            extra = "Not spent this year. Planned for next year."
+        line = _one(state, r, plan_where, extra)
+        if line:
+            reserve_lines.append(line)
+    if reserve_lines:
+        sections.append({"title": "Reserve fund budget", "lines": reserve_lines})
+
+    close = (
+        "Only the yellow amount on the sheet may be changed. "
+        "If they type a lower rand, the pink line shows what is still short. "
+        "Do not type on the white cells. Those are formulas. "
+        "A lower rand does not reduce the insurance or the city bill. "
+        "Something else must come down, or the reserve must pay it."
+    )
+    return {
+        "name": name,
+        "year": year,
+        "now": money(current_m),
+        "new": money(new_m),
+        "year_now": money(current_m * 12),
+        "year_new": money(approved),
+        "diff": diff_words,
+        "sections": sections,
+        "close": close,
+    }
+
+
+def pr_pack_html(pack: dict) -> str:
+    parts = [
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Notes for the PR</title>",
+        "<style>body{font-family:Calibri,sans-serif;max-width:880px;margin:32px auto;color:#1a1a1a;padding:0 16px}",
+        "h1{font-size:28px;margin-bottom:0}h2{margin-top:28px;font-size:20px}",
+        ".muted{color:#5c6562}.box{background:#f3fbf7;padding:12px 14px;margin:8px 0 18px}",
+        ".k{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#0d6b45;font-weight:700}",
+        "table{border-collapse:collapse;width:100%}td{padding:4px 12px 4px 0}</style></head><body>",
+        f"<p class='k'>Notes for the PR</p><h1>{pack['name']}</h1>",
+        f"<p class='muted'>{pack['year']}</p>",
+        "<p>Read this with the Excel sheet. One line at a time. The words under each line are what you say.</p>",
+        "<table>",
+        f"<tr><td>Owners pay now</td><td><b>{pack['now']}</b> a month</td></tr>",
+        f"<tr><td>This budget asks</td><td><b>{pack['new']}</b> a month</td></tr>",
+        f"<tr><td>Difference</td><td><b>{pack['diff']}</b></td></tr>",
+        "</table><p class='muted'>Ordinary levy only. The reserve is separate unless it says it is inside the levy.</p>",
+    ]
+    for sec in pack["sections"]:
+        parts.append(f"<h2>{sec['title']}</h2>")
+        for line in sec["lines"]:
+            bits = f"<p><b>{line['name']}</b>"
+            if line.get("last"):
+                bits += f" · Last year {line['last']}"
+            if line.get("budget"):
+                bits += f" · This budget {line['budget']}"
+            if line.get("change"):
+                bits += f" · {line['change']}"
+            bits += "</p>"
+            parts.append(bits)
+            parts.append(f"<div class='box'><div class='k'>Say this</div>{line['say']}</div>")
+    parts.append(f"<h2>If the trustees say the levy is too high</h2><div class='box'>{pack['close']}</div></body></html>")
+    return "".join(parts)
+
+
+def show_pr_notes(state: dict) -> None:
+    pack = pr_pack(state)
+    st.subheader("Notes for the PR")
+    st.caption("Read this with the Excel sheet. One line at a time. The words under each line are what you say. A section with nothing in it is left out.")
+    if pack["year"]:
+        st.write(f"**{pack['name']}** · {pack['year']}")
+    else:
+        st.write(f"**{pack['name']}**")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Owners pay now", pack["now"] + " / month")
+    c2.metric("This budget asks", pack["new"] + " / month")
+    c3.metric("Difference", pack["diff"])
+    st.caption(f"Ordinary levy only. What they pay now is {pack['year_now']} a year. This budget is {pack['year_new']} a year. The reserve is separate unless a line says it is inside the levy.")
+    for sec in pack["sections"]:
+        st.markdown(f"### {sec['title']}")
+        for line in sec["lines"]:
+            st.markdown(f"**{line['name']}**")
+            bits = []
+            if line.get("last"):
+                bits.append(f"Last year {line['last']}")
+            if line.get("budget"):
+                bits.append(f"This budget {line['budget']}")
+            if line.get("change"):
+                bits.append(line["change"])
+            if bits:
+                st.caption(" · ".join(bits))
+            if line.get("where"):
+                st.caption(line["where"])
+            st.markdown(f"**Say this.** {line['say']}")
+    st.markdown("### If the trustees say the levy is too high")
+    st.markdown(f"**Say this.** {pack['close']}")
+    safe = re.sub(r"\s+", "_", pack["name"] or "budget")
+    st.download_button(
+        "Download these notes",
+        data=pr_pack_html(pack).encode("utf-8"),
+        file_name=f"PR_notes_{safe}.html",
+        mime="text/html",
+        key="pr_notes_download",
+    )
+
+
 def main():
     init()
     apply_falcon_view_notes(st.session_state)
@@ -5348,7 +5780,7 @@ def main():
     tabs = st.tabs([
         "How it works", "Income", "Municipal", "Expenditure",
         "Repair & Maintenance", "Personnel", "Tax", "10-year projects",
-        "PQ / Levies", "10-year plan", "For the meeting", "Download",
+        "PQ / Levies", "10-year plan", "Notes for the PR", "Download",
     ])
 
     with tabs[0]:
@@ -5602,14 +6034,12 @@ If you already know the decision before you download, you can set the same choic
 
 Do not use **Erase everything** unless you mean to wipe the screen. Download first if you still need the numbers.
 
-### 20. The owner presentation
-On **For the meeting**, the slides are already designed. This complex's figures fill in. Slides that do not apply (no staff, no reserve, no cost shortfall) stay hidden.
+### 20. Notes for the PR
+On **Notes for the PR**, every line that has an amount is written out, in the same order as the sheet: levy income, other income, recoveries, municipal, expenditure, repairs, personnel, tax, then the reserve fund budget.
 
-Check the numbers. Change the words if you want — the three good-news lines, what is changing, and the three things the meeting votes on. Then **Play the presentation**.
+A section with nothing in it is left out. A line with no note still appears. The note you typed is added under that line. A split, such as the insurance periods, is shown as already inside the main amount. The PR is told not to add the split again.
 
-Click the picture to move on. For the meeting, **Download the presentation**, open it in Chrome, and press F for full screen. Arrow keys, click, or a swipe move the story. The pictures already move.
-
-**Fill the words from this budget** writes the words again after you change figures. Do not put unit numbers or owner names on the slides.
+Read it in the meeting, or click **Download these notes** and open the file in the browser. The Excel sheet is still where a yellow amount is changed.
             """
         )
 
@@ -6242,153 +6672,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             st.rerun()
 
     with tabs[10]:
-        st.subheader("For the owners")
-        st.caption(
-            "The story is already drawn. This complex's figures fill in. "
-            "Change the words if you need to, then play it. Click the picture to move on."
-        )
-        if not st.session_state.complex_name:
-            st.warning("Type the complex name in the sidebar first.")
-        else:
-            base = presentation_data(st.session_state)
-            name = st.session_state.complex_name
-            flat = {
-                "rand_note": base["rand_note"],
-                "plan_this_year": base["plan_this_year"],
-                "plan_soon": base["plan_soon"],
-                "plan_later": base["plan_later"],
-                "approve_budget": base["approve_budget"],
-                "approve_levy": base["approve_levy"],
-                "approve_reserve": base["approve_reserve"],
-            }
-            for i in range(3):
-                flat[f"ach_{i}_title"] = base["achievements"][i]["title"]
-                flat[f"ach_{i}_text"] = base["achievements"][i]["text"]
-                flat[f"ch_{i}_title"] = base["changes"][i]["title"]
-                flat[f"ch_{i}_reason"] = base["changes"][i]["reason"]
-            for i, it in enumerate(base["reserve_items"]):
-                flat[f"res_{i}_name"] = it["name"]
-                flat[f"res_{i}_year"] = it["year"]
-            if st.session_state.get("_deck_complex") != name:
-                saved = st.session_state.get("deck_copy") or {}
-                source = dict(flat)
-                if saved.get("complex") == name:
-                    source.update({k: saved[k] for k in flat if k in saved and saved[k]})
-                for k, v in source.items():
-                    st.session_state["deck_" + k] = v
-                st.session_state._deck_complex = name
-            if st.button("Fill the words from this budget"):
-                for k, v in flat.items():
-                    st.session_state["deck_" + k] = v
-                st.rerun()
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Ordinary levy for the year", base["ordinary_levy_total"])
-            c2.metric("One full share a month", base["monthly_total"])
-            c3.metric("Reserve in the bank", base["reserve_balance"])
-            if not base.get("_share_known"):
-                st.info("Load the PQ file. Until then, the monthly bill on the slides is the whole complex, not one home.")
-            st.markdown("**Where every rand of the levy goes**")
-            st.dataframe(
-                pd.DataFrame(base["rand_split"])[["label", "amount", "pct"]],
-                hide_index=True,
-                use_container_width=True,
-            )
-            st.markdown("**One home's monthly bill**")
-            st.dataframe(pd.DataFrame(base["bill_lines"]), hide_index=True, use_container_width=True)
-            flags = [
-                ("Other income", base["show_other_income"]),
-                ("Recovery income", base["show_recovery_income"]),
-                ("Utilities recovered", base["show_utilities"]),
-                ("The people", base["show_personnel"]),
-                ("Cost shortfall", base["show_shortfall"]),
-                ("Reserve fund", base["show_reserve"]),
-            ]
-            st.caption("Slides included: " + ", ".join(n for n, on in flags if on) + ". Hidden: " + (", ".join(n for n, on in flags if not on) or "none") + ".")
-            st.markdown("**Words you can change**")
-            st.caption("These are the only words that change per complex. The pictures stay.")
-            st.text_input("One line under the rand bars", key="deck_rand_note")
-            a1, a2, a3 = st.columns(3)
-            for i, col in enumerate((a1, a2, a3)):
-                with col:
-                    st.text_input(f"Good news {i+1}", key=f"deck_ach_{i}_title")
-                    st.text_area(" ", key=f"deck_ach_{i}_text", height=68, label_visibility="collapsed")
-            b1, b2, b3 = st.columns(3)
-            for i, col in enumerate((b1, b2, b3)):
-                with col:
-                    st.text_input(f"What is changing {i+1}", key=f"deck_ch_{i}_title")
-                    st.text_area(" ", key=f"deck_ch_{i}_reason", height=68, label_visibility="collapsed")
-            st.text_input("The plan this year", key="deck_plan_this_year")
-            st.text_input("The plan soon", key="deck_plan_soon")
-            st.text_input("The plan later", key="deck_plan_later")
-            for i in range(len(base["reserve_items"])):
-                r1, r2 = st.columns([3, 1])
-                r1.text_input(f"Reserve project {i+1}", key=f"deck_res_{i}_name")
-                r2.text_input("Year", key=f"deck_res_{i}_year")
-            st.text_input("Vote — the budget", key="deck_approve_budget")
-            st.text_input("Vote — one home", key="deck_approve_levy")
-            st.text_input("Vote — the reserve", key="deck_approve_reserve")
-            copy = {"complex": name}
-            for k in flat:
-                copy[k] = st.session_state.get("deck_" + k, flat[k])
-            st.session_state.deck_copy = copy
-            data = dict(base)
-            data["rand_note"] = copy["rand_note"]
-            data["plan_this_year"] = copy["plan_this_year"]
-            data["plan_soon"] = copy["plan_soon"]
-            data["plan_later"] = copy["plan_later"]
-            data["approve_budget"] = copy["approve_budget"]
-            data["approve_levy"] = copy["approve_levy"]
-            data["approve_reserve"] = copy["approve_reserve"]
-            data["achievements"] = [
-                {"title": copy[f"ach_{i}_title"], "text": copy[f"ach_{i}_text"]} for i in range(3)
-            ]
-            data["changes"] = [
-                {"title": copy[f"ch_{i}_title"], "reason": copy[f"ch_{i}_reason"]} for i in range(3)
-            ]
-            data["reserve_items"] = [
-                {"name": copy.get(f"res_{i}_name") or "Project", "year": copy.get(f"res_{i}_year") or ""}
-                for i in range(len(base["reserve_items"]))
-            ]
-            safe = re.sub(r"\s+", "_", name or "budget")
-            if st.button("Play the presentation", type="primary"):
-                try:
-                    st.session_state["deck_html"] = render_budget_deck(data)
-                    st.session_state.pop("deck_error", None)
-                except Exception as e:
-                    st.session_state["deck_error"] = str(e)
-            if st.session_state.get("deck_error"):
-                st.error(st.session_state["deck_error"])
-            if st.session_state.get("deck_html"):
-                st.components.v1.html(st.session_state["deck_html"], height=800, scrolling=False)
-                st.download_button(
-                    "Download the presentation",
-                    data=st.session_state["deck_html"],
-                    file_name=f"{safe} budget.html",
-                    mime="text/html",
-                )
-                st.caption("Open it in Chrome. Press F for full screen. Arrow keys, a click, or a swipe moves the story.")
-        with st.expander("Older presentation"):
-            st.caption("The earlier deck. The new one above is the one for meetings.")
-            if st.session_state.complex_name and st.button("Build the older presentation"):
-                st.session_state["meeting_html"] = generate_meeting_html(st.session_state)
-                deck = generate_pptx(st.session_state)
-                st.session_state["pptx"] = deck.getvalue()
-            if st.session_state.get("meeting_html"):
-                safe = re.sub(r"\s+", "_", st.session_state.complex_name or "budget")
-                st.download_button(
-                    "Download the older presentation",
-                    data=st.session_state["meeting_html"],
-                    file_name=f"Budget_presentation_{safe}.html",
-                    mime="text/html",
-                )
-            if st.session_state.get("pptx"):
-                safe = re.sub(r"\s+", "_", st.session_state.complex_name or "budget")
-                st.download_button(
-                    "Download the older PowerPoint",
-                    data=st.session_state["pptx"],
-                    file_name=f"Budget_presentation_{safe}.pptx",
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                )
+        show_pr_notes(st.session_state)
 
     with tabs[11]:
         st.subheader("Download Excel")
