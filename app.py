@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -5119,13 +5120,29 @@ def _one(state: dict, r: dict, where: str, extra: str = "") -> dict | None:
     name = (r.get("desc") or "Line").strip()
     actual = float(r.get("actual") or 0)
     yearly = float(r.get("yearly") or 0)
+    note = _useful_note(r.get("note") or "")
+    subs = _subs_sentence(r)
+    diff = yearly - actual
+    if actual < 0.5 and yearly >= 0.5:
+        tone, headline = "up", f"New. {money(yearly)}."
+    elif yearly < 0.5 and actual >= 0.5:
+        tone, headline = "down", f"Taken out. {money(actual)} less."
+    elif abs(diff) < 0.5:
+        tone, headline = "same", "Same as last year."
+    elif diff > 0:
+        tone, headline = "up", f"{money(diff)} more."
+    else:
+        tone, headline = "down", f"{money(-diff)} less."
     return {
         "name": name,
         "last": money(actual),
         "budget": money(yearly),
         "change": _move_words(actual, yearly),
         "where": where,
-        "say": _say(name, actual, yearly, where, _useful_note(r.get("note") or ""), extra, _subs_sentence(r)),
+        "say": _say(name, actual, yearly, where, note, extra, subs),
+        "headline": headline,
+        "tone": tone,
+        "impact": abs(diff),
     }
 
 
@@ -5197,7 +5214,10 @@ def pr_pack(state: dict) -> dict:
             "last": "",
             "budget": money(net),
             "change": "This is what goes into the levy",
-            "where": "Ordinary levy",
+            "headline": f"{money(net)} goes into the levy.",
+            "tone": "same",
+            "impact": 0,
+            "where": "Next year's budget",
             "say": f"Next year's levy carries {money(net)} of the city bill, after what owners are expected to pay back. That is the budget, not this year's shortfall.",
         }]
         for gap in municipal_gaps(state, "actual"):
@@ -5207,7 +5227,10 @@ def pr_pack(state: dict) -> dict:
                     "name": f"{gap['name']} shortfall this year",
                     "last": money(g),
                     "budget": "",
-                    "change": "Actual, not the new budget",
+                    "change": "This year's actuals",
+                    "headline": f"Short by {money(g)} this year.",
+                    "tone": "down",
+                    "impact": g,
                     "where": "Already inside this year's net. Do not add it again.",
                     "say": (
                         f"This year {gap['name']} is short by {money(g)}. "
@@ -5221,6 +5244,9 @@ def pr_pack(state: dict) -> dict:
                     "last": money(float(gap.get("gross") or 0)),
                     "budget": money(float(gap.get("rec") or 0)),
                     "change": "This year owners paid back more than the city line",
+                    "headline": "Paid back more than the city line.",
+                    "tone": "up",
+                    "impact": abs(g),
                     "where": "Check before you say it is a saving",
                     "say": (
                         f"This year owners paid back {money(float(gap.get('rec') or 0))} for {gap['name']}, "
@@ -5279,6 +5305,9 @@ def pr_pack(state: dict) -> dict:
         "last": "",
         "budget": money(opening),
         "change": "Do not add the contribution into this",
+        "headline": money(opening),
+        "tone": "same",
+        "impact": 0,
         "where": "Reserve bank account",
         "say": f"The reserve bank account has {money(opening)}. Do not add this year’s contribution into that balance.",
     })
@@ -5287,6 +5316,13 @@ def pr_pack(state: dict) -> dict:
         "last": money(last_contrib),
         "budget": money(contrib),
         "change": _move_words(last_contrib, contrib),
+        "headline": (
+            f"{money(contrib - last_contrib)} more." if contrib > last_contrib + 0.5
+            else f"{money(last_contrib - contrib)} less." if last_contrib > contrib + 0.5
+            else "Same as last year."
+        ),
+        "tone": "up" if contrib > last_contrib + 0.5 else "down" if last_contrib > contrib + 0.5 else "same",
+        "impact": abs(contrib - last_contrib),
         "where": "Own line on the invoice" if not reserve_inside_levy(state) else "Inside the ordinary levy",
         "say": _say(
             "The reserve contribution",
@@ -5322,6 +5358,23 @@ def pr_pack(state: dict) -> dict:
         "A lower rand does not reduce the insurance or the city bill. "
         "Something else must come down, or the reserve must pay it."
     )
+    movers = []
+    for sec in sections:
+        if sec["title"] not in ("Municipal charges", "Expenditure", "Repairs and maintenance", "Personnel", "Tax"):
+            continue
+        for line in sec["lines"]:
+            if float(line.get("impact") or 0) < 500:
+                continue
+            if line["name"].startswith("City bill"):
+                continue
+            movers.append(line)
+    movers.sort(key=lambda x: float(x.get("impact") or 0), reverse=True)
+    if "less" in diff_words:
+        banner = f"Owners pay {diff_words}."
+    elif "more" in diff_words:
+        banner = f"Owners pay {diff_words}."
+    else:
+        banner = "Owners pay the same as now."
     return {
         "name": name,
         "year": year,
@@ -5330,81 +5383,220 @@ def pr_pack(state: dict) -> dict:
         "year_now": money(current_m * 12),
         "year_new": money(approved),
         "diff": diff_words,
+        "banner": banner,
+        "remember": [
+            {"name": x["name"], "headline": x.get("headline") or x.get("change") or "", "tone": x.get("tone") or "same"}
+            for x in movers[:3]
+        ],
         "sections": sections,
         "close": close,
     }
 
 
-def pr_pack_html(pack: dict) -> str:
-    parts = [
-        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Notes for the PR</title>",
-        "<style>body{font-family:Calibri,sans-serif;max-width:880px;margin:32px auto;color:#1a1a1a;padding:0 16px}",
-        "h1{font-size:28px;margin-bottom:0}h2{margin-top:28px;font-size:20px}",
-        ".muted{color:#5c6562}.box{background:#f3fbf7;padding:12px 14px;margin:8px 0 18px}",
-        ".k{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#0d6b45;font-weight:700}",
-        "table{border-collapse:collapse;width:100%}td{padding:4px 12px 4px 0}</style></head><body>",
-        f"<p class='k'>Notes for the PR</p><h1>{pack['name']}</h1>",
-        f"<p class='muted'>{pack['year']}</p>",
-        "<p>Read this with the Excel sheet. One line at a time. The words under each line are what you say.</p>",
-        "<table>",
-        f"<tr><td>Owners pay now</td><td><b>{pack['now']}</b> a month</td></tr>",
-        f"<tr><td>This budget asks</td><td><b>{pack['new']}</b> a month</td></tr>",
-        f"<tr><td>Difference</td><td><b>{pack['diff']}</b></td></tr>",
-        "</table><p class='muted'>Ordinary levy only. The reserve is separate unless it says it is inside the levy.</p>",
+def pr_slides(pack: dict) -> list:
+    slides = [
+        {"kind": "title", "name": pack["name"], "year": pack.get("year") or ""},
+        {
+            "kind": "number",
+            "now": pack["now"],
+            "new": pack["new"],
+            "banner": pack.get("banner") or pack.get("diff") or "",
+            "year_now": pack.get("year_now") or "",
+            "year_new": pack.get("year_new") or "",
+        },
     ]
+    if pack.get("remember"):
+        slides.append({"kind": "remember", "items": pack["remember"]})
     for sec in pack["sections"]:
-        parts.append(f"<h2>{sec['title']}</h2>")
+        slides.append({"kind": "section", "title": sec["title"], "count": len(sec["lines"])})
         for line in sec["lines"]:
-            bits = f"<p><b>{line['name']}</b>"
-            if line.get("last"):
-                bits += f" · Last year {line['last']}"
-            if line.get("budget"):
-                bits += f" · This budget {line['budget']}"
-            if line.get("change"):
-                bits += f" · {line['change']}"
-            bits += "</p>"
-            parts.append(bits)
-            parts.append(f"<div class='box'><div class='k'>Say this</div>{line['say']}</div>")
-    parts.append(f"<h2>If the trustees say the levy is too high</h2><div class='box'>{pack['close']}</div></body></html>")
-    return "".join(parts)
+            slides.append({
+                "kind": "line",
+                "section": sec["title"],
+                "name": line.get("name") or "",
+                "headline": line.get("headline") or line.get("change") or "",
+                "tone": line.get("tone") or "same",
+                "last": line.get("last") or "",
+                "budget": line.get("budget") or "",
+                "where": line.get("where") or "",
+                "say": line.get("say") or "",
+            })
+    slides.append({"kind": "close", "say": pack.get("close") or ""})
+    return slides
+
+
+def pr_pack_html(pack: dict) -> str:
+    logo = ""
+    path = Path(__file__).parent / "domus_logo.jpeg"
+    if path.exists():
+        import base64
+        logo = "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+    payload = json.dumps(pr_slides(pack), ensure_ascii=False)
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Notes for the PR</title>
+<style>
+  html,body {{ margin:0; height:100%; background:#101614; color:#1a1a1a;
+    font-family: Calibri, "Segoe UI", sans-serif; }}
+  .deck {{ height:100%; display:flex; flex-direction:column; }}
+  #stage {{ flex:1; min-height:0; padding:18px 18px 0; }}
+  .slide {{ height:100%; background:#fff; position:relative; box-sizing:border-box;
+    padding:36px 48px 28px 56px; display:flex; flex-direction:column; overflow:auto; }}
+  .bar {{ position:absolute; left:0; top:0; bottom:0; width:12px; background:#7eebc8; }}
+  .bar.up {{ background:#0d6b45; }}
+  .bar.down {{ background:#9a3412; }}
+  .top {{ display:flex; justify-content:space-between; align-items:flex-start; gap:16px; }}
+  .kicker {{ letter-spacing:.16em; text-transform:uppercase; color:#5c6562; font-size:13px; font-weight:700; margin:0; }}
+  img.logo {{ height:52px; }}
+  h1 {{ font-size:46px; line-height:1.05; margin:14px 0 8px; font-weight:750; }}
+  .sub {{ color:#5c6562; font-size:20px; margin:0; }}
+  .banner {{ font-size:40px; font-weight:750; line-height:1.15; margin:8px 0 18px; }}
+  .banner.up {{ color:#0d6b45; }}
+  .banner.down {{ color:#9a3412; }}
+  .nums {{ display:flex; gap:14px; margin-top:8px; }}
+  .num {{ flex:1; background:#f3fbf7; padding:16px 18px; }}
+  .num span {{ display:block; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:#5c6562; }}
+  .num strong {{ display:block; font-size:28px; margin-top:6px; }}
+  .say {{ margin-top:auto; background:#f3fbf7; padding:16px 18px; font-size:20px; line-height:1.45; }}
+  .say b {{ display:block; font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:#0d6b45; margin-bottom:6px; }}
+  .where {{ color:#5c6562; font-size:18px; margin:4px 0 0; }}
+  .nav {{ display:flex; align-items:center; justify-content:space-between; color:#d7ebe3; padding:10px 18px 14px; font-size:14px; }}
+  button {{ background:#7eebc8; color:#10211b; border:0; padding:8px 16px; font-weight:700; cursor:pointer; font-size:15px; }}
+  button.ghost {{ background:transparent; color:#d7ebe3; }}
+  .progress {{ height:4px; background:#24302b; }}
+  .progress i {{ display:block; height:100%; background:#7eebc8; }}
+</style></head>
+<body>
+<div class="deck">
+  <div id="stage"></div>
+  <div class="progress"><i id="bar"></i></div>
+  <div class="nav">
+    <span id="count"></span>
+    <span>
+      <button class="ghost" id="prev" type="button">Back</button>
+      <button id="next" type="button">Next</button>
+    </span>
+  </div>
+</div>
+<script>
+const SLIDES = {payload};
+const LOGO = {json.dumps(logo)};
+let i = 0;
+const stage = document.getElementById("stage");
+function node(tag, cls, text) {{
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}}
+function render() {{
+  const s = SLIDES[i];
+  stage.replaceChildren();
+  const slide = node("section", "slide");
+  slide.appendChild(node("div", "bar " + (s.tone || "")));
+  const top = node("div", "top");
+  const kick = node("p", "kicker",
+    s.kind === "title" ? "Notes for the PR" :
+    s.kind === "number" ? "Start here" :
+    s.kind === "remember" ? "Remember these" :
+    s.kind === "section" ? "Next" :
+    s.kind === "close" ? "If they say the levy is too high" :
+    (s.section || ""));
+  top.appendChild(kick);
+  if (LOGO) {{
+    const img = document.createElement("img");
+    img.className = "logo";
+    img.alt = "Domus";
+    img.src = LOGO;
+    top.appendChild(img);
+  }}
+  slide.appendChild(top);
+  if (s.kind === "title") {{
+    slide.appendChild(node("h1", "", s.name || "This complex"));
+    if (s.year) slide.appendChild(node("p", "sub", s.year));
+    const say = node("div", "say");
+    say.appendChild(node("b", "", "How to use this"));
+    say.appendChild(document.createTextNode("Click, or use the arrow keys. One line at a time. The words at the bottom are what you say. The Excel sheet is where a yellow amount is changed."));
+    slide.appendChild(say);
+  }} else if (s.kind === "number") {{
+    const b = node("div", "banner " + (String(s.banner).includes("less") ? "down" : String(s.banner).includes("more") ? "up" : ""), s.banner);
+    slide.appendChild(b);
+    const nums = node("div", "nums");
+    [["Owners pay now", s.now + " a month"], ["This budget asks", s.new + " a month"], ["For the year", s.year_new]].forEach(function(pair) {{
+      const box = node("div", "num");
+      box.appendChild(node("span", "", pair[0]));
+      box.appendChild(node("strong", "", pair[1]));
+      nums.appendChild(box);
+    }});
+    slide.appendChild(nums);
+    const say = node("div", "say");
+    say.appendChild(node("b", "", "Say this"));
+    say.appendChild(document.createTextNode("Ordinary levy only. What they pay now is " + s.year_now + " a year. This budget is " + s.year_new + " a year. The reserve is separate unless a later slide says it is inside the levy."));
+    slide.appendChild(say);
+  }} else if (s.kind === "remember") {{
+    slide.appendChild(node("h1", "", "The lines that moved the most"));
+    (s.items || []).forEach(function(it) {{
+      const box = node("div", "num");
+      box.style.marginTop = "12px";
+      box.appendChild(node("span", "", it.name));
+      const h = node("strong", it.tone || "", it.headline);
+      if (it.tone === "up") h.style.color = "#0d6b45";
+      if (it.tone === "down") h.style.color = "#9a3412";
+      box.appendChild(h);
+      slide.appendChild(box);
+    }});
+  }} else if (s.kind === "section") {{
+    slide.appendChild(node("h1", "", s.title));
+    slide.appendChild(node("p", "sub", s.count + (s.count === 1 ? " line" : " lines") + ". Click for the first one."));
+  }} else if (s.kind === "close") {{
+    slide.appendChild(node("h1", "", "Only the yellow amount may change"));
+    const say = node("div", "say");
+    say.appendChild(node("b", "", "Say this"));
+    say.appendChild(document.createTextNode(s.say || ""));
+    slide.appendChild(say);
+  }} else {{
+    slide.appendChild(node("h1", "", s.name));
+    const h = node("div", "banner " + (s.tone || ""), s.headline || "");
+    slide.appendChild(h);
+    const bits = [];
+    if (s.last) bits.push("Last year " + s.last);
+    if (s.budget) bits.push("This budget " + s.budget);
+    if (bits.length) slide.appendChild(node("p", "where", bits.join("   ·   ")));
+    if (s.where) slide.appendChild(node("p", "where", s.where));
+    const say = node("div", "say");
+    say.appendChild(node("b", "", "Say this"));
+    say.appendChild(document.createTextNode(s.say || ""));
+    slide.appendChild(say);
+  }}
+  stage.appendChild(slide);
+  document.getElementById("count").textContent = (i + 1) + " of " + SLIDES.length;
+  document.getElementById("bar").style.width = ((i + 1) / SLIDES.length * 100) + "%";
+}}
+function go(n) {{ i = Math.max(0, Math.min(SLIDES.length - 1, n)); render(); }}
+document.getElementById("next").onclick = function(e) {{ e.stopPropagation(); go(i + 1); }};
+document.getElementById("prev").onclick = function(e) {{ e.stopPropagation(); go(i - 1); }};
+stage.addEventListener("click", function() {{ go(i + 1); }});
+document.addEventListener("keydown", function(e) {{
+  if (e.key === "ArrowRight" || e.key === " ") {{ e.preventDefault(); go(i + 1); }}
+  if (e.key === "ArrowLeft") go(i - 1);
+}});
+render();
+</script>
+</body></html>"""
 
 
 def show_pr_notes(state: dict) -> None:
     pack = pr_pack(state)
     st.subheader("Notes for the PR")
-    st.caption("Read this with the Excel sheet. One line at a time. The words under each line are what you say. A section with nothing in it is left out.")
-    if pack["year"]:
-        st.write(f"**{pack['name']}** · {pack['year']}")
-    else:
-        st.write(f"**{pack['name']}**")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Owners pay now", pack["now"] + " / month")
-    c2.metric("This budget asks", pack["new"] + " / month")
-    c3.metric("Difference", pack["diff"])
-    st.caption(f"Ordinary levy only. What they pay now is {pack['year_now']} a year. This budget is {pack['year_new']} a year. The reserve is separate unless a line says it is inside the levy.")
-    for sec in pack["sections"]:
-        st.markdown(f"### {sec['title']}")
-        for line in sec["lines"]:
-            st.markdown(f"**{line['name']}**")
-            bits = []
-            if line.get("last"):
-                bits.append(f"Last year {line['last']}")
-            if line.get("budget"):
-                bits.append(f"This budget {line['budget']}")
-            if line.get("change"):
-                bits.append(line["change"])
-            if bits:
-                st.caption(" · ".join(bits))
-            if line.get("where"):
-                st.caption(line["where"])
-            st.markdown(f"**Say this.** {line['say']}")
-    st.markdown("### If the trustees say the levy is too high")
-    st.markdown(f"**Say this.** {pack['close']}")
+    st.caption("A presentation of this budget. Click the picture, or use the arrow keys. One line at a time. Download it and press F for full screen in the meeting.")
+    html_doc = pr_pack_html(pack)
+    st.components.v1.html(html_doc, height=760, scrolling=False)
     safe = re.sub(r"\s+", "_", pack["name"] or "budget")
     st.download_button(
-        "Download these notes",
-        data=pr_pack_html(pack).encode("utf-8"),
-        file_name=f"PR_notes_{safe}.html",
+        "Download the presentation",
+        data=html_doc.encode("utf-8"),
+        file_name=f"PR_presentation_{safe}.html",
         mime="text/html",
         key="pr_notes_download",
     )
@@ -6039,11 +6231,11 @@ If you already know the decision before you download, you can set the same choic
 Do not use **Erase everything** unless you mean to wipe the screen. Download first if you still need the numbers.
 
 ### 20. Notes for the PR
-On **Notes for the PR**, every line that has an amount is written out, in the same order as the sheet: levy income, other income, recoveries, municipal, expenditure, repairs, personnel, tax, then the reserve fund budget.
+On **Notes for the PR** the budget is a presentation. Click the picture, or use the arrow keys. One line at a time, in the same order as the sheet.
 
-A section with nothing in it is left out. A line with no note still appears. The note you typed is added under that line. A split, such as the insurance periods, is shown as already inside the main amount. The PR is told not to add the split again.
+The first slides are the number to remember, then the lines that moved the most. After that, each section, then each line. A section with nothing in it is left out. Your Notes are on the slide. A split is already inside the main amount.
 
-Read it in the meeting, or click **Download these notes** and open the file in the browser. The Excel sheet is still where a yellow amount is changed.
+**Download the presentation**, open it in the browser, and press F for full screen in the meeting. The Excel sheet is still where a yellow amount is changed.
             """
         )
 
