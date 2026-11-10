@@ -5162,11 +5162,11 @@ def _one(state: dict, r: dict, where: str, extra: str = "") -> dict | None:
     }
 
 
-def _section(title: str, lines: list) -> dict | None:
+def _section(title: str, lines: list, intro: str = "") -> dict | None:
     lines = [x for x in lines if x]
     if not lines:
         return None
-    return {"title": title, "lines": lines}
+    return {"title": title, "lines": lines, "intro": intro}
 
 
 def pr_pack(state: dict) -> dict:
@@ -5191,18 +5191,57 @@ def pr_pack(state: dict) -> dict:
     levy_lines = []
     for r in s.get("levy") or []:
         levy_lines.append(_one(state, r, _levy_where(state, r)))
-    block = _section("Levy income", levy_lines)
+    block = _section(
+        "Levy income",
+        levy_lines,
+        "Say this. The ordinary levy pays the costs of running the complex. "
+        "Walk the lines. Ordinary levies are the levy. Reserve and CSOS are their own lines on the invoice, unless a line says they sit inside the levy. "
+        "A line that says it lowers the levy, or that it goes to the reserve, is not added on top.",
+    )
     if block:
         sections.append(block)
 
     other_lines = []
+    other_actual = 0.0
+    other_yearly = 0.0
+    lowers = []
     for r in s.get("other") or []:
         if r.get("reduces_levy"):
-            where = "Ticked to lower the ordinary levy."
+            where = "Ticked to lower the ordinary levy. Owners are not asked to pay this again."
         else:
-            where = "For information only. It does not change the levy."
-        other_lines.append(_one(state, r, where))
-    block = _section("Other income", other_lines)
+            where = "We do not use this to pay the bills. It does not change the levy."
+        line = _one(state, r, where)
+        if not line:
+            continue
+        actual = float(r.get("actual") or 0)
+        yearly = float(r.get("yearly") or 0)
+        other_actual += actual
+        other_yearly += yearly
+        if r.get("reduces_levy"):
+            lowers.append(line["name"])
+        elif yearly < 0.5 and actual > 0.5:
+            line["headline"] = "Not budgeted. It does not change the levy."
+            line["tone"] = "same"
+            line["say"] = (
+                f"{line['name']} came in last year at {money(actual)}. This budget is R 0.00 on purpose. "
+                "We do not count on arrears, bank interest or penalties. "
+                "Leaving it at R 0.00 does not make the levy higher or lower. We never used it to pay the bills."
+            )
+        other_lines.append(line)
+    if other_yearly < 0.5 and other_actual > 0.5:
+        other_intro = (
+            f"Say this. Last year this income was {money(other_actual)}. This budget is R 0.00. "
+            "We do not count on arrears, bank interest or penalties, so we do not budget them. "
+            "That does not change the levy. If someone asks why the levy did not drop by this amount, say we never used it to pay the bills."
+        )
+    elif lowers:
+        other_intro = (
+            "Say this. " + ", ".join(lowers) + " lowers the ordinary levy. "
+            "Any line that is not ticked is only for the record. It does not change what owners pay."
+        )
+    else:
+        other_intro = "Say this. This income is on the books. It does not change the ordinary levy unless a line says it does."
+    block = _section("Other income", other_lines, other_intro)
     if block:
         sections.append(block)
 
@@ -5211,7 +5250,12 @@ def pr_pack(state: dict) -> dict:
         against = (r.get("claim_against") or "").strip()
         where = f"Comes off {against}. It is not extra income." if against else "A recovery. It is not extra income."
         rec_lines.append(_one(state, r, where))
-    block = _section("Recovery income", rec_lines)
+    block = _section(
+        "Recovery income",
+        rec_lines,
+        "Say this. This is not extra money. Each amount pays a cost that is already on the budget. "
+        "The cost stays on the books. This recovery comes off that cost, so owners are not billed twice.",
+    )
     if block:
         sections.append(block)
 
@@ -5271,6 +5315,11 @@ def pr_pack(state: dict) -> dict:
                     ),
                 })
         block["lines"].extend(extra_lines)
+        block["intro"] = (
+            "Say this. Add the city bill. Subtract what owners pay back. "
+            "What is left is what next year's levy must carry. "
+            "If a line says shortfall, that is this year's actual. It is already in the numbers. Do not add it on top."
+        )
         sections.append(block)
 
     for key, title in (
@@ -5287,7 +5336,24 @@ def pr_pack(state: dict) -> dict:
                 if other <= 50000:
                     extra = f"Other income budgeted is {money(other)}. The first R 50,000.00 is free, so no tax is budgeted."
             lines.append(_one(state, r, _cost_where(state, r), extra))
-        block = _section(title, lines)
+        intros = {
+            "Expenditure": (
+                "Say this. These are the running costs, not repairs and not salaries. "
+                "The yellow amount is what we need next year. If the slide says it is inside the levy, owners pay it in the ordinary levy. "
+                "If it says the invoice, or the reserve, they are not paying it twice."
+            ),
+            "Repairs and maintenance": (
+                "Say this. These are repairs, not the day-to-day bills. "
+                "The yellow amount is next year. The reserve pays a repair only when the slide says so."
+            ),
+            "Personnel": (
+                "Say this. These are the people: wages, salaries, PAYE and UIF. They are inside the ordinary levy."
+            ),
+            "Tax": (
+                "Say this. Tax is on other income only. Levies are not taxed. The first R 50,000.00 of that income is free. The rest is at 27%."
+            ),
+        }
+        block = _section(title, lines, intros.get(title, ""))
         if block:
             sections.append(block)
 
@@ -5297,7 +5363,12 @@ def pr_pack(state: dict) -> dict:
             state, r,
             "Same amount for each owner, on the invoice. Not inside the ordinary levy.",
         ))
-    block = _section("On the invoice, not in the levy", fixed_lines)
+    block = _section(
+        "On the invoice, not in the levy",
+        fixed_lines,
+        "Say this. Owners pay this on the invoice, the same rand each, on top of the levy. "
+        "It is not inside the ordinary levy. The cost stays on the books so we can still see what we pay the contractor.",
+    )
     if block:
         sections.append(block)
 
@@ -5305,7 +5376,11 @@ def pr_pack(state: dict) -> dict:
         hoa = []
         for r in (s.get("hoa_income") or []) + (s.get("hoa_expense") or []):
             hoa.append(_one(state, r, "This is the other estate. It is not inside our ordinary levy."))
-        block = _section("Other estate", hoa)
+        block = _section(
+            "Other estate",
+            hoa,
+            "Say this. This belongs to the other estate. It passes through us. It is not our ordinary levy and we do not spend it.",
+        )
         if block:
             sections.append(block)
 
@@ -5365,7 +5440,16 @@ def pr_pack(state: dict) -> dict:
         if line:
             reserve_lines.append(line)
     if reserve_lines:
-        sections.append({"title": "Reserve fund budget", "lines": reserve_lines})
+        sections.append({
+            "title": "Reserve fund budget",
+            "lines": reserve_lines,
+            "intro": (
+                "Say this. This is the reserve, not the ordinary levy. "
+                "The bank figure is what is already there. Do not add this year's contribution into that balance. "
+                "The contribution is what we ask the owners for this year. "
+                "Each project after that is what the plan spends next year. The reserve pays it, unless a line says the levy pays it."
+            ),
+        })
 
     close = (
         "Only the yellow amount on the sheet may be changed. "
@@ -5430,6 +5514,7 @@ def pr_slides(pack: dict) -> list:
             "title": sec["title"],
             "count": len(sec["lines"]),
             "reserve": sec["title"] == "Reserve fund budget",
+            "say": sec.get("intro") or "",
             "rows": [
                 {
                     "name": line.get("name") or "",
@@ -5499,8 +5584,10 @@ def pr_pack_html(pack: dict) -> str:
   .num {{ flex:1; background:#f3fbf7; padding:16px 18px; }}
   .num span {{ display:block; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:#5c6562; }}
   .num strong {{ display:block; font-size:28px; margin-top:6px; }}
-  .say {{ margin-top:auto; background:#f3fbf7; padding:16px 18px; font-size:20px; line-height:1.45; }}
-  .say b {{ display:block; font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:#0d6b45; margin-bottom:6px; }}
+  .explain {{ background:#f3fbf7; padding:14px 16px; font-size:20px; line-height:1.45; margin:8px 0 12px; }}
+  .explain b {{ display:block; font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:#0d6b45; margin-bottom:6px; }}
+  .say, .explain {{ background:#f3fbf7; padding:14px 16px; font-size:20px; line-height:1.45; margin:8px 0 12px; }}
+  .say b, .explain b {{ display:block; font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:#0d6b45; margin-bottom:6px; }}
   .where {{ color:#5c6562; font-size:16px; margin:6px 0 0; }}
   h1.line {{ font-size:32px; margin-bottom:0; }}
   .banner.line {{ font-size:28px; margin:4px 0 8px; }}
@@ -5509,7 +5596,7 @@ def pr_pack_html(pack: dict) -> str:
   th {{ background:#1f4e79; color:#fff; text-align:left; padding:6px 8px; font-size:11px; letter-spacing:.04em; }}
   td {{ border:1px solid #d9d2c6; padding:6px 8px; vertical-align:top; }}
   td.num {{ text-align:right; white-space:nowrap; }}
-  td.yellow, th.yellow {{ background:#fff4c2; }}
+  td.yellow, th.yellow {{ background:#ffe58a; color:#1a1a1a; }}
   tr.hot td {{ background:#e7f2ea; }}
   tr.hot td.yellow {{ background:#ffe58a; font-weight:700; }}
   tr.sub td {{ color:#666; font-style:italic; font-size:12px; background:#fafafa; }}
@@ -5642,7 +5729,12 @@ function render() {{
     }});
   }} else if (s.kind === "section") {{
     slide.appendChild(node("h1", "", s.title));
-    slide.appendChild(node("p", "sub", "The same columns as the Excel sheet. Yellow is the amount the meeting can change. Click for each line."));
+    if (s.say) {{
+      const say = node("div", "explain");
+      say.appendChild(node("b", "", "Explain it like this"));
+      say.appendChild(document.createTextNode(s.say.replace(/^Say this\\.\\s*/, "")));
+      slide.appendChild(say);
+    }}
     slide.appendChild(sheetTable(s.rows || [], s.reserve, ""));
   }} else if (s.kind === "close") {{
     slide.appendChild(node("h1", "", "Only the yellow amount may change"));
@@ -5653,12 +5745,11 @@ function render() {{
   }} else {{
     slide.appendChild(node("h1", "line", s.name));
     slide.appendChild(node("div", "banner line " + (s.tone || ""), s.headline || ""));
-    slide.appendChild(sheetTable([s], s.reserve, s.name));
-    if (s.where) slide.appendChild(node("p", "where", s.where));
     const say = node("div", "say");
     say.appendChild(node("b", "", "Say this"));
     say.appendChild(document.createTextNode(s.say || ""));
     slide.appendChild(say);
+    slide.appendChild(sheetTable([s], s.reserve, s.name));
   }}
   stage.appendChild(slide);
   document.getElementById("count").textContent = (i + 1) + " of " + SLIDES.length;
