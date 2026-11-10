@@ -5133,10 +5133,26 @@ def _one(state: dict, r: dict, where: str, extra: str = "") -> dict | None:
         tone, headline = "up", f"{money(diff)} more."
     else:
         tone, headline = "down", f"{money(-diff)} less."
+    subs_rows = []
+    for sub in r.get("subs") or []:
+        label = str(sub.get("desc") or "").strip()
+        if not label:
+            continue
+        subs_rows.append({
+            "name": f"{name} — {label}",
+            "actual": money(float(sub.get("actual") or 0)),
+            "yearly": money(float(sub.get("yearly") or 0)),
+        })
+    pct = pct_from_amounts(actual, yearly)
     return {
         "name": name,
+        "gl": r.get("gl") or "",
         "last": money(actual),
         "budget": money(yearly),
+        "monthly": money(yearly / 12.0) if abs(yearly) > 0.5 else "",
+        "pct": "" if actual < 0.5 else f"{pct:.1f}%",
+        "note": note,
+        "subs": subs_rows,
         "change": _move_words(actual, yearly),
         "where": where,
         "say": _say(name, actual, yearly, where, note, extra, subs),
@@ -5388,6 +5404,7 @@ def pr_pack(state: dict) -> dict:
             {"name": x["name"], "headline": x.get("headline") or x.get("change") or "", "tone": x.get("tone") or "same"}
             for x in movers[:3]
         ],
+        "show_pct": bool(state.get("show_pct")),
         "sections": sections,
         "close": close,
     }
@@ -5408,16 +5425,40 @@ def pr_slides(pack: dict) -> list:
     if pack.get("remember"):
         slides.append({"kind": "remember", "items": pack["remember"]})
     for sec in pack["sections"]:
-        slides.append({"kind": "section", "title": sec["title"], "count": len(sec["lines"])})
+        slides.append({
+            "kind": "section",
+            "title": sec["title"],
+            "count": len(sec["lines"]),
+            "reserve": sec["title"] == "Reserve fund budget",
+            "rows": [
+                {
+                    "name": line.get("name") or "",
+                    "gl": line.get("gl") or "",
+                    "last": line.get("last") or "",
+                    "pct": line.get("pct") or "",
+                    "budget": line.get("budget") or "",
+                    "monthly": line.get("monthly") or "",
+                    "note": line.get("note") or "",
+                    "subs": line.get("subs") or [],
+                }
+                for line in sec["lines"]
+            ],
+        })
         for line in sec["lines"]:
             slides.append({
                 "kind": "line",
                 "section": sec["title"],
+                "reserve": sec["title"] == "Reserve fund budget",
                 "name": line.get("name") or "",
+                "gl": line.get("gl") or "",
                 "headline": line.get("headline") or line.get("change") or "",
                 "tone": line.get("tone") or "same",
                 "last": line.get("last") or "",
                 "budget": line.get("budget") or "",
+                "monthly": line.get("monthly") or "",
+                "pct": line.get("pct") or "",
+                "note": line.get("note") or "",
+                "subs": line.get("subs") or [],
                 "where": line.get("where") or "",
                 "say": line.get("say") or "",
             })
@@ -5460,7 +5501,19 @@ def pr_pack_html(pack: dict) -> str:
   .num strong {{ display:block; font-size:28px; margin-top:6px; }}
   .say {{ margin-top:auto; background:#f3fbf7; padding:16px 18px; font-size:20px; line-height:1.45; }}
   .say b {{ display:block; font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:#0d6b45; margin-bottom:6px; }}
-  .where {{ color:#5c6562; font-size:18px; margin:4px 0 0; }}
+  .where {{ color:#5c6562; font-size:16px; margin:6px 0 0; }}
+  h1.line {{ font-size:32px; margin-bottom:0; }}
+  .banner.line {{ font-size:28px; margin:4px 0 8px; }}
+  .sheet {{ overflow:auto; margin-top:8px; }}
+  table {{ border-collapse:collapse; width:100%; font-size:14px; }}
+  th {{ background:#1f4e79; color:#fff; text-align:left; padding:6px 8px; font-size:11px; letter-spacing:.04em; }}
+  td {{ border:1px solid #d9d2c6; padding:6px 8px; vertical-align:top; }}
+  td.num {{ text-align:right; white-space:nowrap; }}
+  td.yellow, th.yellow {{ background:#fff4c2; }}
+  tr.hot td {{ background:#e7f2ea; }}
+  tr.hot td.yellow {{ background:#ffe58a; font-weight:700; }}
+  tr.sub td {{ color:#666; font-style:italic; font-size:12px; background:#fafafa; }}
+  td.note {{ color:#1f4e79; font-size:12px; }}
   .nav {{ display:flex; align-items:center; justify-content:space-between; color:#d7ebe3; padding:10px 18px 14px; font-size:14px; }}
   button {{ background:#7eebc8; color:#10211b; border:0; padding:8px 16px; font-weight:700; cursor:pointer; font-size:15px; }}
   button.ghost {{ background:transparent; color:#d7ebe3; }}
@@ -5481,6 +5534,7 @@ def pr_pack_html(pack: dict) -> str:
 </div>
 <script>
 const SLIDES = {payload};
+const SHOW_PCT = {"true" if pack.get("show_pct") else "false"};
 const LOGO = {json.dumps(logo)};
 let i = 0;
 const stage = document.getElementById("stage");
@@ -5489,6 +5543,46 @@ function node(tag, cls, text) {{
   if (cls) n.className = cls;
   if (text != null) n.textContent = text;
   return n;
+}}
+function sheetTable(rows, reserve, highlight) {{
+  const wrap = node("div", "sheet");
+  const table = document.createElement("table");
+  const head = document.createElement("tr");
+  const labels = reserve
+    ? ["Description", "GL Code", "Spent this year", "Next year", "Monthly", "Comments / Notes"]
+    : ["Description", "GL Code", "Actual"].concat(SHOW_PCT ? ["%"] : []).concat(["Budgeted Yearly", "Monthly", "Comments / Notes"]);
+  labels.forEach(function(lab) {{
+    const th = document.createElement("th");
+    th.textContent = lab;
+    if (lab === "Budgeted Yearly" || lab === "Next year") th.className = "yellow";
+    head.appendChild(th);
+  }});
+  table.appendChild(head);
+  function addRow(row, sub) {{
+    const tr = document.createElement("tr");
+    if (!sub && highlight && row.name === highlight) tr.className = "hot";
+    if (sub) tr.className = "sub";
+    function td(text, cls) {{
+      const c = document.createElement("td");
+      c.textContent = text || "";
+      if (cls) c.className = cls;
+      tr.appendChild(c);
+    }}
+    td(sub ? row.name : row.name, sub ? "desc" : "desc");
+    td(sub ? "" : row.gl);
+    td(sub ? row.actual : row.last, "num");
+    if (!reserve && SHOW_PCT) td(sub ? "" : row.pct, "num");
+    td(sub ? row.yearly : row.budget, "num yellow");
+    td(sub ? "" : row.monthly, "num");
+    td(sub ? "Already inside the line above" : row.note, "note");
+    table.appendChild(tr);
+  }}
+  (rows || []).forEach(function(row) {{
+    addRow(row, false);
+    (row.subs || []).forEach(function(sub) {{ addRow(sub, true); }});
+  }});
+  wrap.appendChild(table);
+  return wrap;
 }}
 function render() {{
   const s = SLIDES[i];
@@ -5548,7 +5642,8 @@ function render() {{
     }});
   }} else if (s.kind === "section") {{
     slide.appendChild(node("h1", "", s.title));
-    slide.appendChild(node("p", "sub", s.count + (s.count === 1 ? " line" : " lines") + ". Click for the first one."));
+    slide.appendChild(node("p", "sub", "The same columns as the Excel sheet. Yellow is the amount the meeting can change. Click for each line."));
+    slide.appendChild(sheetTable(s.rows || [], s.reserve, ""));
   }} else if (s.kind === "close") {{
     slide.appendChild(node("h1", "", "Only the yellow amount may change"));
     const say = node("div", "say");
@@ -5556,13 +5651,9 @@ function render() {{
     say.appendChild(document.createTextNode(s.say || ""));
     slide.appendChild(say);
   }} else {{
-    slide.appendChild(node("h1", "", s.name));
-    const h = node("div", "banner " + (s.tone || ""), s.headline || "");
-    slide.appendChild(h);
-    const bits = [];
-    if (s.last) bits.push("Last year " + s.last);
-    if (s.budget) bits.push("This budget " + s.budget);
-    if (bits.length) slide.appendChild(node("p", "where", bits.join("   ·   ")));
+    slide.appendChild(node("h1", "line", s.name));
+    slide.appendChild(node("div", "banner line " + (s.tone || ""), s.headline || ""));
+    slide.appendChild(sheetTable([s], s.reserve, s.name));
     if (s.where) slide.appendChild(node("p", "where", s.where));
     const say = node("div", "say");
     say.appendChild(node("b", "", "Say this"));
@@ -6233,7 +6324,7 @@ Do not use **Erase everything** unless you mean to wipe the screen. Download fir
 ### 20. Notes for the PR
 On **Notes for the PR** the budget is a presentation. Click the picture, or use the arrow keys. One line at a time, in the same order as the sheet.
 
-The first slides are the number to remember, then the lines that moved the most. After that, each section, then each line. A section with nothing in it is left out. Your Notes are on the slide. A split is already inside the main amount.
+The first slides are the number to remember, then the lines that moved the most. After that, each section is shown as the Excel block, then each line on its own, in the same columns as the sheet. Yellow is Budgeted Yearly. A section with nothing in it is left out. Your Notes are on the slide. A split is shown under the line and is already inside the amount.
 
 **Download the presentation**, open it in the browser, and press F for full screen in the meeting. The Excel sheet is still where a yellow amount is changed.
             """
