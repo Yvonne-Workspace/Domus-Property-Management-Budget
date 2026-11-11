@@ -5592,31 +5592,111 @@ def pr_pack(state: dict) -> dict:
 
 
 def pr_slides(pack: dict) -> list:
+    """A sit-beside walk of the workbook: budget, then reserve, then the PQ sheet."""
+    why = pack.get("why") or {}
+    inside = bool(why.get("inside"))
+    reserve_where = (
+        "It is already inside the levy. Changing it changes the levy. Do not also add a reserve line."
+        if inside else
+        "It is its own line on the invoice. It is not inside the levy."
+    )
+
+    def guide(sheet, title, lead, steps, say=""):
+        return {"kind": "guide", "sheet": sheet, "title": title, "lead": lead, "steps": steps, "say": say}
+
     slides = [
         {"kind": "title", "name": pack["name"], "year": pack.get("year") or ""},
-        {"kind": "read"},
-        {
-            "kind": "number",
-            "now": pack["now"],
-            "new": pack["new"],
-            "banner": pack.get("banner") or pack.get("diff") or "",
-            "year_now": pack.get("year_now") or "",
-            "year_new": pack.get("year_new") or "",
-        },
+        guide(
+            "The workbook",
+            "Three sheets. Top to bottom.",
+            "Sit with the Excel file open. This is the first time these figures are used to agree a number. We do the BUDGET sheet, then the RESERVE sheet, then the PQ sheet.",
+            [
+                {"where": "1. BUDGET", "do": "The costs, then the levy", "why": "The yellow agreed amount is at the very top. That is the meeting decision."},
+                {"where": "2. RESERVE", "do": "The reserve fund", "why": "What is in the bank, what owners add, and what the 10-year plan spends."},
+                {"where": "3. PQ", "do": "What each unit pays", "why": "This follows the yellow amount. Do not type the unit figures."},
+            ],
+        ),
+        guide(
+            "Colours",
+            "Yellow is the only place you type",
+            "If it is not yellow, leave it. The sheet works the rest out.",
+            [
+                {"where": "Yellow", "do": "Type here", "why": "At the top: the agreed levy, and the agreed reserve. Further down: a bill, only if the meeting changes that bill."},
+                {"where": "White", "do": "Leave it", "why": "A formula. It moves when a yellow number moves."},
+                {"where": "Pink", "do": "Read it. Do not type.", "why": "A shortfall, a gap, or an overspend. It is not added again."},
+                {"where": "Pale blue", "do": "A total", "why": "Do not type a total."},
+            ],
+        ),
+        guide(
+            "BUDGET sheet",
+            "Start at the top. Do not scroll yet.",
+            "The first block is the levy decision.",
+            [
+                {"where": "What the costs need", "do": "White. Leave it.", "why": f"What it costs to run the complex. {pack.get('year_new') or ''} for the year. {pack.get('new') or ''} a month."},
+                {"where": "Increase the costs need", "do": "White. Leave it.", "why": "How much more than last year those costs need."},
+                {"where": "Agreed increase — type the rand", "do": "Yellow. This is the one you change.", "why": "It starts as the full increase. If the meeting will not pay that, type a smaller rand. Not a percentage."},
+                {"where": "What owners will be charged", "do": "White. It follows the yellow.", "why": "Last year plus the yellow rand. This is the levy."},
+                {"where": "Still short", "do": "Pink. Read it.", "why": "Above zero means the costs are still higher than the levy. The insurance and the city bill have not gone down."},
+            ],
+            "Say this. Typing a lower rand does not make a bill smaller. It only says what owners will pay. If it is short, the meeting still has to say which bill comes down, or that the reserve pays it.",
+        ),
+        guide(
+            "BUDGET sheet",
+            "The reserve decision is the next block",
+            "Still at the top. Do not scroll yet.",
+            [
+                {"where": "Last year’s contribution", "do": "White.", "why": "What was collected last year."},
+                {"where": "Agreed reserve — type the rand", "do": "Yellow. The other number you may change.", "why": "The reserve for the whole year, in rands. Not a percentage. " + reserve_where},
+            ],
+        ),
     ]
-    why = pack.get("why") or {}
+    slides.append({
+        "kind": "number",
+        "now": pack["now"],
+        "new": pack["new"],
+        "banner": pack.get("banner") or pack.get("diff") or "",
+        "year_now": pack.get("year_now") or "",
+        "year_new": pack.get("year_new") or "",
+    })
     if why.get("say"):
         slides.append({"kind": "why", **{k: why[k] for k in ("inside", "now", "costs", "reserve", "levy", "say")}})
     if why.get("shifts"):
         slides.append({"kind": "shifts", "items": why["shifts"]})
-    if pack.get("remember"):
-        slides.append({"kind": "remember", "items": pack["remember"]})
+    slides.append(guide(
+        "BUDGET sheet",
+        "Now scroll down. One block at a time.",
+        "Levy income, other income, recoveries, the city bill, expenditure, repairs, personnel, tax. Same order as the sheet.",
+        [
+            {"where": "Last year", "do": "What already happened", "why": "On the sheet this column is called Actual."},
+            {"where": "Next year", "do": "Yellow, if the meeting changes that bill", "why": "On the sheet this column is called Budgeted Yearly. Leave it unless that bill must change."},
+            {"where": "Each month", "do": "Next year divided by 12", "why": "Not a second charge."},
+            {"where": "A note", "do": "Why the line moved", "why": "Read the note before you change the yellow amount."},
+        ],
+        "Go line by line. Say what it is, what it was, and what it will be. A line that says it is not in the levy is not added again.",
+    ))
+    reserve_done = False
     for sec in pack["sections"]:
+        is_reserve = sec["title"] == "Reserve fund budget"
+        if is_reserve and not reserve_done:
+            reserve_done = True
+            slides.append(guide(
+                "RESERVE sheet",
+                "Open the RESERVE sheet. Start at the top.",
+                "This is not the monthly levy. This is the savings for the big jobs.",
+                [
+                    {"where": "Opening reserve balance", "do": "Yellow only if the bank figure is wrong.", "why": "Money in the reserve account now. Do not include this year’s contribution in it."},
+                    {"where": "Reserve contributions", "do": "White. It follows the yellow reserve on the BUDGET sheet.", "why": reserve_where},
+                    {"where": "Maintenance plan expenditure", "do": "White.", "why": "What the 10-year plan spends. Next year is the next column of the plan."},
+                    {"where": "Closing reserve balance", "do": "White.", "why": "Opening, plus contributions, minus the plan."},
+                    {"where": "Overspent", "do": "Pink, if it is above zero.", "why": "The fund is short. It is not added again."},
+                ],
+                "Then go down the list of jobs. Spent this year is what was paid. Next year is the plan. A job with nothing in either year is not on this list.",
+            ))
         slides.append({
             "kind": "section",
             "title": sec["title"],
             "count": len(sec["lines"]),
-            "reserve": sec["title"] == "Reserve fund budget",
+            "reserve": is_reserve,
             "say": sec.get("intro") or "",
             "rows": [
                 {
@@ -5636,7 +5716,7 @@ def pr_slides(pack: dict) -> list:
             slides.append({
                 "kind": "line",
                 "section": sec["title"],
-                "reserve": sec["title"] == "Reserve fund budget",
+                "reserve": is_reserve,
                 "name": line.get("name") or "",
                 "gl": line.get("gl") or "",
                 "headline": line.get("headline") or line.get("change") or "",
@@ -5650,6 +5730,28 @@ def pr_slides(pack: dict) -> list:
                 "where": line.get("where") or "",
                 "say": line.get("say") or "",
             })
+    pq_steps = [
+        {"where": "Paid last year", "do": "What they pay now, shared by PQ.", "why": "Do not type it. It comes from the current levy on the side of the app."},
+    ]
+    if inside:
+        pq_steps += [
+            {"where": "Ordinary levy", "do": "The running costs, this unit’s share.", "why": "Part of the one levy. Not a second charge."},
+            {"where": "Reserve fund", "do": "The reserve inside that levy.", "why": "There is no reserve line on the invoice."},
+            {"where": "Will pay this year", "do": "Ordinary levy plus reserve fund.", "why": "This is the one levy. It moves when the yellow agreed rand on the BUDGET sheet moves."},
+        ]
+    else:
+        pq_steps += [
+            {"where": "Will pay this year", "do": "The levy only.", "why": "It moves when the yellow agreed rand on the BUDGET sheet moves."},
+            {"where": "Reserve fund", "do": "Its own column, if they pay one.", "why": "Not inside the levy. It follows the yellow reserve amount."},
+        ]
+    pq_steps.append({"where": "CSOS and the Total", "do": "White. Leave them.", "why": "CSOS is worked from the levy. The Total is the levy plus CSOS and anything else on the invoice. Do not type a unit."})
+    slides.append(guide(
+        "PQ sheet",
+        "Open the PQ sheet. Top to bottom.",
+        "One row is one unit. Do not type on this sheet. If the meeting changes the yellow rand, come back here and read what each unit will pay.",
+        pq_steps,
+        "Say this. We do not work out each unit by hand. The sheet does it from the yellow amount we just agreed.",
+    ))
     slides.append({"kind": "close", "say": pack.get("close") or ""})
     return slides
 
@@ -5781,6 +5883,7 @@ function render() {{
   slide.appendChild(node("div", "bar " + (s.tone || "")));
   const top = node("div", "top");
   const kick = node("p", "kicker",
+    s.kind === "guide" ? (s.sheet || "With you") :
     s.kind === "title" ? "Notes for the PR" :
     s.kind === "number" ? "Start here" :
     s.kind === "remember" ? "Remember these" :
@@ -5801,8 +5904,25 @@ function render() {{
     if (s.year) slide.appendChild(node("p", "sub", s.year));
     const say = node("div", "say");
     say.appendChild(node("b", "", "For the meeting"));
-    say.appendChild(document.createTextNode("Click to move on. The next slide shows how to read every number. Then we go one line at a time."));
+    say.appendChild(document.createTextNode("Open the Excel file beside this. We go top to bottom: the BUDGET sheet, the RESERVE sheet, then the PQ sheet. Yellow is the only place the meeting types."));
     slide.appendChild(say);
+  }} else if (s.kind === "guide") {{
+    slide.appendChild(node("h1", "", s.title || ""));
+    if (s.lead) slide.appendChild(node("p", "sub", s.lead));
+    (s.steps || []).forEach(function(step) {{
+      const box = node("div", "num");
+      box.style.marginTop = "10px";
+      box.appendChild(node("span", "", step.where || ""));
+      box.appendChild(node("strong", "", step.do || ""));
+      if (step.why) box.appendChild(node("p", "key", step.why));
+      slide.appendChild(box);
+    }});
+    if (s.say) {{
+      const say = node("div", "say");
+      say.appendChild(node("b", "", "Say this"));
+      say.appendChild(document.createTextNode(s.say));
+      slide.appendChild(say);
+    }}
   }} else if (s.kind === "read") {{
     slide.appendChild(node("h1", "", "How to read a line"));
     const nums = node("div", "nums");
@@ -6563,11 +6683,13 @@ If you already know the decision before you download, you can set the same choic
 Do not use **Erase everything** unless you mean to wipe the screen. Download first if you still need the numbers.
 
 ### 20. Notes for the PR
-On **Notes for the PR** the budget is a presentation. Click the picture, or use the arrow keys. One line at a time, in the same order as the sheet.
+On **Notes for the PR** the budget is the meeting, as if you are sitting next to the PR. Click the picture, or use the arrow keys.
 
-The second slide shows how to read a line. The next slides split the levy into running costs and the reserve, then show the lines that went up beside the lines that went down. On the slides the columns say Last year, Next year and Each month. The Excel file still says Actual and Budgeted Yearly. A section with nothing in it is left out. Your Notes are on the slide. A split is shown under the line and is already inside the amount.
+It goes in the same order as the workbook. First the **BUDGET** sheet, from the yellow agreed amount at the top, then each block down the page. Then the **RESERVE** sheet, from the bank balance down to the jobs. Then the **PQ** sheet, so they can see what each unit will pay after the yellow amount is agreed.
 
-**Download the presentation**, open it in the browser, and press F for full screen in the meeting. The Excel sheet is still where a yellow amount is changed.
+Yellow is the only place they type. White cells follow. A pink cell is a shortfall. It is not added again. Typing a lower rand does not make a bill smaller.
+
+**Download the presentation**, open it in the browser, and press F for full screen. The Excel sheet is where the yellow amount is changed. Download a fresh workbook after the app reboots if the PQ columns must show the reserve inside the levy.
             """
         )
 
