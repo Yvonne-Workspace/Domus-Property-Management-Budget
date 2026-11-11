@@ -4806,7 +4806,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                 r["note_edited"] = True
         apply_levy_lines(st.session_state)
         if plan:
-            st.success(f"Saved. Actual is what was spent this year. Next year is the {NOW_YEAR + 1} plan. There is no %.")
+            st.success(f"Saved. Spent last year is what was paid. This year is the {NOW_YEAR} plan. Next year is {NOW_YEAR + 1}. There is no %.")
         else:
             st.success("Saved. A new % sets Budgeted yearly = Actual × (1 + %). A new yearly amount sets the %.")
         st.rerun()
@@ -5629,18 +5629,32 @@ def pr_pack(state: dict) -> dict:
     plan_from_levy = bool(state.get("special_in_ordinary"))
     plan_where = "Paid from the ordinary levy." if plan_from_levy else "Comes out of the reserve, not the ordinary levy."
     for r in s.get("special") or []:
-        if not _line_alive(r):
+        if not _line_alive(r) and float(r.get("this_budget") or 0) < 0.5:
             continue
         actual = float(r.get("actual") or 0)
+        this_plan = float(r.get("this_budget") or 0)
         yearly = float(r.get("yearly") or 0)
+        use_plan = budget_uses_this_plan_year(state)
+        shown_year = this_plan if use_plan else yearly
+        if actual < 0.5 and shown_year < 0.5 and yearly < 0.5:
+            continue
         extra = ""
-        if actual > 0.5 and yearly > 0.5:
-            extra = "Spent this year and planned again next year."
+        if use_plan:
+            if actual > 0.5 and shown_year > 0.5:
+                extra = "Spent last year, and it is on this year's plan."
+            elif actual > 0.5:
+                extra = "Spent last year. Not on this year's plan."
+            elif shown_year > 0.5:
+                extra = "Not spent last year. It is on this year's plan."
+        elif actual > 0.5 and yearly > 0.5:
+            extra = "Spent last year and planned again next year."
         elif actual > 0.5:
-            extra = "Spent this year. Not planned again next year."
+            extra = "Spent last year. Not planned again next year."
         elif yearly > 0.5:
-            extra = "Not spent this year. Planned for next year."
-        line = _one(state, r, plan_where, extra)
+            extra = "Not spent last year. Planned for next year."
+        shown = dict(r)
+        shown["yearly"] = shown_year
+        line = _one(state, shown, plan_where, extra)
         if line:
             reserve_lines.append(line)
     if reserve_lines:
@@ -5648,7 +5662,7 @@ def pr_pack(state: dict) -> dict:
             "title": "Reserve fund budget",
             "lines": reserve_lines,
             "intro": (
-                "Say this. This is the savings for big jobs, not the monthly levy. The bank figure is already there. Do not add this year's contribution into it. The contribution is what we ask for this year. Each job after that is next year's plan."
+                "Say this. This is the savings for big jobs, not the monthly levy. Spent last year is what was paid. This year is the plan. The bank figure is already there. Do not add this year's contribution into it."
             ),
         })
 
@@ -6717,11 +6731,11 @@ Then choose how owners pay it. Pick one:
 
 On Expenditure, Repairs, Personnel or Tax, type a rand in **Funded by reserve** when the reserve pays that line, or only a part of it. Leave it at 0 if the levy pays it. The rand you type leaves the ordinary levy and shows on the reserve sheet.
 
-**Closing reserve balance this year** = opening + this year’s contribution − what was spent.
+**Closing reserve balance, spent last year** = opening + last year’s contribution − what was paid last year.
 
-**Overspent this year** shows when that closing figure is below zero. Example: R18,000 in the bank plus R5,000 collected is R23,000 available. Spend R28,000 and the sheet shows **R5,000 overspent**. Do not type the contribution inside the opening balance as well. That would count it twice.
+**This year** on a 2026/2027 budget uses the 2026 plan, the **Budgeted this year** column. Closing this year = what is left + this year’s contribution − that plan. The 2027 column stays on the list. It is not in this closing balance.
 
-**Next year** starts from what is left, including a minus. Then it adds next year’s contribution and takes off next year’s plan. **Still to be accumulated** is the minus, if there is one.
+**Overspent** shows when a closing figure is below zero. Example: R18,000 in the bank plus R5,000 collected is R23,000 available. The plan is R28,000 and the sheet shows **R5,000 overspent**. Do not type the contribution inside the opening balance as well. That would count it twice.
 
 Interest already sits inside the opening balance. It is not added again. Leave the interest line under Other Income for the tax estimate, and leave **Lowers the ordinary levy** off.
 
@@ -6761,7 +6775,7 @@ If the estimate is R0, nothing is paid. If tax is payable, SARS usually wants pr
 ### 15. Personnel and 10-year projects
 **Personnel** is salaries, casuals, PAYE / UIF, travel, bonuses and the like.
 
-**10 Year Maintenance Projects** do not show on the levy sheet. They are the reserve fund's costs. **GL code** is the WeConnectU code. **Budgeted this year** is what this year's budget allowed. **Actual** is what was spent. **Over / under** is Actual minus Budgeted. Above zero means it cost more than was budgeted. **Next year** is the next column of the 10-year plan. There is no %. Tick **Pay the 10-year projects from the ordinary levy** only when this complex pays the plan from the levy. Then they move onto the levy sheet and off the reserve sheet.
+**10 Year Maintenance Projects** do not show on the levy sheet. They are the reserve fund's costs. **GL code** is the WeConnectU code. **Spent last year** is what was paid. **Budgeted this year** is this year's plan. **Over / under** is spent last year minus that plan. Above zero means it cost more than was planned. **Next year** is 2027. On a 2026/2027 budget it is not in the closing balance. There is no %. Tick **Pay the 10-year projects from the ordinary levy** only when this complex pays the plan from the levy. Then they move onto the levy sheet and off the reserve sheet.
 
 A job you did not do, and that has no amount next year, is not on this list. It stays on the 10-year plan if a later year still has it.
 
@@ -6796,10 +6810,10 @@ Do these steps in this order.
 3. Open **10-year plan**. Upload the Excel, or copy from the row that says **2025  2026  2027** down to the last project and paste it. Every project line comes through, including a line with no amount yet. The app does not add a total, and it does not fill Current estimate unless that column is on your sheet.
 4. To remove a project, click the trash can on that row, then click **Save 10-year plan**. It stays deleted. Click a project name to read the full words. Scroll right for the later years. A note that sat to the right of the years is in the **Note** column.
 5. Open **10-year projects** again.
-   - Done this year and also planned next year: Actual and Next year are both filled.
-   - Done this year only: Actual is filled, Next year is blank. It is not repeated.
-   - Not done this year, but planned next year: Actual is 0, Next year is the plan amount.
-   - **2026** shows as Budgeted this year. **2027** shows as Next year. A later year does not come onto this tab.
+   - Paid last year and also on this year's plan: both amounts are filled.
+   - Paid last year only: Spent last year is filled, Budgeted this year is blank.
+   - Not paid last year, but on this year's plan: Spent last year is 0, Budgeted this year is the plan.
+   - **2026** is **Budgeted this year**. That is **This year** at the top of the reserve sheet. **2027** is **Next year**. It stays on the list and is not in the closing balance.
 6. On **10-year projects**, a line you type stays, even if it is not on the plan. Click the note, change it or delete it, then **Save this section**. A blank note stays blank. Saving the 10-year plan does not remove a line you added.
 7. Leave **Pay the 10-year projects from the ordinary levy** unticked. The reserve pays these jobs.
 
@@ -6840,7 +6854,7 @@ Do not use **Erase everything** unless you mean to wipe the screen. Download fir
 ### 20. Notes for the PR
 On **Notes for the PR** the budget is the meeting, as if you are sitting next to the PR. Click the picture, or use the arrow keys.
 
-It goes in the same order as the workbook, and the sheet itself is on the slides. Excel does not have to be open during the meeting. First the **BUDGET** sheet, including the yellow agreed amount at the top. Then the **RESERVE** sheet. Then the **PQ** sheet, every unit. Excel is used afterwards, only to type the yellow number they agreed.
+It goes in the same order as the workbook, and the sheet itself is on the slides. Excel does not have to be open during the meeting. First the **BUDGET** sheet, including the yellow agreed amount at the top. Then the **RESERVE** sheet. **Spent last year** is what was paid. **This year** is the 2026 plan. The 2027 column is on the list and is not in the closing balance. Then the **PQ** sheet, every unit. If the reserve is inside the levy, the PQ shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added. Excel is used afterwards, only to type the yellow number they agreed.
 
 Yellow is the only place they type. White cells follow. A pink cell is a shortfall. It is not added again. Typing a lower rand does not make a bill smaller.
 
@@ -7383,7 +7397,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             "First cycle is the year the job starts, for example 2025. Leave it blank if the rands are already in the year columns. "
             "Frequency is not a year. 10 means every 10 years. 3 means every 3 years. Leave it blank if the years are already filled. "
             "Current estimate is the whole project cost, if you have one. It is not 2026 and not 2027. "
-            f"The {NOW_YEAR + 1} column is next year. It goes to 10 Year Maintenance Projects. Actual stays what was spent this year. There is no %."
+            f"The {NOW_YEAR + 1} column is next year. It stays on the list. On a {NOW_YEAR} budget it is not in the closing balance. Spent last year is what was paid. There is no %."
         )
         ymp_up = st.file_uploader("Upload 10-year plan Excel (or last year’s budget workbook)", type=["xlsx", "xls"], key="ymp_xlsx")
         if ymp_up and st.button("Load 10-year plan"):
