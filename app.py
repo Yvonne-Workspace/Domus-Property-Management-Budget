@@ -5169,6 +5169,81 @@ def _section(title: str, lines: list, intro: str = "") -> dict | None:
     return {"title": title, "lines": lines, "intro": intro}
 
 
+def _equal_units(state: dict) -> int:
+    rows = state.get("pq") or []
+    if len(rows) < 2:
+        return 0
+    quotas = []
+    for row in rows:
+        quotas.append(float(row.get("PQ") or row.get("pq") or 0))
+    if max(quotas) - min(quotas) > 0.0005:
+        return 0
+    return len(rows)
+
+
+def _levy_story(state: dict, current_m: float) -> dict:
+    """Split the new levy into running costs and a reserve that is hidden inside it."""
+    units = _equal_units(state)
+    total = ordinary_total(state)
+    reserve = reserve_contribution(state) if reserve_inside_levy(state) else 0.0
+    costs = max(0.0, total - reserve)
+    levy_m = total / 12.0
+    costs_m = costs / 12.0
+    reserve_m = reserve / 12.0
+    inside = reserve > 0.5
+    if inside:
+        say = (
+            f"Do not stop at the one bigger levy. The running costs are {money(costs_m)} a month for the whole complex. "
+            f"The reserve inside that number is {money(reserve_m)} a month. They have not been paying a reserve, and there is no second line, so it looks like one increase."
+        )
+        if units and current_m > 0:
+            say += (
+                f" One unit pays {money(current_m / units)} now. "
+                f"Next year that unit pays {money(levy_m / units)}. "
+                f"Of that, {money(costs_m / units)} is the costs and {money(reserve_m / units)} is the reserve."
+            )
+    else:
+        own = reserve_contribution(state)
+        say = (
+            f"The ordinary levy is only the running costs, {money(costs_m)} a month for the whole complex. "
+            f"The reserve is its own line, {money(own / 12.0)} a month. It is not inside the levy."
+        )
+    shifts = []
+    for key in ("municipal", "expenditure", "rm", "personnel", "tax"):
+        for r in (state.get("sections") or {}).get(key) or []:
+            if key == "municipal" and is_muni_recovery(r.get("desc") or "", r.get("is_recovery")):
+                continue
+            actual = float(r.get("actual") or 0)
+            yearly = line_in_levy(state, r) if key != "municipal" else float(r.get("yearly") or 0)
+            delta = yearly - actual
+            if abs(delta) < 500:
+                continue
+            shifts.append({
+                "name": (r.get("desc") or "Line").strip(),
+                "delta": delta,
+                "tone": "up" if delta > 0 else "down",
+                "words": ("Up " if delta > 0 else "Down ") + (
+                    f"{money(abs(delta) / 12.0 / units)} a month, one unit"
+                    if units else f"{money(abs(delta) / 12.0)} a month, the whole complex"
+                ),
+            })
+    shifts.sort(key=lambda x: abs(x["delta"]), reverse=True)
+    ups = [x for x in shifts if x["delta"] > 0][:4]
+    downs = [x for x in shifts if x["delta"] < 0][:3]
+    shown = []
+    for x in ups + downs:
+        shown.append({"name": x["name"], "tone": x["tone"], "words": x["words"]})
+    return {
+        "inside": inside,
+        "now": money(current_m),
+        "costs": money(costs_m),
+        "reserve": money(reserve_m),
+        "levy": money(levy_m),
+        "say": say,
+        "shifts": shown,
+    }
+
+
 def pr_pack(state: dict) -> dict:
     """Line-by-line notes for the PR. A section with nothing in it is left out."""
     s = state.get("sections") or {}
@@ -5476,6 +5551,7 @@ def pr_pack(state: dict) -> dict:
         "year_new": money(approved),
         "diff": diff_words,
         "banner": banner,
+        "why": _levy_story(state, current_m),
         "remember": [
             {"name": x["name"], "headline": x.get("headline") or x.get("change") or "", "tone": x.get("tone") or "same"}
             for x in movers[:3]
@@ -5499,6 +5575,11 @@ def pr_slides(pack: dict) -> list:
             "year_new": pack.get("year_new") or "",
         },
     ]
+    why = pack.get("why") or {}
+    if why.get("say"):
+        slides.append({"kind": "why", **{k: why[k] for k in ("inside", "now", "costs", "reserve", "levy", "say")}})
+    if why.get("shifts"):
+        slides.append({"kind": "shifts", "items": why["shifts"]})
     if pack.get("remember"):
         slides.append({"kind": "remember", "items": pack["remember"]})
     for sec in pack["sections"]:
@@ -5720,8 +5801,37 @@ function render() {{
     slide.appendChild(nums);
     const say = node("div", "say");
     say.appendChild(node("b", "", "Say this"));
-    say.appendChild(document.createTextNode("This is the monthly levy only. What they pay now is " + s.year_now + " for the year. This budget is " + s.year_new + " for the year. Savings for big jobs are on a later slide."));
+    say.appendChild(document.createTextNode("This is the monthly levy only. The next slide splits it into running costs and reserve, so the increase is not one lump."));
     slide.appendChild(say);
+  }} else if (s.kind === "why") {{
+    slide.appendChild(node("h1", "", s.inside ? "The levy is two things" : "The levy is only the costs"));
+    const nums = node("div", "nums");
+    const boxes = s.inside
+      ? [["Running costs", s.costs + " a month"], ["Reserve inside the levy", s.reserve + " a month"], ["Owners are asked", s.levy + " a month"]]
+      : [["Owners pay now", s.now + " a month"], ["Running costs", s.costs + " a month"], ["Reserve, its own line", "Not in this levy"]];
+    boxes.forEach(function(pair) {{
+      const box = node("div", "num");
+      box.appendChild(node("span", "", pair[0]));
+      box.appendChild(node("strong", "", pair[1]));
+      nums.appendChild(box);
+    }});
+    slide.appendChild(nums);
+    const say = node("div", "say");
+    say.appendChild(node("b", "", "Say this"));
+    say.appendChild(document.createTextNode(s.say || ""));
+    slide.appendChild(say);
+  }} else if (s.kind === "shifts") {{
+    slide.appendChild(node("h1", "", "Say the ups with the downs"));
+    slide.appendChild(node("p", "sub", "A big new cost often has a saving next to it. Read them together."));
+    (s.items || []).forEach(function(it) {{
+      const box = node("div", "num");
+      box.style.marginTop = "10px";
+      box.appendChild(node("span", "", it.name));
+      const h = node("strong", "", it.words);
+      h.style.color = it.tone === "down" ? "#9a3412" : "#0d6b45";
+      box.appendChild(h);
+      slide.appendChild(box);
+    }});
   }} else if (s.kind === "remember") {{
     slide.appendChild(node("h1", "", "The lines that moved the most"));
     (s.items || []).forEach(function(it) {{
@@ -6424,7 +6534,7 @@ Do not use **Erase everything** unless you mean to wipe the screen. Download fir
 ### 20. Notes for the PR
 On **Notes for the PR** the budget is a presentation. Click the picture, or use the arrow keys. One line at a time, in the same order as the sheet.
 
-The second slide shows how to read a line: last year, next year in yellow, and each month. Then the number to remember, the lines that moved, and each line. On the slides the columns say Last year, Next year and Each month. The Excel file still says Actual and Budgeted Yearly. A section with nothing in it is left out. Your Notes are on the slide. A split is shown under the line and is already inside the amount.
+The second slide shows how to read a line. The next slides split the levy into running costs and the reserve, then show the lines that went up beside the lines that went down. On the slides the columns say Last year, Next year and Each month. The Excel file still says Actual and Budgeted Yearly. A section with nothing in it is left out. Your Notes are on the slide. A split is shown under the line and is already inside the amount.
 
 **Download the presentation**, open it in the browser, and press F for full screen in the meeting. The Excel sheet is still where a yellow amount is changed.
             """
