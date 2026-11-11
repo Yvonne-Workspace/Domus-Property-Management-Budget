@@ -3007,6 +3007,34 @@ def generate_excel(state: dict) -> BytesIO:
         sheet.page_margins.left = 0.45
         sheet.page_margins.right = 0.45
         sheet.page_margins.top = 0.4
+        if state.get("show_estimate_note"):
+            months = int(state.get("actual_months") or 0)
+            if months < 1 or months > 11:
+                months = 10
+            left = 12 - months
+            sheet.merge_cells("H1:L3")
+            box = sheet["H1"]
+            box.value = (
+                "ACTUALS ARE ESTIMATES\n"
+                f"The Actual totals are estimates. Only {months} months of figures were available. "
+                f"The remaining {left} months may still change these totals."
+            )
+            box.font = Font(name="Calibri", bold=True, size=18, color="7A1F1F")
+            box.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+            edge = Border(
+                left=Side(style="medium", color="9C0006"),
+                right=Side(style="medium", color="9C0006"),
+                top=Side(style="medium", color="9C0006"),
+                bottom=Side(style="medium", color="9C0006"),
+            )
+            shade = PatternFill("solid", fgColor="FFF3C4")
+            for row in range(1, 4):
+                for col in range(8, 13):
+                    cell = sheet.cell(row, col)
+                    cell.border = edge
+                    cell.fill = shade
+            box.font = Font(name="Calibri", bold=True, size=18, color="7A1F1F")
+            box.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
         sheet.page_margins.bottom = 0.45
         sheet.page_margins.footer = 0.28
 
@@ -6828,7 +6856,7 @@ The names do not have to be identical. Sand beds, tree felling, windows, stairca
 ### 18. The meeting
 You prepare the budget. The trustees decide in the meeting.
 
-**Download Excel** on the Download tab. Tick **Include the % column** only when this complex wants the % shown, then click **Build Excel file**. **BUDGET** is the levy. **RESERVE** is the reserve fund. **PQ** is the invoice. **EACH UNIT** is what each owner pays, split into common-property municipal, expenditure, repairs and the rest. **10 YMP** is the plan.
+**Download Excel** on the Download tab. Tick **Include the % column** only when this complex wants the % shown. Tick **Actuals are estimates** when the Actual column is not a full 12 months. The notice sits in a large box to the right of the logo and says how many months were used. Then click **Build Excel file**. **BUDGET** is the levy. **RESERVE** is the reserve fund. **PQ** is the invoice. **EACH UNIT** is what each owner pays, split into common-property municipal, expenditure, repairs and the rest. **10 YMP** is the plan.
 
 The % on the sheet follows the yellow rand. It does not drive the rand. The meeting still agrees a rand on **Agreed increase**, not a %.
 
@@ -7525,15 +7553,26 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             key="show_pct",
             help="Shows the % next to each line. It is worked out from Actual and Budgeted yearly. Changing the yellow rand changes the %. Typing a % does not change the rand.",
         )
+        st.checkbox(
+            "Actuals are estimates — show the notice next to the logo",
+            key="show_estimate_note",
+            help="Adds a large notice on the sheets. It says the Actual totals are estimates, using the months typed on the left. Ten months means the next two months may still change the totals.",
+        )
         if not st.session_state.complex_name:
             st.warning("Type the complex name in the sidebar first.")
         elif st.button("Build Excel file", type="primary"):
             xls = generate_excel(st.session_state)
             st.session_state["xlsx"] = xls.getvalue()
             st.session_state["_xlsx_pct"] = bool(st.session_state.get("show_pct"))
-        if st.session_state.get("xlsx") and st.session_state.get("_xlsx_pct") != bool(st.session_state.get("show_pct")):
-            st.info("The % tick changed. Click Build Excel file again, then download.")
-        elif st.session_state.get("xlsx"):
+            st.session_state["_xlsx_note"] = bool(st.session_state.get("show_estimate_note"))
+        built = st.session_state.get("xlsx")
+        stale = built and (
+            st.session_state.get("_xlsx_pct") != bool(st.session_state.get("show_pct"))
+            or st.session_state.get("_xlsx_note") != bool(st.session_state.get("show_estimate_note"))
+        )
+        if stale:
+            st.info("A tick changed. Click Build Excel file again, then download.")
+        elif built:
             name = re.sub(r"\s+", "_", st.session_state.complex_name)
             st.download_button(
                 "Download budget Excel",
