@@ -3577,6 +3577,7 @@ def generate_excel(state: dict) -> BytesIO:
     pq["A1"].font = Font(bold=True, size=14, color=NAVY)
     pq["A2"] = state.get("complex_name") or ""
     bills = pq_bill_lines(state)
+    inside = reserve_inside_levy(state) and reserve_contribution(state) > 0.5 and bool(levy_rows.get("reserve"))
     pq["B3"] = "Monthly"
     name_to_budget = {
         "Levies": f"BUDGET!G{approved_row}" if approved_row else (f"BUDGET!G{levy_rows['ordinary']}" if levy_rows.get("ordinary") else None),
@@ -3592,18 +3593,29 @@ def generate_excel(state: dict) -> BytesIO:
         if name in named_rows and name not in name_to_budget:
             name_to_budget[name] = f"BUDGET!G{named_rows[name]}"
     count_bills = [(n, y, s) for n, y, s in bills if s == "count"]
+    will_col = 7 if inside else 5
+    change_col = will_col + 1
+    ordinary_col = 5 if inside else None
+    reserve_split_col = 6 if inside else None
     count_col = {}
     for j, (name, _y, _s) in enumerate(count_bills):
-        count_col[name] = 7 + j
-    bill_start = 7 + len(count_bills)
-    headers = ["#", "Unit", "PQ", "Paid last year", "Will pay this year", "Change"]
+        count_col[name] = change_col + 1 + j
+    bill_start = change_col + 1 + len(count_bills)
+    headers = ["#", "Unit", "PQ", "Paid last year"]
+    if inside:
+        headers += ["Ordinary levy", "Reserve fund"]
+    headers += ["Will pay this year", "Change"]
     headers += [("Boathouse no." if facility_kind(n) == "boathouse" else "Boatport no.") for n, _y, _s in count_bills]
     headers += [n for n, _, _s in bills] + ["Total"]
     for i, h in enumerate(headers, 1):
         cell = pq.cell(6, i, h)
         fill(cell, NAVY)
         cell.font = Font(bold=True, color="FFFFFF")
-    pq["A3"] = "Ordinary levy only. These two columns are not in the Total."
+    pq["A3"] = (
+        "Ordinary levy and Reserve fund are the two parts. Will pay this year is those two added. That is the one levy. Those columns are not in the Total again."
+        if inside else
+        "Ordinary levy only. These two columns are not in the Total."
+    )
     pq["A3"].font = Font(italic=True, size=9, color="666666")
     for j, (name, yearly, split) in enumerate(bills):
         col = bill_start + j
@@ -3629,15 +3641,25 @@ def generate_excel(state: dict) -> BytesIO:
         pq.cell(5, col).font = Font(italic=True, size=8, color="666666")
     levy_col = bill_start + next((j for j, (name, _, _) in enumerate(bills) if name == "Levies"), 0)
     levy_letter = get_column_letter(levy_col)
+    will_letter = get_column_letter(will_col)
     inp(pq.cell(4, 4), float(state.get("current_monthly_levy") or 0), MONEY)
     pq.cell(5, 4, "whole complex, last year")
     pq.cell(5, 4).font = Font(italic=True, size=8, color="666666")
-    fml(pq.cell(4, 5), f"{levy_letter}4")
-    pq.cell(5, 5, "whole complex, this year")
-    pq.cell(5, 5).font = Font(italic=True, size=8, color="666666")
-    fml(pq.cell(4, 6), "E4-D4")
-    pq.cell(5, 6, "this year − last year")
-    pq.cell(5, 6).font = Font(italic=True, size=8, color="666666")
+    if inside:
+        fml(pq.cell(4, reserve_split_col), f"BUDGET!G{levy_rows['reserve']}")
+        fml(pq.cell(4, ordinary_col), f"{levy_letter}4-{get_column_letter(reserve_split_col)}4")
+        pq.cell(5, ordinary_col, "running costs, this year")
+        pq.cell(5, reserve_split_col, "inside the levy, this year")
+        for col in (ordinary_col, reserve_split_col):
+            pq.cell(5, col).font = Font(italic=True, size=8, color="666666")
+        fml(pq.cell(4, will_col), f"{get_column_letter(ordinary_col)}4+{get_column_letter(reserve_split_col)}4")
+    else:
+        fml(pq.cell(4, will_col), f"{levy_letter}4")
+    pq.cell(5, will_col, "whole complex, this year")
+    pq.cell(5, will_col).font = Font(italic=True, size=8, color="666666")
+    fml(pq.cell(4, change_col), f"{will_letter}4-D4")
+    pq.cell(5, change_col, "this year − last year")
+    pq.cell(5, change_col).font = Font(italic=True, size=8, color="666666")
     units = state.get("pq") or [{"Unit": "UNIT-1", "PQ": 1.0}]
     n_units = max(len(units), 1)
     last_u = 6 + len(units)
@@ -3648,8 +3670,13 @@ def generate_excel(state: dict) -> BytesIO:
         pq.cell(rr, 2, str(u.get("Unit", "")))
         pq.cell(rr, 3, float(u.get("PQ") or 0)).number_format = "0.000000"
         fml(pq.cell(rr, 4), f"$C{rr}*D$4")
-        fml(pq.cell(rr, 5), f"{levy_letter}{rr}")
-        fml(pq.cell(rr, 6), f"E{rr}-D{rr}")
+        if inside:
+            fml(pq.cell(rr, ordinary_col), f"$C{rr}*{get_column_letter(ordinary_col)}$4")
+            fml(pq.cell(rr, reserve_split_col), f"$C{rr}*{get_column_letter(reserve_split_col)}$4")
+            fml(pq.cell(rr, will_col), f"{get_column_letter(ordinary_col)}{rr}+{get_column_letter(reserve_split_col)}{rr}")
+        else:
+            fml(pq.cell(rr, will_col), f"{levy_letter}{rr}")
+        fml(pq.cell(rr, change_col), f"{will_letter}{rr}-D{rr}")
         for name, _y, _s in count_bills:
             col = count_col[name]
             cell = pq.cell(rr, col, facility_qty(state, facility_kind(name) or "", u.get("Unit")))
@@ -3667,7 +3694,7 @@ def generate_excel(state: dict) -> BytesIO:
                 cl = get_column_letter(count_col[name])
                 pq.cell(rr, col, f"=IF(SUM({cl}$7:{cl}${last_u})=0,0,{cl}{rr}/SUM({cl}$7:{cl}${last_u})*{letter}$4)").number_format = MONEY
             elif split == "csos":
-                pq.cell(rr, col, f"=MIN(40,MAX(0,({levy_letter}{rr}-500)*0.02))").number_format = MONEY
+                pq.cell(rr, col, f"=MIN(40,MAX(0,({will_letter}{rr}-500)*0.02))").number_format = MONEY
             else:
                 pq.cell(rr, col, f"=$C{rr}*{letter}$4").number_format = MONEY
         if bills:
@@ -3683,7 +3710,7 @@ def generate_excel(state: dict) -> BytesIO:
     pq.cell(tot_row, 2, "TOTAL")
     pq.cell(tot_row, 3, f"=SUM(C7:C{last_u})")
     pq.cell(tot_row, 3).number_format = "0.000000"
-    for col in range(4, 7):
+    for col in range(4, change_col + 1):
         letter = get_column_letter(col)
         pq.cell(tot_row, col, f"=SUM({letter}7:{letter}{last_u})").number_format = MONEY
     for name, _y, _s in count_bills:
@@ -3704,7 +3731,9 @@ def generate_excel(state: dict) -> BytesIO:
     pq.column_dimensions["C"].width = 14
     pq.column_dimensions["D"].width = 18
     pq.column_dimensions["E"].width = 20
-    pq.column_dimensions["F"].width = 14
+    pq.column_dimensions["F"].width = 18
+    pq.column_dimensions["G"].width = 20
+    pq.column_dimensions["H"].width = 14
     pq.row_dimensions[1].height = 64
     brand(pq)
 
@@ -6468,6 +6497,8 @@ Upload the unit file in the sidebar or on **PQ / Levies**. If the PQ column is 0
 
 The **PQ** sheet is the invoice: Levies, Reserve, CSOS, Insurance and any fixed charge. Each owner’s levy share = their PQ × the monthly total. A fixed charge (garden, private refuse) is the same rand for every unit.
 
+If **Added into the ordinary levy** is chosen, the PQ tab shows **Ordinary levy** and **Reserve fund** as two amounts. **Will pay this year** is those two added. That is the one levy on the invoice. There is still no separate reserve line.
+
 **EACH UNIT** is a separate sheet. It does not change the PQ sheet. One row per unit, in rands a month:
 
 - Municipal — common property. This is the city bill for the complex after owners have paid their own electricity and water. It is not their home's municipal account.
@@ -7008,11 +7039,24 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 prev["Total monthly"] = prev[extra_cols].sum(axis=1)
             current_m = float(st.session_state.get("current_monthly_levy") or 0)
             new_ordinary_m = approved_ordinary(st.session_state) / 12.0
+            inside = reserve_inside_levy(st.session_state) and reserve_contribution(st.session_state) > 0.5
+            reserve_m = reserve_contribution(st.session_state) / 12.0 if inside else 0.0
             prev["Paid last year"] = prev["PQ"].astype(float) * current_m
-            prev["Will pay this year"] = prev["PQ"].astype(float) * new_ordinary_m
+            if inside:
+                prev["Ordinary levy"] = prev["PQ"].astype(float) * (new_ordinary_m - reserve_m)
+                prev["Reserve fund"] = prev["PQ"].astype(float) * reserve_m
+                prev["Will pay this year"] = prev["Ordinary levy"] + prev["Reserve fund"]
+                extra_cols = [c for c in extra_cols if c != "Levies"]
+            else:
+                prev["Will pay this year"] = prev["PQ"].astype(float) * new_ordinary_m
             prev["Change"] = prev["Will pay this year"] - prev["Paid last year"]
-            ordered = ["Unit", "PQ", "Paid last year", "Will pay this year", "Change"] + extra_cols
-            if extra_cols:
+            if inside:
+                ordered = ["Unit", "PQ", "Paid last year", "Ordinary levy", "Reserve fund", "Will pay this year", "Change"] + extra_cols
+            else:
+                ordered = ["Unit", "PQ", "Paid last year", "Will pay this year", "Change"] + extra_cols
+            if extra_cols or inside:
+                parts = (["Will pay this year"] if inside else []) + extra_cols
+                prev["Total monthly"] = prev[parts].sum(axis=1) if parts else 0.0
                 ordered.append("Total monthly")
             prev = prev[ordered]
             show = prev.copy()
@@ -7020,8 +7064,14 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 show.columns = _dedupe_headers([str(c) for c in show.columns])
             if "PQ" in show.columns:
                 show["PQ"] = show["PQ"].astype(float).round(6)
-            for c in ["Paid last year", "Will pay this year", "Change"] + extra_cols + (["Total monthly"] if extra_cols else []):
-                show[c] = show[c].astype(float).round(2)
+            money_cols = ["Paid last year", "Will pay this year", "Change"] + extra_cols
+            if inside:
+                money_cols += ["Ordinary levy", "Reserve fund", "Total monthly"]
+            elif extra_cols:
+                money_cols.append("Total monthly")
+            for c in money_cols:
+                if c in show.columns:
+                    show[c] = show[c].astype(float).round(2)
             st.dataframe(show, use_container_width=True, hide_index=True)
             levy_sum = sum(float(y or 0) for _, y, _s in bills)
             if levy_sum < 1:
@@ -7033,7 +7083,14 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             else:
                 st.caption("Monthly column totals: " + " · ".join(f"{n} {money(y/12)}" for n, y, _s in bills))
             st.caption(f"{len(prev)} units. PQ total {float(prev['PQ'].sum()):.6f} (should be about 1.000).")
-            if current_m > 0.5:
+            if inside:
+                st.caption(
+                    f"The reserve is inside the levy. Ordinary levy is {money(new_ordinary_m - reserve_m)} a month. "
+                    f"Reserve fund is {money(reserve_m)} a month. "
+                    f"Will pay this year is those two added: {money(new_ordinary_m)} a month for the whole complex. "
+                    "That is the one levy. It is not a second charge."
+                )
+            elif current_m > 0.5:
                 st.caption(
                     f"Paid last year is the ordinary levy only ({money(current_m)} for the whole complex). "
                     f"Will pay this year is the new ordinary levy only ({money(new_ordinary_m)} for the whole complex). "
