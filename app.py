@@ -3460,7 +3460,7 @@ def generate_excel(state: dict) -> BytesIO:
     tax_tot = tot("TOTAL TAX", a, b)
     if state.get("special_in_ordinary"):
         bar("10 YEAR MAINTENANCE PROJECTS")
-        labs = ["Description", "GL Code", "Spent this year", "", "Next year", "Monthly", "Comments / Notes"]
+        labs = ["Description", "GL Code", "Spent last year", "", "Next year", "Monthly", "Comments / Notes"]
         for i, lab in enumerate(labs, 2):
             c = ws.cell(r, i, lab)
             fill(c, NAVY)
@@ -3913,14 +3913,14 @@ def generate_excel(state: dict) -> BytesIO:
     brand(res)
     use_this_plan = budget_uses_this_plan_year(state)
     res["B6"] = (
-        f"Spent this year is what was paid. This budget uses the {NOW_YEAR} plan, the Budgeted this year column. "
+        f"Spent last year is what was paid. This year uses the {NOW_YEAR} plan, the Budgeted this year column. "
         f"That total is the maintenance line at the top. The {NOW_YEAR + 1} column is later. It is not in this closing balance."
         if use_this_plan else
-        "Spent this year is what was paid. Next year is the next column of the 10-year plan. There is no %. A job with no spend and nothing next year stays on the 10-year plan only."
+        "Spent last year is what was paid. Next year is the next column of the 10-year plan. There is no %. A job with no spend and nothing next year stays on the 10-year plan only."
     )
     res["B6"].font = Font(italic=True, size=9, color="666666")
-    res["D7"] = "This year"
-    res["F7"] = "This budget" if use_this_plan else "Next year"
+    res["D7"] = "Spent last year"
+    res["F7"] = "This year" if use_this_plan else "Next year"
     for col in (4, 6):
         res.cell(7, col).font = Font(bold=True, size=10, color=NAVY)
         res.cell(7, col).alignment = Alignment(horizontal="right")
@@ -3954,7 +3954,7 @@ def generate_excel(state: dict) -> BytesIO:
     fml(res.cell(close_row, 6), "+".join(in_next) + f"-F{maint_summary}", TOTAL)
     fml(res["F8"], f"D{close_row}")
     over_row = close_row + 1
-    res.cell(over_row, 2, "Overspent this year (D) and still to be accumulated next year (F)")
+    res.cell(over_row, 2, "Overspent last year (D) and still to be accumulated this year (F)" if use_this_plan else "Overspent this year (D) and still to be accumulated next year (F)")
     fml(res.cell(over_row, 4), f"MAX(0,-D{close_row})", RED)
     fml(res.cell(over_row, 6), f"MAX(0,-F{close_row})", RED)
     res.cell(8, 8, "Opening is the bank balance now. Do not include this year's contribution in that figure. Contribution is the next line. A special levy for the reserve is its own line. Next year's opening is what is left after this year.")
@@ -3983,7 +3983,7 @@ def generate_excel(state: dict) -> BytesIO:
         plan_title += 1
     res.cell(plan_title, 2, "10 YEAR MAINTENANCE PROJECTS").font = Font(bold=True, size=12, color=NAVY)
     plan_hdr = plan_title + 1
-    for col, lab in enumerate(["Description", "GL Code", "Spent this year", "Budgeted this year", "Next year", "Monthly", "Comments / Notes"], 2):
+    for col, lab in enumerate(["Description", "GL Code", "Spent last year", "Budgeted this year", "Next year", "Monthly", "Comments / Notes"], 2):
         c = res.cell(plan_hdr, col, lab)
         fill(c, NAVY)
         c.font = Font(bold=True, color="FFFFFF", size=10)
@@ -4028,11 +4028,11 @@ def generate_excel(state: dict) -> BytesIO:
             if allowed < 0.5 and spent < 0.5:
                 note = f"Planned for {NOW_YEAR + 1}."
             elif spent - allowed > 0.5:
-                note = "Overspent. Spent is higher than what was budgeted this year."
+                note = "Overspent. Spent last year is higher than what was budgeted."
             elif allowed - spent > 0.5:
-                note = "Under budget. Not all of this year's budget was spent."
+                note = "Under budget. Not all of last year's budget was spent."
             else:
-                note = "Spent this year, in line with the budget."
+                note = "Spent last year, in line with the budget."
             res.cell(rr, 8, note).font = Font(italic=True, size=9, color="1F4E79")
             plan_rows.append(rr)
             maint_rows.append(rr)
@@ -4055,7 +4055,7 @@ def generate_excel(state: dict) -> BytesIO:
     for n in plan_rows:
         fml(res.cell(n, 7), f"F{n}/12")
     if maint_rows:
-        res.cell(rr, 2, "Over / under this year (spent minus budgeted)").font = Font(bold=True, color="9C0006")
+        res.cell(rr, 2, "Over / under (spent last year minus budgeted this year)").font = Font(bold=True, color="9C0006")
         fml(res.cell(rr, 4), "+".join(f"D{n}" for n in maint_rows), RED)
         fml(res.cell(rr, 5), "+".join(f"E{n}" for n in maint_rows), RED)
         fml(res.cell(rr, 9), f"D{rr}-E{rr}", RED)
@@ -5339,13 +5339,13 @@ def _pr_grids(state: dict, approved: float, current_m: float) -> dict:
     spent = sum(float(r.get("actual") or 0) for r in (state.get("sections") or {}).get("special") or [])
     if budget_uses_this_plan_year(state):
         nxt = sum(float(r.get("this_budget") or 0) for r in (state.get("sections") or {}).get("special") or [])
-        plan_note = f"The {NOW_YEAR} plan, from Budgeted this year. It is in the closing balance."
+        plan_note = f"The {NOW_YEAR} plan, from Budgeted this year. It is in this year's closing balance."
     else:
         nxt = sum(max(0.0, float(r.get("yearly") or 0)) for r in (state.get("sections") or {}).get("special") or [])
         plan_note = "What was spent, and what the plan costs next year."
     close_d = opening + last_r - spent
     close_f = close_d + reserve - nxt
-    reserve_grid = {"headers": ["", "This year", "This budget" if budget_uses_this_plan_year(state) else "Next year", "What to do"], "rows": [
+    reserve_grid = {"headers": ["", "Spent last year", "This year" if budget_uses_this_plan_year(state) else "Next year", "What to do"], "rows": [
         {"cells": [_cell("Opening reserve balance"), _cell(money(opening), num=True, yellow=True), _cell(money(close_d), num=True), _cell("Yellow only if the bank figure is wrong.")]},
         {"cells": [_cell("Reserve contributions"), _cell(money(last_r), num=True), _cell(money(reserve), num=True), _cell("Next year follows the yellow reserve.")]},
         {"cells": [_cell("Maintenance plan expenditure"), _cell(money(spent), num=True), _cell(money(nxt), num=True), _cell(plan_note)]},
@@ -5795,11 +5795,11 @@ def pr_slides(pack: dict) -> list:
                 [
                     {"where": "Opening reserve balance", "do": "Yellow only if the bank figure is wrong.", "why": "Money in the reserve account now. Do not include this year’s contribution in it."},
                     {"where": "Reserve contributions", "do": "White. It follows the yellow reserve on the BUDGET sheet.", "why": reserve_where},
-                    {"where": "Maintenance plan expenditure", "do": "White.", "why": f"For a {NOW_YEAR} budget this is the {NOW_YEAR} plan, the Budgeted this year column, added up. The {NOW_YEAR + 1} column is later and is not in the closing balance."},
+                    {"where": "Maintenance plan expenditure", "do": "White.", "why": f"For a {NOW_YEAR} budget this is the {NOW_YEAR} plan, added up under This year. Spent last year is what was paid. The {NOW_YEAR + 1} column is later and is not in the closing balance."},
                     {"where": "Closing reserve balance", "do": "White.", "why": "Opening, plus contributions, minus the plan."},
                     {"where": "Overspent", "do": "Pink, if it is above zero.", "why": "The fund is short. It is not added again."},
                 ],
-                "Then go down the list of jobs. Spent this year is what was paid. Next year is the plan. A job with nothing in either year is not on this list.",
+                "Then go down the list of jobs. Spent last year is what was paid. This year is the plan. A job with nothing in either year is not on this list.",
             ))
             reserve_grid = (pack.get("grids") or {}).get("reserve") or {}
             if reserve_grid.get("rows"):
@@ -6792,7 +6792,7 @@ Boathouse and boatport stay on the budget, under Levy Income. They move with the
 Do these steps in this order.
 
 1. On the left, choose the WeConnectU **Actual vs Budget** file and click **Load Excel**.
-2. Open **10-year projects**. A **2026** project shows as **Budgeted this year**. A **2027** project shows as **Next year**. A later year stays on the plan. On a **2026/2027** budget, the reserve sheet uses the **2026** total at the top. That is **Maintenance plan expenditure** under **This budget**. The 2027 column stays on the list. It is not in the closing balance. To add a project that is not on the plan, type it on a new row, enter the amount, and click **Save this section**. It stays, and it is written onto the plan. A total line is not a project.
+2. Open **10-year projects**. **Spent last year** is what was paid. **Budgeted this year** is the plan for this year. A **2027** amount shows as **Next year**. A later year stays on the plan. On a **2026/2027** budget, the reserve sheet uses the **2026** total at the top, under **This year**. The 2027 column stays on the list. It is not in the closing balance. To add a project that is not on the plan, type it on a new row, enter the amount, and click **Save this section**. It stays, and it is written onto the plan. A total line is not a project.
 3. Open **10-year plan**. Upload the Excel, or copy from the row that says **2025  2026  2027** down to the last project and paste it. Every project line comes through, including a line with no amount yet. The app does not add a total, and it does not fill Current estimate unless that column is on your sheet.
 4. To remove a project, click the trash can on that row, then click **Save 10-year plan**. It stays deleted. Click a project name to read the full words. Scroll right for the later years. A note that sat to the right of the years is in the **Note** column.
 5. Open **10-year projects** again.
@@ -7246,7 +7246,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         section_form(
             "special",
             "10 Year Maintenance Projects",
-            f"Actual is what was spent this year. Budgeted this year is what the current budget allowed, so Actual minus that shows an overspend. "
+            f"Spent last year is what was paid. Budgeted this year is the plan for this year, so spent last year minus that shows an overspend. "
             f"A 2026 project is this year. Next year is only the {NOW_YEAR + 1} column. A later year stays on the 10-year plan. "
             "This year and next year are on this list. A later year is not. Leave the sidebar tick off if the reserve pays these jobs.",
             plan=True,
