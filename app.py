@@ -5273,6 +5273,79 @@ def _levy_story(state: dict, current_m: float) -> dict:
     }
 
 
+def _cell(text, yellow=False, num=False, pink=False) -> dict:
+    return {"t": text, "yellow": bool(yellow), "num": bool(num), "pink": bool(pink)}
+
+
+def _pr_grids(state: dict, approved: float, current_m: float) -> dict:
+    """The three sheets, drawn into the presentation so Excel does not have to be open."""
+    costs = ordinary_total(state)
+    actual = ordinary_actual(state)
+    increase = costs - actual if actual > 0.5 else costs
+    agreed_levy = approved
+    agreed_increase = agreed_levy - actual if actual > 0.5 else agreed_levy
+    short = costs - agreed_levy
+    reserve = reserve_contribution(state)
+    last_r = 0.0
+    for r in (state.get("sections") or {}).get("levy") or []:
+        if family(r.get("desc") or "") == "reserve":
+            last_r = float(r.get("actual") or 0)
+    levy_rows = [
+        ["What the costs need", costs, False, "White. Leave it. This is what the bills add up to."],
+        ["Increase the costs need", increase, False, "White. Leave it. How much more than last year."],
+        ["Agreed increase — type the rand", agreed_increase, True, "Yellow. This is the number the meeting changes."],
+        ["What owners will be charged", agreed_levy, False, "White. Last year plus the yellow rand."],
+        ["Still short", short, False, "Pink if it is above zero. The bills have not gone down."],
+        ["Last year’s contribution", last_r, False, "White. What was collected last year."],
+        ["Agreed reserve — type the rand", reserve, True, "Yellow. The other number the meeting may change."],
+    ]
+    levy = {"headers": ["", "For the year", "A month", "What to do"], "rows": []}
+    for name, year, yellow, note in levy_rows:
+        pink = name == "Still short" and short > 0.5
+        levy["rows"].append({"cells": [
+            _cell(name),
+            _cell(money(year), yellow=yellow, num=True, pink=pink),
+            _cell(money(year / 12.0), yellow=yellow, num=True, pink=pink),
+            _cell(note),
+        ]})
+    opening = float(state.get("reserve_balance") or 0)
+    spent = sum(float(r.get("actual") or 0) for r in (state.get("sections") or {}).get("special") or [])
+    nxt = sum(max(0.0, float(r.get("yearly") or 0)) for r in (state.get("sections") or {}).get("special") or [])
+    close_d = opening + last_r - spent
+    close_f = close_d + reserve - nxt
+    reserve_grid = {"headers": ["", "This year", "Next year", "What to do"], "rows": [
+        {"cells": [_cell("Opening reserve balance"), _cell(money(opening), num=True, yellow=True), _cell(money(close_d), num=True), _cell("Yellow only if the bank figure is wrong.")]},
+        {"cells": [_cell("Reserve contributions"), _cell(money(last_r), num=True), _cell(money(reserve), num=True), _cell("Next year follows the yellow reserve.")]},
+        {"cells": [_cell("Maintenance plan expenditure"), _cell(money(spent), num=True), _cell(money(nxt), num=True), _cell("What was spent, and what the plan costs next year.")]},
+        {"cells": [_cell("Closing reserve balance"), _cell(money(close_d), num=True), _cell(money(close_f), num=True), _cell("Opening, plus contributions, minus the plan.")]},
+        {"cells": [_cell("Overspent"), _cell(money(max(0.0, -close_d)), num=True, pink=close_d < -0.5), _cell(money(max(0.0, -close_f)), num=True, pink=close_f < -0.5), _cell("Above zero is the hole. Not added again.")]},
+    ]}
+    inside = reserve_inside_levy(state) and reserve > 0.5
+    headers = ["Unit", "PQ", "Paid last year"]
+    if inside:
+        headers += ["Ordinary levy", "Reserve fund"]
+    headers += ["Will pay this year", "CSOS", "Total"]
+    levy_m = agreed_levy / 12.0
+    res_m = reserve / 12.0
+    pq_rows = []
+    for u in state.get("pq") or []:
+        quota = float(u.get("PQ") or u.get("pq") or 0)
+        paid = quota * current_m
+        will = quota * levy_m
+        csos = csos_monthly_for_levy(will) if state.get("auto_csos", True) else 0.0
+        cells = [_cell(str(u.get("Unit") or "")), _cell(f"{quota:.6f}", num=True), _cell(money(paid), num=True)]
+        if inside:
+            cells.append(_cell(money(quota * (levy_m - res_m)), num=True))
+            cells.append(_cell(money(quota * res_m), num=True))
+        cells.append(_cell(money(will), num=True))
+        cells.append(_cell(money(csos), num=True))
+        cells.append(_cell(money(will + csos), num=True))
+        pq_rows.append({"cells": cells})
+    if not pq_rows:
+        pq_rows.append({"cells": [_cell("No units yet. Load the PQ file and the rows will show here.")]})
+    return {"levy": levy, "reserve": reserve_grid, "pq": {"headers": headers, "rows": pq_rows}}
+
+
 def pr_pack(state: dict) -> dict:
     """Line-by-line notes for the PR. A section with nothing in it is left out."""
     s = state.get("sections") or {}
@@ -5588,6 +5661,7 @@ def pr_pack(state: dict) -> dict:
         "show_pct": bool(state.get("show_pct")),
         "sections": sections,
         "close": close,
+        "grids": _pr_grids(state, approved, current_m),
     }
 
 
@@ -5609,7 +5683,7 @@ def pr_slides(pack: dict) -> list:
         guide(
             "The workbook",
             "Three sheets. Top to bottom.",
-            "Sit with the Excel file open. This is the first time these figures are used to agree a number. We do the BUDGET sheet, then the RESERVE sheet, then the PQ sheet.",
+            "Sit with this presentation. The sheets are on the slides. Excel does not have to be open to follow the meeting. Excel is only used afterwards, to type the yellow number they agreed.",
             [
                 {"where": "1. BUDGET", "do": "The costs, then the levy", "why": "The yellow agreed amount is at the very top. That is the meeting decision."},
                 {"where": "2. RESERVE", "do": "The reserve fund", "why": "What is in the bank, what owners add, and what the 10-year plan spends."},
@@ -5650,6 +5724,9 @@ def pr_slides(pack: dict) -> list:
             ],
         ),
     ]
+    levy_grid = (pack.get("grids") or {}).get("levy") or {}
+    if levy_grid.get("rows"):
+        slides.append({"kind": "grid", "sheet": "BUDGET sheet", "title": "The top of the budget", "lead": "This is the sheet. Yellow is where the meeting types. Excel does not have to be open.", **levy_grid})
     slides.append({
         "kind": "number",
         "now": pack["now"],
@@ -5692,6 +5769,9 @@ def pr_slides(pack: dict) -> list:
                 ],
                 "Then go down the list of jobs. Spent this year is what was paid. Next year is the plan. A job with nothing in either year is not on this list.",
             ))
+            reserve_grid = (pack.get("grids") or {}).get("reserve") or {}
+            if reserve_grid.get("rows"):
+                slides.append({"kind": "grid", "sheet": "RESERVE sheet", "title": "The top of the reserve sheet", "lead": "Same rows as the Excel sheet. You do not need the file open.", **reserve_grid})
         slides.append({
             "kind": "section",
             "title": sec["title"],
@@ -5748,10 +5828,19 @@ def pr_slides(pack: dict) -> list:
     slides.append(guide(
         "PQ sheet",
         "Open the PQ sheet. Top to bottom.",
-        "One row is one unit. Do not type on this sheet. If the meeting changes the yellow rand, come back here and read what each unit will pay.",
+        "The PQ sheet is on the next slide. One row is one unit. Nothing is typed here. It follows the yellow rand.",
         pq_steps,
         "Say this. We do not work out each unit by hand. The sheet does it from the yellow amount we just agreed.",
     ))
+    pq_grid = (pack.get("grids") or {}).get("pq") or {}
+    if pq_grid.get("rows"):
+        slides.append({
+            "kind": "grid",
+            "sheet": "PQ sheet",
+            "title": "What each unit pays",
+            "lead": "Every unit is on this slide. Scroll if you need to. Nothing here is typed. It follows the yellow rand.",
+            **pq_grid,
+        })
     slides.append({"kind": "close", "say": pack.get("close") or ""})
     return slides
 
@@ -5836,6 +5925,33 @@ function node(tag, cls, text) {{
   if (text != null) n.textContent = text;
   return n;
 }}
+function gridTable(s) {{
+  const wrap = node("div", "sheet");
+  const table = document.createElement("table");
+  const head = document.createElement("tr");
+  (s.headers || []).forEach(function(lab) {{
+    const th = document.createElement("th");
+    th.textContent = lab || "";
+    head.appendChild(th);
+  }});
+  table.appendChild(head);
+  (s.rows || []).forEach(function(row) {{
+    const tr = document.createElement("tr");
+    (row.cells || []).forEach(function(cell) {{
+      const td = document.createElement("td");
+      td.textContent = cell.t || "";
+      let cls = "";
+      if (cell.num) cls += " num";
+      if (cell.yellow) cls += " yellow";
+      td.className = cls.trim();
+      if (cell.pink) td.style.background = "#f4cccc";
+      tr.appendChild(td);
+    }});
+    table.appendChild(tr);
+  }});
+  wrap.appendChild(table);
+  return wrap;
+}}
 function sheetTable(rows, reserve, highlight) {{
   const wrap = node("div", "sheet");
   const table = document.createElement("table");
@@ -5884,6 +6000,7 @@ function render() {{
   const top = node("div", "top");
   const kick = node("p", "kicker",
     s.kind === "guide" ? (s.sheet || "With you") :
+    s.kind === "grid" ? (s.sheet || "The sheet") :
     s.kind === "title" ? "Notes for the PR" :
     s.kind === "number" ? "Start here" :
     s.kind === "remember" ? "Remember these" :
@@ -5904,7 +6021,7 @@ function render() {{
     if (s.year) slide.appendChild(node("p", "sub", s.year));
     const say = node("div", "say");
     say.appendChild(node("b", "", "For the meeting"));
-    say.appendChild(document.createTextNode("Open the Excel file beside this. We go top to bottom: the BUDGET sheet, the RESERVE sheet, then the PQ sheet. Yellow is the only place the meeting types."));
+    say.appendChild(document.createTextNode("The sheets are on the slides. Excel does not have to be open. We go top to bottom: the BUDGET sheet, the RESERVE sheet, then the PQ sheet. Yellow is the only place the meeting types."));
     slide.appendChild(say);
   }} else if (s.kind === "guide") {{
     slide.appendChild(node("h1", "", s.title || ""));
@@ -5923,6 +6040,12 @@ function render() {{
       say.appendChild(document.createTextNode(s.say));
       slide.appendChild(say);
     }}
+  }} else if (s.kind === "grid") {{
+    const h = node("h1", "", s.title || "The sheet");
+    h.style.fontSize = "32px";
+    slide.appendChild(h);
+    if (s.lead) slide.appendChild(node("p", "sub", s.lead));
+    slide.appendChild(gridTable(s));
   }} else if (s.kind === "read") {{
     slide.appendChild(node("h1", "", "How to read a line"));
     const nums = node("div", "nums");
@@ -6685,7 +6808,7 @@ Do not use **Erase everything** unless you mean to wipe the screen. Download fir
 ### 20. Notes for the PR
 On **Notes for the PR** the budget is the meeting, as if you are sitting next to the PR. Click the picture, or use the arrow keys.
 
-It goes in the same order as the workbook. First the **BUDGET** sheet, from the yellow agreed amount at the top, then each block down the page. Then the **RESERVE** sheet, from the bank balance down to the jobs. Then the **PQ** sheet, so they can see what each unit will pay after the yellow amount is agreed.
+It goes in the same order as the workbook, and the sheet itself is on the slides. Excel does not have to be open during the meeting. First the **BUDGET** sheet, including the yellow agreed amount at the top. Then the **RESERVE** sheet. Then the **PQ** sheet, every unit. Excel is used afterwards, only to type the yellow number they agreed.
 
 Yellow is the only place they type. White cells follow. A pink cell is a shortfall. It is not added again. Typing a lower rand does not make a bill smaller.
 
