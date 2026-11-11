@@ -3012,29 +3012,32 @@ def generate_excel(state: dict) -> BytesIO:
             if months < 1 or months > 11:
                 months = 10
             left = 12 - months
-            sheet.merge_cells("H1:L3")
-            box = sheet["H1"]
-            box.value = (
-                "ACTUALS ARE ESTIMATES\n"
-                f"The Actual totals are estimates. Only {months} months of figures were available. "
-                f"The remaining {left} months may still change these totals."
-            )
-            box.font = Font(name="Calibri", bold=True, size=18, color="7A1F1F")
-            box.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
-            edge = Border(
-                left=Side(style="medium", color="9C0006"),
-                right=Side(style="medium", color="9C0006"),
-                top=Side(style="medium", color="9C0006"),
-                bottom=Side(style="medium", color="9C0006"),
-            )
-            shade = PatternFill("solid", fgColor="FFF3C4")
-            for row in range(1, 4):
-                for col in range(8, 13):
-                    cell = sheet.cell(row, col)
-                    cell.border = edge
-                    cell.fill = shade
-            box.font = Font(name="Calibri", bold=True, size=18, color="7A1F1F")
-            box.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+            # Rows 1–2 only. Row 3 is already merged on some sheets, and an overlap makes Excel repair the file.
+            if not any(
+                mr.min_row <= 2 and mr.max_row >= 1 and mr.min_col <= 12 and mr.max_col >= 8
+                for mr in sheet.merged_cells.ranges
+            ):
+                edge = Border(
+                    left=Side(style="medium", color="9C0006"),
+                    right=Side(style="medium", color="9C0006"),
+                    top=Side(style="medium", color="9C0006"),
+                    bottom=Side(style="medium", color="9C0006"),
+                )
+                shade = PatternFill("solid", fgColor="FFF3C4")
+                for row in range(1, 3):
+                    for col in range(8, 13):
+                        cell = sheet.cell(row, col)
+                        cell.border = edge
+                        cell.fill = shade
+                sheet.merge_cells("H1:L2")
+                box = sheet["H1"]
+                box.value = (
+                    "ACTUALS ARE ESTIMATES\n"
+                    f"The Actual totals are estimates. Only {months} months of figures were available. "
+                    f"The remaining {left} months may still change these totals."
+                )
+                box.font = Font(name="Calibri", bold=True, size=18, color="7A1F1F")
+                box.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
         sheet.page_margins.bottom = 0.45
         sheet.page_margins.footer = 0.28
 
