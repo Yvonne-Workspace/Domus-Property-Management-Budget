@@ -2959,6 +2959,15 @@ def generate_meeting_html(state: dict) -> bytes:
     return render_meeting_html(meeting_pack(state), logo)
 
 
+def lock_sheet(sheet) -> None:
+    """Lock formulas, leave yellow cells open. Excel repairs the file if both select flags are off."""
+    sheet.protection.sheet = True
+    sheet.protection.password = "domus"
+    sheet.protection.enable()
+    sheet.protection.selectLockedCells = True
+    sheet.protection.selectUnlockedCells = True
+
+
 def _fix_logo_links(bio: BytesIO) -> BytesIO:
     """Excel hides a picture when the link inside the file is an absolute path."""
     raw = bio.getvalue()
@@ -3874,9 +3883,7 @@ def generate_excel(state: dict) -> BytesIO:
     eu.row_dimensions[1].height = 64
     eu.row_dimensions[6].height = 30
     brand(eu)
-    eu.protection.sheet = True
-    eu.protection.password = "domus"
-    eu.protection.enable()
+    lock_sheet(eu)
 
     ymp = wb.create_sheet("10 YMP")
     start_y = plan_start_year(state)
@@ -4107,9 +4114,7 @@ def generate_excel(state: dict) -> BytesIO:
         res.cell(maint_summary, 8).alignment = Alignment(wrap_text=True, vertical="center")
     else:
         fml(res.cell(maint_summary, 6), f"F{tot_r}")
-    res.protection.sheet = True
-    res.protection.password = "domus"
-    res.protection.enable()
+    lock_sheet(res)
 
     # Hidden round-trip sheet so Restore uploads the same numbers we downloaded.
     pack = wb.create_sheet("_DOMUS")
@@ -4148,9 +4153,7 @@ def generate_excel(state: dict) -> BytesIO:
     for i in range(0, len(blob), chunk):
         pack.cell(3 + i // chunk, 1, blob[i : i + chunk])
 
-    ws.protection.sheet = True
-    ws.protection.password = "domus"
-    ws.protection.enable()
+    lock_sheet(ws)
     wb.calculation.calcMode = "auto"
     wb.calculation.fullCalcOnLoad = True
     bio = BytesIO()
