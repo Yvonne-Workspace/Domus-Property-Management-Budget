@@ -5194,9 +5194,8 @@ def pr_pack(state: dict) -> dict:
     block = _section(
         "Levy income",
         levy_lines,
-        "Say this. The ordinary levy pays the costs of running the complex. "
-        "Walk the lines. Ordinary levies are the levy. Reserve and CSOS are their own lines on the invoice, unless a line says they sit inside the levy. "
-        "A line that says it lowers the levy, or that it goes to the reserve, is not added on top.",
+        "Say this. This is the money owners pay to run the complex. "
+        "Go one line at a time. If a line says it is not inside the levy, do not add it again.",
     )
     if block:
         sections.append(block)
@@ -5316,9 +5315,7 @@ def pr_pack(state: dict) -> dict:
                 })
         block["lines"].extend(extra_lines)
         block["intro"] = (
-            "Say this. Add the city bill. Subtract what owners pay back. "
-            "What is left is what next year's levy must carry. "
-            "If a line says shortfall, that is this year's actual. It is already in the numbers. Do not add it on top."
+            "Say this. Add what the city charged. Take off what owners paid back. What is left is what the levy must cover next year. A shortfall is this year, and it is already counted. Do not add it again."
         )
         sections.append(block)
 
@@ -5338,19 +5335,17 @@ def pr_pack(state: dict) -> dict:
             lines.append(_one(state, r, _cost_where(state, r), extra))
         intros = {
             "Expenditure": (
-                "Say this. These are the running costs, not repairs and not salaries. "
-                "The yellow amount is what we need next year. If the slide says it is inside the levy, owners pay it in the ordinary levy. "
-                "If it says the invoice, or the reserve, they are not paying it twice."
+                "Say this. These are the everyday bills, not repairs and not wages. "
+                "Yellow is next year. If a line is inside the levy, owners pay it in the levy. If it says the invoice, it is extra and not in the levy."
             ),
             "Repairs and maintenance": (
-                "Say this. These are repairs, not the day-to-day bills. "
-                "The yellow amount is next year. The reserve pays a repair only when the slide says so."
+                "Say this. These are repairs. Yellow is next year. The reserve pays a repair only when the line says so."
             ),
             "Personnel": (
-                "Say this. These are the people: wages, salaries, PAYE and UIF. They are inside the ordinary levy."
+                "Say this. These are the people who work here. Owners pay this inside the levy."
             ),
             "Tax": (
-                "Say this. Tax is on other income only. Levies are not taxed. The first R 50,000.00 of that income is free. The rest is at 27%."
+                "Say this. This is tax on interest and other income, not on the levies. The first R 50,000.00 is free."
             ),
         }
         block = _section(title, lines, intros.get(title, ""))
@@ -5444,10 +5439,7 @@ def pr_pack(state: dict) -> dict:
             "title": "Reserve fund budget",
             "lines": reserve_lines,
             "intro": (
-                "Say this. This is the reserve, not the ordinary levy. "
-                "The bank figure is what is already there. Do not add this year's contribution into that balance. "
-                "The contribution is what we ask the owners for this year. "
-                "Each project after that is what the plan spends next year. The reserve pays it, unless a line says the levy pays it."
+                "Say this. This is the savings for big jobs, not the monthly levy. The bank figure is already there. Do not add this year's contribution into it. The contribution is what we ask for this year. Each job after that is next year's plan."
             ),
         })
 
@@ -5497,6 +5489,7 @@ def pr_pack(state: dict) -> dict:
 def pr_slides(pack: dict) -> list:
     slides = [
         {"kind": "title", "name": pack["name"], "year": pack.get("year") or ""},
+        {"kind": "read"},
         {
             "kind": "number",
             "now": pack["now"],
@@ -5600,7 +5593,7 @@ def pr_pack_html(pack: dict) -> str:
   tr.hot td {{ background:#e7f2ea; }}
   tr.hot td.yellow {{ background:#ffe58a; font-weight:700; }}
   tr.sub td {{ color:#666; font-style:italic; font-size:12px; background:#fafafa; }}
-  td.note {{ color:#1f4e79; font-size:12px; }}
+  .key {{ color:#5c6562; font-size:15px; margin:8px 0 0; }}
   .nav {{ display:flex; align-items:center; justify-content:space-between; color:#d7ebe3; padding:10px 18px 14px; font-size:14px; }}
   button {{ background:#7eebc8; color:#10211b; border:0; padding:8px 16px; font-weight:700; cursor:pointer; font-size:15px; }}
   button.ghost {{ background:transparent; color:#d7ebe3; }}
@@ -5636,12 +5629,12 @@ function sheetTable(rows, reserve, highlight) {{
   const table = document.createElement("table");
   const head = document.createElement("tr");
   const labels = reserve
-    ? ["Description", "GL Code", "Spent this year", "Next year", "Monthly", "Comments / Notes"]
-    : ["Description", "GL Code", "Actual"].concat(SHOW_PCT ? ["%"] : []).concat(["Budgeted Yearly", "Monthly", "Comments / Notes"]);
+    ? ["What", "Account no.", "Already spent", "Next year", "Each month", "Note"]
+    : ["What", "Account no.", "Last year"].concat(SHOW_PCT ? ["Up or down"] : []).concat(["Next year", "Each month", "Note"]);
   labels.forEach(function(lab) {{
     const th = document.createElement("th");
     th.textContent = lab;
-    if (lab === "Budgeted Yearly" || lab === "Next year") th.className = "yellow";
+    if (lab === "Next year") th.className = "yellow";
     head.appendChild(th);
   }});
   table.appendChild(head);
@@ -5697,8 +5690,22 @@ function render() {{
     slide.appendChild(node("h1", "", s.name || "This complex"));
     if (s.year) slide.appendChild(node("p", "sub", s.year));
     const say = node("div", "say");
-    say.appendChild(node("b", "", "How to use this"));
-    say.appendChild(document.createTextNode("Click, or use the arrow keys. One line at a time. The words at the bottom are what you say. The Excel sheet is where a yellow amount is changed."));
+    say.appendChild(node("b", "", "For the meeting"));
+    say.appendChild(document.createTextNode("Click to move on. The next slide shows how to read every number. Then we go one line at a time."));
+    slide.appendChild(say);
+  }} else if (s.kind === "read") {{
+    slide.appendChild(node("h1", "", "How to read a line"));
+    const nums = node("div", "nums");
+    [["Last year", "What already happened"], ["Next year", "What we need. This box is yellow."], ["Each month", "Next year, divided by 12. Not a second charge."]].forEach(function(pair) {{
+      const box = node("div", "num");
+      box.appendChild(node("span", "", pair[0]));
+      box.appendChild(node("strong", "", pair[1]));
+      nums.appendChild(box);
+    }});
+    slide.appendChild(nums);
+    const say = node("div", "say");
+    say.appendChild(node("b", "", "Only one number changes"));
+    say.appendChild(document.createTextNode("In the meeting, only the yellow number may be typed over. Everything else is worked out. A lower yellow number does not make the bill smaller. Something else has to come down."));
     slide.appendChild(say);
   }} else if (s.kind === "number") {{
     const b = node("div", "banner " + (String(s.banner).includes("less") ? "down" : String(s.banner).includes("more") ? "up" : ""), s.banner);
@@ -5713,7 +5720,7 @@ function render() {{
     slide.appendChild(nums);
     const say = node("div", "say");
     say.appendChild(node("b", "", "Say this"));
-    say.appendChild(document.createTextNode("Ordinary levy only. What they pay now is " + s.year_now + " a year. This budget is " + s.year_new + " a year. The reserve is separate unless a later slide says it is inside the levy."));
+    say.appendChild(document.createTextNode("This is the monthly levy only. What they pay now is " + s.year_now + " for the year. This budget is " + s.year_new + " for the year. Savings for big jobs are on a later slide."));
     slide.appendChild(say);
   }} else if (s.kind === "remember") {{
     slide.appendChild(node("h1", "", "The lines that moved the most"));
@@ -5731,11 +5738,12 @@ function render() {{
     slide.appendChild(node("h1", "", s.title));
     if (s.say) {{
       const say = node("div", "explain");
-      say.appendChild(node("b", "", "Explain it like this"));
+      say.appendChild(node("b", "", "In plain words"));
       say.appendChild(document.createTextNode(s.say.replace(/^Say this\\.\\s*/, "")));
       slide.appendChild(say);
     }}
     slide.appendChild(sheetTable(s.rows || [], s.reserve, ""));
+    slide.appendChild(node("p", "key", "Last year is what already happened. Yellow is next year. Each month is that yellow number divided by 12. It is not added again."));
   }} else if (s.kind === "close") {{
     slide.appendChild(node("h1", "", "Only the yellow amount may change"));
     const say = node("div", "say");
@@ -5750,6 +5758,7 @@ function render() {{
     say.appendChild(document.createTextNode(s.say || ""));
     slide.appendChild(say);
     slide.appendChild(sheetTable([s], s.reserve, s.name));
+    slide.appendChild(node("p", "key", "Last year is what already happened. Yellow is next year. Each month is that yellow number divided by 12."));
   }}
   stage.appendChild(slide);
   document.getElementById("count").textContent = (i + 1) + " of " + SLIDES.length;
@@ -6415,7 +6424,7 @@ Do not use **Erase everything** unless you mean to wipe the screen. Download fir
 ### 20. Notes for the PR
 On **Notes for the PR** the budget is a presentation. Click the picture, or use the arrow keys. One line at a time, in the same order as the sheet.
 
-The first slides are the number to remember, then the lines that moved the most. After that, each section is shown as the Excel block, then each line on its own, in the same columns as the sheet. Yellow is Budgeted Yearly. A section with nothing in it is left out. Your Notes are on the slide. A split is shown under the line and is already inside the amount.
+The second slide shows how to read a line: last year, next year in yellow, and each month. Then the number to remember, the lines that moved, and each line. On the slides the columns say Last year, Next year and Each month. The Excel file still says Actual and Budgeted Yearly. A section with nothing in it is left out. Your Notes are on the slide. A split is shown under the line and is already inside the amount.
 
 **Download the presentation**, open it in the browser, and press F for full screen in the meeting. The Excel sheet is still where a yellow amount is changed.
             """
