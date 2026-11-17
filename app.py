@@ -305,6 +305,43 @@ def sum_net(items: list) -> float:
     return sum(net_of(r) for r in items)
 
 
+def _link_key(s: str) -> str:
+    """Same cost even if one name says & and the other says and."""
+    s = norm(s).replace("&", " and ")
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def claims_for_cost(state: dict, desc: str) -> list:
+    """Recovery-income lines that pay this cost. A close name still counts."""
+    target = _link_key(desc)
+    if not target:
+        return []
+    exact = []
+    loose = []
+    for r in (state.get("sections") or {}).get("recoveries_other") or []:
+        against = (r.get("claim_against") or "").strip()
+        if not against:
+            continue
+        if _link_key(against) == target:
+            exact.append(r)
+        elif _same_job(against, desc):
+            loose.append(r)
+    if exact:
+        return exact
+    costs = []
+    for key in ("expenditure", "rm", "personnel", "tax"):
+        for it in (state.get("sections") or {}).get(key) or []:
+            name = (it.get("desc") or "").strip()
+            if name:
+                costs.append(name)
+    out = []
+    for r in loose:
+        matches = [c for c in costs if _same_job(r.get("claim_against") or "", c)]
+        if len(matches) == 1 and _link_key(matches[0]) == target:
+            out.append(r)
+    return out
+
+
 def claims_against(state: dict) -> dict:
     """Yearly rands in Claims, keyed by the cost line they pay."""
     out: dict[str, float] = {}
@@ -518,7 +555,7 @@ def recovery_lines_for(state: dict, desc: str) -> list:
         return []
     out = []
     for r in (state.get("sections") or {}).get("recoveries_other") or []:
-        if norm(r.get("claim_against") or "") != target:
+        if r not in claims_for_cost(state, desc):
             continue
         if abs(float(r.get("yearly") or 0)) < 0.5:
             continue
@@ -3213,7 +3250,21 @@ def generate_excel(state: dict) -> BytesIO:
                 reserve_mark_rows.append(r)
             ins = float(it.get("insurance") or 0)
             rec = bool(it.get("is_recovery")) and not recovery_as_income
-            inp(ws.cell(r, 4), act, MONEY)
+            claim_actual = 0.0
+            for claim in claims_for_cost(state, desc):
+                act_c = abs(float(claim.get("actual") or 0))
+                if act_c > 0.5:
+                    claim_actual += act_c
+            if claim_actual > 0.5:
+                hc = ws.cell(start - 1, 12, "Recovery against actual")
+                fill(hc, NAVY)
+                hc.font = Font(bold=True, color="FFFFFF", size=10)
+                hc.border = THIN
+                ws.column_dimensions["L"].width = 24
+                inp(ws.cell(r, 12), claim_actual, MONEY)
+                fml(ws.cell(r, 4), f"MAX(0,{act}-N(L{r}))")
+            else:
+                inp(ws.cell(r, 4), act, MONEY)
             ins = float(it.get("insurance") or 0)
             linked_csos = is_own_scheme_csos(desc) and fam == "csos_exp" and levy_rows.get("csos")
             ws.cell(r, 5, None)
@@ -3263,24 +3314,9 @@ def generate_excel(state: dict) -> BytesIO:
                 if own:
                     extra = "Cost recovery " + f"{own:,.2f}" + ". Not income. Taken off this line."
                     note = f"{note} | {extra}".strip(" |") if note else extra
-            claim_actual = 0.0
-            for claim in (state.get("sections") or {}).get("recoveries_other") or []:
-                if norm(claim.get("claim_against") or "") != norm(desc):
-                    continue
-                act_c = abs(float(claim.get("actual") or 0))
-                if act_c > 0.5:
-                    claim_actual += act_c
-                    extra = "This year's recovery " + f"{act_c:,.2f}" + " comes off this actual. It is not added again."
-                    note = f"{note} | {extra}".strip(" |") if note else extra
             if claim_actual > 0.5:
-                hc = ws.cell(start - 1, 12, "Recovery against actual")
-                fill(hc, NAVY)
-                hc.font = Font(bold=True, color="FFFFFF", size=10)
-                hc.border = THIN
-                ws.column_dimensions["L"].width = 24
-                inp(ws.cell(r, 12), claim_actual, MONEY)
-                if l_rows is not None:
-                    l_rows.append(r)
+                extra = "This year's recovery " + f"{claim_actual:,.2f}" + " comes off this actual. It is not added again."
+                note = f"{note} | {extra}".strip(" |") if note else extra
             deduct = ""
             if ins > 0.5:
                 deduct += f"-{ins}"
@@ -3465,10 +3501,6 @@ def generate_excel(state: dict) -> BytesIO:
     write_bucket["name"] = "expenditure"
     a, b = write(exp_items, in_levy=True, owner_box=True, reserve_col=True, mains=exp_mains, l_rows=exp_l)
     exp_tot = tot("TOTAL EXPENDITURE", a, b, exp_mains or None)
-    if exp_l:
-        ws.cell(r, 2, "ACTUAL after this year's recoveries (expenditure). Already net — do not add it again.").font = Font(italic=True, size=9, color="9C0006")
-        fml(ws.cell(r, 4), "MAX(0,D%d-%s)" % (exp_tot, "-".join(f"N(L{n})" for n in exp_l)), RED)
-        r += 2
     bar("REPAIR AND MAINTENANCE")
     hdr()
     rm_from = len(reserve_mark_rows)
@@ -3478,10 +3510,6 @@ def generate_excel(state: dict) -> BytesIO:
     a, b = write(s.get("rm") or [], in_levy=True, owner_box=True, reserve_col=True, mains=rm_mains, l_rows=rm_l)
     rm_mark_rows = reserve_mark_rows[rm_from:]
     rm_tot = tot("Total Repair and Maintenance", a, b, rm_mains or None)
-    if rm_l:
-        ws.cell(r, 2, "ACTUAL after this year's recoveries (repairs). Already net — do not add it again.").font = Font(italic=True, size=9, color="9C0006")
-        fml(ws.cell(r, 4), "MAX(0,D%d-%s)" % (rm_tot, "-".join(f"N(L{n})" for n in rm_l)), RED)
-        r += 2
 
     def yes_sum(rows) -> str:
         if not rows:
@@ -4243,6 +4271,10 @@ def _apply_budget_sheet(wb, data: dict, wb_values=None) -> None:
             items.append(found)
         if isinstance(d_val, (int, float)):
             found["actual"] = abs(float(d_val))
+            if current in ("expenditure", "rm", "personnel", "tax"):
+                rec_l = _cell_amount(ws.cell(r, 12).value)
+                if rec_l:
+                    found["actual"] = abs(float(d_val)) + abs(rec_l)
         pct_v = ws.cell(r, 5).value
         year_v = f_val
         fam = family(desc)
@@ -4888,6 +4920,14 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
             st.caption("Type the yearly total for the whole complex. Name it like the cost (Garden Services, Refuse). That amount is left out of the levy. Each owner pays total ÷ 12 ÷ units.")
     else:
         if key in ("expenditure", "rm", "personnel", "tax"):
+            off_bits = []
+            for it in st.session_state.sections.get(key) or []:
+                off = sum(abs(float(c.get("actual") or 0)) for c in claims_for_cost(st.session_state, it.get("desc") or ""))
+                if off > 0.5:
+                    gross = abs(float(it.get("actual") or 0))
+                    off_bits.append(f"{it.get('desc')} {money(max(0.0, gross - off))} after recovery {money(off)}")
+            if off_bits:
+                st.caption("Actual on the sheet is already lower: " + "; ".join(off_bits) + ". Do not subtract it again.")
             rows = st.session_state.sections.get(key) or []
             books = sum(cost_for_levy(st.session_state, r) for r in rows)
             in_levy = sum(line_in_levy(st.session_state, r) for r in rows)
@@ -6702,11 +6742,11 @@ On the Excel sheet the same choice is the column **Lowers the levy** (Yes or No)
 ### 6. Recovery income — money that pays a cost
 **Income → Recovery income** is money that pays a cost we already have. It is not added on top of the levy.
 
-Type this year's recovery in **Actual**. Pick the cost. That amount comes off that cost's actual. It is already in the net row on the sheet. Do not add it again.
+Type this year's recovery in **Actual**. Pick the cost, then **Save this section**. On the sheet, that cost's **Actual** is the books amount minus this recovery. Sewerage and plumbing, or Sewerage & plumbing, is the same cost. Do not subtract it again.
 
 The recovery's **Budgeted yearly** comes out of the ordinary levy when you pick the cost. So does **Fixed monthly charges**. If you enter both for the same amount, it comes out **once**. The percentage should not jump.
 
-On the Excel sheet this block is **RECOVERY INCOME**. The cost line keeps the full spend in Actual. Under the expenditure total and the repairs total, **ACTUAL after this year's recoveries** is the actual minus those recoveries.
+On the Excel sheet this block is **RECOVERY INCOME**. The cost line's Actual is already the net. Column L shows the recovery that came off. It is not subtracted a second time.
 
 - **Legal fees recovered:** type this year's amount in Actual and pick **Legal Expense**. Type the same amount in Budgeted yearly only if you expect it again next year.
 - **A repair invoiced to an owner** (a broken window): put it in **Cost recoveries** on that repair. That comes off the levy. A recovery-income row is only for the books.
