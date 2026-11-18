@@ -2998,6 +2998,11 @@ def generate_meeting_html(state: dict) -> bytes:
 
 def lock_sheet(sheet) -> None:
     """Lock formulas, leave yellow cells open. Excel repairs the file if both select flags are off."""
+    for row in sheet.iter_rows():
+        for cell in row:
+            rgb = getattr(getattr(cell.fill, "fgColor", None), "rgb", None)
+            if rgb and str(rgb).upper().endswith("FFFF99"):
+                cell.protection = Protection(locked=False)
     sheet.protection.sheet = True
     sheet.protection.password = "domus"
     sheet.protection.enable()
@@ -3381,6 +3386,12 @@ def generate_excel(state: dict) -> BytesIO:
                 bits.append(f"{sub_name} {float(sub.get('yearly') or 0):,.2f}")
             if bits:
                 extra = "Breakdown: " + "; ".join(bits) + ". Already inside this line. Not added again."
+                sub_year = sum(abs(float(sub.get("yearly") or 0)) for sub in it.get("subs") or [])
+                if abs(sub_year - abs(y)) > 1:
+                    extra += (
+                        f" The parts add to {sub_year:,.2f}. This line is {abs(y):,.2f}. "
+                        f"They differ by {abs(sub_year - abs(y)):,.2f}. The levy uses this line, not the parts."
+                    )
                 cnote.value = f"{note} | {extra}".strip(" |") if note else extra
             r += 1
             for sub in it.get("subs") or []:
@@ -3628,6 +3639,25 @@ def generate_excel(state: dict) -> BytesIO:
         fml(ws.cell(9, 7), "F9/12", "C6EFCE")
         fml(ws.cell(10, 6), "F6-F9", RED)
         fml(ws.cell(10, 7), "F10/12", RED)
+        ws["H7"] = "Against levies received last year"
+        ws["H7"].font = Font(italic=True, size=9, color="1F4E79")
+        ws["I7"] = '=IF(OrdinaryActual=0,"",F7/OrdinaryActual)'
+        ws["I7"].number_format = "0.0%"
+        ws["I7"].font = Font(name="Calibri", size=10)
+        ws["I7"].border = THIN
+        ws["B15"] = "Increase against what owners pay now"
+        ws["B15"].font = Font(italic=True, size=9, color="1F4E79")
+        ws["H15"] = "Owners pay now, the whole year. Yellow. This % uses that, not last year's received levies."
+        ws["H15"].font = Font(italic=True, size=9, color="1F4E79")
+        ws["H15"].alignment = Alignment(wrap_text=True, vertical="center")
+        inp(ws["I15"], float(state.get("current_monthly_levy") or 0) * 12, MONEY)
+        fml(ws["F15"], 'IF(I15=0,"",F6-I15)', RED)
+        fml(ws["G15"], 'IF(I15=0,"",F15/12)', RED)
+        ws["J15"] = '=IF(I15=0,"",F15/I15)'
+        ws["J15"].number_format = "0.0%"
+        ws["J15"].font = Font(name="Calibri", size=10)
+        ws["J15"].border = THIN
+        ws.row_dimensions[15].height = 28
     if levy_rows.get("reserve"):
         res_row = levy_rows["reserve"]
         wb.defined_names.add(DefinedName(name="ReserveActual", attr_text=f"BUDGET!$D${res_row}"))
@@ -3978,15 +4008,19 @@ def generate_excel(state: dict) -> BytesIO:
     res.row_dimensions[1].height = 64
     brand(res)
     use_this_plan = budget_uses_this_plan_year(state)
+    plan_year = NOW_YEAR + 1
+    plan_col_idx = 5 + (plan_year - start_y)
+    if not 5 <= plan_col_idx <= 14:
+        plan_col_idx = 6
+    plan_col = get_column_letter(plan_col_idx)
+    plan_sum = f"SUM('10 YMP'!{plan_col}6:{plan_col}200)"
     res["B6"] = (
-        f"Spent last year is what was paid. This year uses the {NOW_YEAR} plan, the Budgeted this year column. "
-        f"That total is the maintenance line at the top. The {NOW_YEAR + 1} column is later. It is not in this closing balance."
-        if use_this_plan else
-        "Spent last year is what was paid. Next year is the next column of the 10-year plan. There is no %. A job with no spend and nothing next year stays on the 10-year plan only."
+        f"Spent last year is what was paid. The {plan_year} figure at the top is the whole {plan_year} column on the 10-year plan, "
+        "rows 6 to 200, plus any rand typed in Funded by reserve. One project line is not that total."
     )
     res["B6"].font = Font(italic=True, size=9, color="666666")
     res["D7"] = "Spent last year"
-    res["F7"] = "This year" if use_this_plan else "Next year"
+    res["F7"] = f"{plan_year} plan"
     for col in (4, 6):
         res.cell(7, col).font = Font(bold=True, size=10, color=NAVY)
         res.cell(7, col).alignment = Alignment(horizontal="right")
@@ -4061,6 +4095,7 @@ def generate_excel(state: dict) -> BytesIO:
     rr = plan_hdr + 1
     plan_rows = []
     maint_rows = []
+    manual_plan_rows = []
     if not state.get("special_in_ordinary"):
         plan_index = {}
         for i, p in enumerate(projects):
@@ -4081,15 +4116,11 @@ def generate_excel(state: dict) -> BytesIO:
             inp(res.cell(rr, 4), spent, MONEY)
             inp(res.cell(rr, 5), allowed, MONEY)
             src = plan_index.get(norm(desc))
-            if src is None:
-                for i, p in enumerate(projects):
-                    if _same_job(desc, str(p.get("desc") or "")):
-                        src = first_data + i
-                        break
             if src:
-                fml(res.cell(rr, 6), f"'10 YMP'!F{src}")
+                fml(res.cell(rr, 6), f"'10 YMP'!{plan_col}{src}")
             else:
                 inp(res.cell(rr, 6), float(it.get("yearly") or 0), MONEY)
+                manual_plan_rows.append(rr)
             fml(res.cell(rr, 9), f"D{rr}-E{rr}", RED if spent - allowed > 0.5 else None)
             if allowed < 0.5 and spent < 0.5:
                 note = f"Planned for {NOW_YEAR + 1}."
@@ -4103,17 +4134,17 @@ def generate_excel(state: dict) -> BytesIO:
             plan_rows.append(rr)
             maint_rows.append(rr)
             rr += 1
-    for key in ("expenditure", "rm", "personnel", "tax"):
-        for it in s.get(key) or []:
-            amt = funded_by_reserve(state, it)
-            if amt < 0.5:
-                continue
-            inp(res.cell(rr, 2), it.get("desc") or "")
-            inp(res.cell(rr, 4), float(it.get("actual") or 0), MONEY)
-            inp(res.cell(rr, 6), amt, MONEY)
-            res.cell(rr, 8, "Funded by reserve. A part of a levy-sheet line.").font = Font(italic=True, size=9, color="1F4E79")
-            plan_rows.append(rr)
-            rr += 1
+    funded_row = rr
+    res.cell(rr, 2, "Funded by reserve (typed on the levy sheet)").border = THIN
+    res.cell(rr, 2).font = Font(name="Calibri", size=10)
+    if reserve_mark_rows:
+        fml(res.cell(rr, 6), "+".join(f"N(BUDGET!J{n})" for n in reserve_mark_rows))
+    else:
+        inp(res.cell(rr, 6), 0, MONEY)
+    res.cell(rr, 8, "Live. A rand typed in Funded by reserve on the budget sheet lowers the levy and lowers this reserve by the same rand.").font = Font(italic=True, size=9, color="1F4E79")
+    res.cell(rr, 8).alignment = Alignment(wrap_text=True, vertical="center")
+    plan_rows.append(rr)
+    rr += 1
     if not plan_rows:
         res.cell(rr, 2, "No reserve expenditure")
         plan_rows = [rr]
@@ -4130,18 +4161,21 @@ def generate_excel(state: dict) -> BytesIO:
     tot_r = rr
     res.cell(tot_r, 2, "TOTAL RESERVE EXPENDITURE").font = Font(bold=True)
     fml(res.cell(tot_r, 4), "+".join(f"D{n}" for n in plan_rows), TOTAL)
-    fml(res.cell(tot_r, 6), "+".join(f"F{n}" for n in plan_rows), TOTAL)
+    manual = "+".join(f"N(F{n})" for n in manual_plan_rows)
+    spend = plan_sum + (("+" + manual) if manual else "") + f"+N(F{funded_row})"
+    if state.get("special_in_ordinary"):
+        spend = f"N(F{funded_row})"
+    fml(res.cell(tot_r, 6), spend, TOTAL)
     fml(res.cell(tot_r, 7), f"F{tot_r}/12", TOTAL)
     fml(res.cell(maint_summary, 4), f"D{tot_r}")
-    if use_this_plan and maint_rows:
-        maint_set = set(maint_rows)
-        parts = [f"E{n}" for n in maint_rows] + [f"F{n}" for n in plan_rows if n not in maint_set]
-        fml(res.cell(maint_summary, 6), "+".join(parts))
-        res.cell(maint_summary, 8, f"The {NOW_YEAR} plan, added up from Budgeted this year. The {NOW_YEAR + 1} column is not in this total.")
-        res.cell(maint_summary, 8).font = Font(italic=True, size=9, color="1F4E79")
-        res.cell(maint_summary, 8).alignment = Alignment(wrap_text=True, vertical="center")
+    if state.get("special_in_ordinary"):
+        fml(res.cell(maint_summary, 6), f"N(F{funded_row})")
+        res.cell(maint_summary, 8, "The plan is paid from the levy, so it is not taken off the reserve. Funded by reserve still is.")
     else:
-        fml(res.cell(maint_summary, 6), f"F{tot_r}")
+        fml(res.cell(maint_summary, 6), spend)
+        res.cell(maint_summary, 8, f"The whole {plan_year} column on the 10-year plan, rows 6 to 200, plus Funded by reserve. One project line is not this total.")
+    res.cell(maint_summary, 8).font = Font(italic=True, size=9, color="1F4E79")
+    res.cell(maint_summary, 8).alignment = Alignment(wrap_text=True, vertical="center")
     lock_sheet(res)
 
     # Hidden round-trip sheet so Restore uploads the same numbers we downloaded.
@@ -4928,6 +4962,16 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                     off_bits.append(f"{it.get('desc')} {money(max(0.0, gross - off))} after recovery {money(off)}")
             if off_bits:
                 st.caption("Actual on the sheet is already lower: " + "; ".join(off_bits) + ". Do not subtract it again.")
+            gap_bits = []
+            for it in st.session_state.sections.get(key) or []:
+                parts = [abs(float(sub.get("yearly") or 0)) for sub in (it.get("subs") or []) if str(sub.get("desc") or "").strip()]
+                if not parts:
+                    continue
+                line = abs(float(it.get("yearly") or 0))
+                if abs(sum(parts) - line) > 1:
+                    gap_bits.append(f"{it.get('desc')} line {money(line)}, parts {money(sum(parts))}")
+            if gap_bits:
+                st.warning("The breakdown does not match the line. The levy uses the line, not the parts. " + "; ".join(gap_bits))
             rows = st.session_state.sections.get(key) or []
             books = sum(cost_for_levy(st.session_state, r) for r in rows)
             in_levy = sum(line_in_levy(st.session_state, r) for r in rows)
@@ -5883,7 +5927,7 @@ def pr_slides(pack: dict) -> list:
                 [
                     {"where": "Opening reserve balance", "do": "Yellow only if the bank figure is wrong.", "why": "Money in the reserve account now. Do not include this year’s contribution in it."},
                     {"where": "Reserve contributions", "do": "White. It follows the yellow reserve on the BUDGET sheet.", "why": reserve_where},
-                    {"where": "Maintenance plan expenditure", "do": "White.", "why": f"For a {NOW_YEAR} budget this is the {NOW_YEAR} plan, added up under This year. Spent last year is what was paid. The {NOW_YEAR + 1} column is later and is not in the closing balance."},
+                    {"where": "Maintenance plan expenditure", "do": "White.", "why": f"This is the whole {NOW_YEAR + 1} column on the 10-year plan, plus Funded by reserve. One project is not the total. Spent last year is what was paid."},
                     {"where": "Closing reserve balance", "do": "White.", "why": "Opening, plus contributions, minus the plan."},
                     {"where": "Overspent", "do": "Pink, if it is above zero.", "why": "The fund is short. It is not added again."},
                 ],
@@ -6796,7 +6840,7 @@ Then pick one. It works for a body corporate and an HOA:
 - 25% of last year’s ordinary levy (that same Actual)
 - 100% of this year’s Repairs and Maintenance (after recovery income and payouts)
 
-The amount shows on **Reserve Fund Contribution**. On the Excel file it is on the **RESERVE** sheet, not at the top of the levy sheet.
+The amount shows on **Reserve Fund Contribution**. On the Excel file it is on the **RESERVE** sheet, not at the top of the levy sheet. The **2027** total at the top of that sheet is the whole 2027 column on the 10-year plan, not one project. **Funded by reserve** is live: type it on the levy sheet and the reserve comes down by the same rand.
 
 Then choose how owners pay it. Pick one:
 
@@ -6849,7 +6893,7 @@ If the estimate is R0, nothing is paid. If tax is payable, SARS usually wants pr
 ### 15. Personnel and 10-year projects
 **Personnel** is salaries, casuals, PAYE / UIF, travel, bonuses and the like.
 
-**10 Year Maintenance Projects** do not show on the levy sheet. They are the reserve fund's costs. **GL code** is the WeConnectU code. **Spent last year** is what was paid. **Budgeted this year** is this year's plan. **Over / under** is spent last year minus that plan. Above zero means it cost more than was planned. **Next year** is 2027. On a 2026/2027 budget it is not in the closing balance. There is no %. Tick **Pay the 10-year projects from the ordinary levy** only when this complex pays the plan from the levy. Then they move onto the levy sheet and off the reserve sheet.
+**10 Year Maintenance Projects** do not show on the levy sheet. They are the reserve fund's costs. **GL code** is the WeConnectU code. **Spent last year** is what was paid. **Budgeted this year** is this year's plan. **Over / under** is spent last year minus that plan. Above zero means it cost more than was planned. **Next year** is 2027. The reserve total adds the whole 2027 column. It is in the closing balance. There is no %. Tick **Pay the 10-year projects from the ordinary levy** only when this complex pays the plan from the levy. Then they move onto the levy sheet and off the reserve sheet.
 
 A job you did not do, and that has no amount next year, is not on this list. It stays on the 10-year plan if a later year still has it.
 
@@ -6880,14 +6924,14 @@ Boathouse and boatport stay on the budget, under Levy Income. They move with the
 Do these steps in this order.
 
 1. On the left, choose the WeConnectU **Actual vs Budget** file and click **Load Excel**.
-2. Open **10-year projects**. **Spent last year** is what was paid. **Budgeted this year** is the plan for this year. A **2027** amount shows as **Next year**. A later year stays on the plan. On a **2026/2027** budget, the reserve sheet uses the **2026** total at the top, under **This year**. The 2027 column stays on the list. It is not in the closing balance. To add a project that is not on the plan, type it on a new row, enter the amount, and click **Save this section**. It stays, and it is written onto the plan. A total line is not a project.
+2. Open **10-year projects**. **Spent last year** is what was paid. **Budgeted this year** is the plan for this year. A **2027** amount shows as **Next year**. The reserve sheet adds the **whole** 2027 column. To add a project that is not on the plan, type it on a new row, enter the amount, and click **Save this section**. It stays, and it is written onto the plan. A total line is not a project.
 3. Open **10-year plan**. Upload the Excel, or copy from the row that says **2025  2026  2027** down to the last project and paste it. Every project line comes through, including a line with no amount yet. The app does not add a total, and it does not fill Current estimate unless that column is on your sheet.
 4. To remove a project, click the trash can on that row, then click **Save 10-year plan**. It stays deleted. Click a project name to read the full words. Scroll right for the later years. A note that sat to the right of the years is in the **Note** column.
 5. Open **10-year projects** again.
    - Paid last year and also on this year's plan: both amounts are filled.
    - Paid last year only: Spent last year is filled, Budgeted this year is blank.
    - Not paid last year, but on this year's plan: Spent last year is 0, Budgeted this year is the plan.
-   - **2026** is **Budgeted this year**. That is **This year** at the top of the reserve sheet. **2027** is **Next year**. It stays on the list and is not in the closing balance.
+   - **2026** is **Budgeted this year**. **2027** is the next column. The reserve total adds the **whole** 2027 column, rows 6 to 200. A new door or carport typed on the plan reduces the reserve. One line, such as Staircases, is not the total.
 6. On **10-year projects**, a line you type stays, even if it is not on the plan. Click the note, change it or delete it, then **Save this section**. A blank note stays blank. Saving the 10-year plan does not remove a line you added.
 7. Leave **Pay the 10-year projects from the ordinary levy** unticked. The reserve pays these jobs.
 
@@ -6909,14 +6953,15 @@ The % on the sheet follows the yellow rand. It does not drive the rand. The meet
 The meeting block is at the top of **BUDGET**.
 
 - **What the costs need** is locked.
-- **Increase the costs need** is locked. Example: R50,000.
+- **Increase the costs need** is locked. It is against last year’s levies received. The % beside it is that same comparison.
+- **Increase against what owners pay now** is the other %. It uses the yellow yearly amount, owners pay now times 12. Do not replace one % with the other.
 - **Agreed increase** is yellow and it follows the costs. Change a yellow Budgeted yearly and this rand changes with it. Type over it only when the meeting agrees a different rand. Not a %.
 - **What owners will be charged** and **Still short** calculate. Still short would be R20,000.
 - **Agreed reserve** is yellow. Type the reserve contribution in rands.
 
-Yellow cells can be typed. White cells are locked. Pink is a result to check, not a second charge. Green is the monthly levy the meeting approved. To unlock: Review, Unprotect Sheet, password **domus**.
+Yellow cells can be typed without a password. White cells are locked. Pink is a result to check, not a second charge. Green is the monthly levy the meeting approved. To unlock a white cell: Review, Unprotect Sheet, password **domus**. If Excel offered to repair the file, do not use that copy. Download a fresh one.
 
-On a cost line, type **Budgeted yearly** only. **Cost recoveries** come off that bill. **Funded by reserve** moves that rand to the reserve sheet.
+On a cost line, type **Budgeted yearly** only. **Cost recoveries** come off that bill. **Funded by reserve** moves that rand to the reserve sheet as you type. If a breakdown does not add up to the line, the levy still uses the line. Change the yellow line if the parts are the real bill.
 
 If you already know the decision before you download, you can set the same choice on the Income tab under **Meeting decision**. The sheet still shows it, so the meeting can change it.
 
@@ -6928,7 +6973,7 @@ Do not use **Erase everything** unless you mean to wipe the screen. Download fir
 ### 20. Notes for the PR
 On **Notes for the PR** the budget is the meeting, as if you are sitting next to the PR. Click the picture, or use the arrow keys.
 
-It goes in the same order as the workbook, and the sheet itself is on the slides. Excel does not have to be open during the meeting. First the **BUDGET** sheet, including the yellow agreed amount at the top. Then the **RESERVE** sheet. **Spent last year** is what was paid. **This year** is the 2026 plan. The 2027 column is on the list and is not in the closing balance. Then the **PQ** sheet, every unit. If the reserve is inside the levy, the PQ shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added. Excel is used afterwards, only to type the yellow number they agreed.
+It goes in the same order as the workbook, and the sheet itself is on the slides. Excel does not have to be open during the meeting. First the **BUDGET** sheet, including the yellow agreed amount at the top. Then the **RESERVE** sheet. **Spent last year** is what was paid. The **2027** total is the whole column on the plan, plus Funded by reserve. Then the **PQ** sheet, every unit. If the reserve is inside the levy, the PQ shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added. Excel is used afterwards, only to type the yellow number they agreed.
 
 Yellow is the only place they type. White cells follow. A pink cell is a shortfall. It is not added again. Typing a lower rand does not make a bill smaller.
 
@@ -7471,7 +7516,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             "First cycle is the year the job starts, for example 2025. Leave it blank if the rands are already in the year columns. "
             "Frequency is not a year. 10 means every 10 years. 3 means every 3 years. Leave it blank if the years are already filled. "
             "Current estimate is the whole project cost, if you have one. It is not 2026 and not 2027. "
-            f"The {NOW_YEAR + 1} column is next year. It stays on the list. On a {NOW_YEAR} budget it is not in the closing balance. Spent last year is what was paid. There is no %."
+            f"The {NOW_YEAR + 1} column is next year. The reserve total adds that whole column. Spent last year is what was paid. There is no %."
         )
         ymp_up = st.file_uploader("Upload 10-year plan Excel (or last year’s budget workbook)", type=["xlsx", "xls"], key="ymp_xlsx")
         if ymp_up and st.button("Load 10-year plan"):
