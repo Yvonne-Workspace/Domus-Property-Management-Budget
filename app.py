@@ -2997,7 +2997,7 @@ def generate_meeting_html(state: dict) -> bytes:
 
 
 def lock_sheet(sheet) -> None:
-    """Lock formulas, leave yellow cells open. Excel repairs the file if both select flags are off."""
+    """Lock formulas. Yellow cells stay open. Do not block clicking, or the yellow cells look locked too."""
     for row in sheet.iter_rows():
         for cell in row:
             rgb = getattr(getattr(cell.fill, "fgColor", None), "rgb", None)
@@ -3006,8 +3006,8 @@ def lock_sheet(sheet) -> None:
     sheet.protection.sheet = True
     sheet.protection.password = "domus"
     sheet.protection.enable()
-    sheet.protection.selectLockedCells = True
-    sheet.protection.selectUnlockedCells = True
+    sheet.protection.selectLockedCells = False
+    sheet.protection.selectUnlockedCells = False
 
 
 def _fix_logo_links(bio: BytesIO) -> BytesIO:
@@ -3017,6 +3017,13 @@ def _fix_logo_links(bio: BytesIO) -> BytesIO:
     with zipfile.ZipFile(BytesIO(raw)) as zin, zipfile.ZipFile(out, "w") as zout:
         for item in zin.infolist():
             data = zin.read(item.filename)
+            if item.filename.startswith("xl/worksheets/sheet") and item.filename.endswith(".xml"):
+                text = data.decode("utf-8")
+                # Leave these off the file. Excel's own default lets you click a cell.
+                # Writing them as 1 blocks every cell, so the yellow ones look locked too.
+                text = re.sub(r'\sselectLockedCells="[01]"', "", text)
+                text = re.sub(r'\sselectUnlockedCells="[01]"', "", text)
+                data = text.encode("utf-8")
             if item.filename.startswith("xl/drawings/_rels/") and item.filename.endswith(".rels"):
                 data = data.replace(b'Target="/xl/media/', b'Target="../media/')
             zout.writestr(item, data)
