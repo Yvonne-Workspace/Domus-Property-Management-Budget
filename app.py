@@ -735,6 +735,14 @@ def ordinary_actual(state: dict) -> float:
     return 0.0
 
 
+def levy_stay_amount(state: dict) -> float:
+    """What owners pay now, for the year. Used when the levy must not drop."""
+    current_m = float(state.get("current_monthly_levy") or 0)
+    if current_m > 0.5:
+        return current_m * 12.0
+    return ordinary_actual(state)
+
+
 def approved_ordinary(state: dict) -> float:
     """What owners are charged. Costs stay the reference until the meeting types a % or a rand."""
     costs = ordinary_total(state)
@@ -746,6 +754,9 @@ def approved_ordinary(state: dict) -> float:
         actual = ordinary_actual(state)
         if actual > 0.5:
             return actual * (1 + float(state.get("levy_approved_pct") or 0) / 100.0)
+    if mode == "hold":
+        stay = levy_stay_amount(state)
+        return stay if stay > 0.5 else costs
     return costs
 
 
@@ -3138,7 +3149,6 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B9"] = "What owners will be charged"
     ws["B10"] = "Still short. Above zero means the costs are still higher."
     ws["B10"].font = Font(italic=True, size=9, color="9C0006")
-    ws["H8"] = "This follows the costs. Leave it. It changes when a yellow amount changes. Type a rand here only when the meeting agrees less, for example 30000. The shortfall shows on the line below."
     ws["H8"].font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
     ws["H8"].alignment = Alignment(wrap_text=True, vertical="center")
     ws.row_dimensions[8].height = 32
@@ -3149,14 +3159,15 @@ def generate_excel(state: dict) -> BytesIO:
     ws["H13"] = "Type the reserve contribution for the year, in rands. Not a %. This is what owners pay into the reserve."
     ws["H13"].font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
     _ord_actual = ordinary_actual(state)
-    _costs_need = float(next((it.get("yearly") or 0) for it in s["levy"] if family(it.get("desc") or "") == "ordinary"))
     _mode = state.get("levy_approve_mode") or "costs"
-    if _mode == "amount" and float(state.get("levy_approved_amount") or 0) > 0.5:
-        _approved_year = float(state.get("levy_approved_amount") or 0)
-    elif _mode == "pct":
-        _approved_year = _ord_actual * (1 + float(state.get("levy_approved_pct") or 0) / 100.0)
-    else:
-        _approved_year = _costs_need
+    _approved_year = approved_ordinary(state)
+    _costs_need = ordinary_total(state)
+    ws["H8"] = (
+        "Levies stay as they are. This rand does not follow a drop in the costs. "
+        "What owners will be charged stays on the current levy. Still short goes below zero when the costs are lower."
+        if _mode == "hold" else
+        "This follows the costs. Leave it. It changes when a yellow amount changes. Type a rand here only when the meeting agrees less, for example 30000. The shortfall shows on the line below."
+    )
     if _ord_actual > 0.5:
         _seed_increase = _approved_year - _ord_actual
     else:
@@ -3633,7 +3644,9 @@ def generate_excel(state: dict) -> BytesIO:
         fml(ws.cell(7, 6), "IF(OrdinaryActual=0,F6,F6-OrdinaryActual)")
         fml(ws.cell(7, 7), "F7/12")
         agreed = ws.cell(8, 6)
-        if _mode == "amount" and float(state.get("levy_approved_amount") or 0) > 0.5:
+        if _mode in ("hold", "pct", "amount") and _approved_year > 0.5 and not (
+            _mode == "amount" and float(state.get("levy_approved_amount") or 0) < 0.5
+        ) and not (_mode == "pct" and _ord_actual < 0.5):
             inp(agreed, _seed_increase, MONEY)
         else:
             agreed.value = "=F7"
@@ -6763,6 +6776,8 @@ On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly, and Note
 ### 4. What ordinary levies are
 Ordinary levies are the rands the costs need. They are not last year’s levy plus a %.
 
+On **Levy Income**, under **Meeting decision**, choose **Levies stay as they are** when the costs are lower but the owners must keep paying the same levy. The cost lines stay lower. **What owners will pay** and the PQ stay on the current levy. The sheet shows the saving as a shortfall below zero. Type the current ordinary levy on the left first.
+
 **Ordinary = net municipal + expenditure + repairs + personnel + tax − income you tick − fixed charges owners pay on the invoice − rand the reserve pays**
 
 The box **Why is the levy this amount?** lists each piece in rand.
@@ -6962,7 +6977,7 @@ The meeting block is at the top of **BUDGET**.
 - **What the costs need** is locked.
 - **Increase the costs need** is locked. It is against last year’s levies received. The % beside it is that same comparison.
 - **Increase against what owners pay now** is the other %. It uses the yellow yearly amount, owners pay now times 12. Do not replace one % with the other.
-- **Agreed increase** is yellow and it follows the costs. Change a yellow Budgeted yearly and this rand changes with it. Type over it only when the meeting agrees a different rand. Not a %.
+- **Agreed increase** is yellow. It follows the costs until you choose otherwise. Choose **Levies stay as they are** when the costs are lower but the levy must not drop. The agreed rand is then zero against the current levy, and **Still short** goes below zero.
 - **What owners will be charged** and **Still short** calculate. Still short would be R20,000.
 - **Agreed reserve** is yellow. Type the reserve contribution in rands.
 
@@ -7039,21 +7054,19 @@ Yellow is the only place they type. White cells follow. A pink cell is a shortfa
         st.divider()
         st.subheader("Meeting decision — Levies received")
         st.caption(
-            "You do not set this before the meeting. Download the sheet. "
-            "In the meeting the trustees type the rand on Agreed increase. "
-            "If the costs need R50,000 more and they agree R30,000, they type 30000. Still short shows R20,000. "
-            "There is no % driving the levy. Agreed reserve is also a rand. "
-            "EACH UNIT shows what each owner pays a month."
+            "The cost lines do not change. This choice only sets what owners are charged. "
+            "Levies stay as they are keeps the current monthly levy, even when this year’s costs are lower."
         )
         _mode = st.radio(
             "What should owners be charged?",
-            ["costs", "pct", "amount"],
+            ["costs", "hold", "pct", "amount"],
             format_func=lambda x: {
                 "costs": "What the costs need",
+                "hold": "Levies stay as they are (no increase, and no decrease)",
                 "pct": "A % on last year’s levies",
                 "amount": "A rand amount for the year",
             }[x],
-            index=["costs", "pct", "amount"].index(st.session_state.get("levy_approve_mode") or "costs"),
+            index=["costs", "hold", "pct", "amount"].index(st.session_state.get("levy_approve_mode") or "costs"),
             key="levy_approve_mode",
         )
         _costs_now = ordinary_total(st.session_state)
@@ -7078,6 +7091,14 @@ Yellow is the only place they type. White cells follow. A pink cell is a shortfa
             f"Costs need **{money(_costs_now)}** ({money(_costs_now / 12)} a month). "
             f"Approved **{money(_approved_now)}** ({money(_approved_now / 12)} a month)."
         )
+        if _mode == "hold":
+            stay = levy_stay_amount(st.session_state)
+            if float(st.session_state.get("current_monthly_levy") or 0) > 0.5:
+                st.caption(f"Owners keep paying {money(stay)} a year ({money(stay / 12)} a month). A lower cost does not lower the levy.")
+            elif stay > 0.5:
+                st.caption(f"No current levy was typed, so this uses last year’s ordinary levy, {money(stay)}. A lower cost does not lower the levy.")
+            else:
+                st.warning("Type the current ordinary levy on the left, or put last year’s levy in Actual. Until then the levy stays on the costs.")
         if _actual_now > 0.5 and _mode == "pct":
             st.caption(f"Last year’s levies on the line: {money(_actual_now)}.")
         if _gap_now > 1:
