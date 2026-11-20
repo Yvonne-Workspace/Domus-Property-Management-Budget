@@ -3664,17 +3664,22 @@ def generate_excel(state: dict) -> BytesIO:
         fml(ws.cell(9, 7), "F9/12", "C6EFCE")
         fml(ws.cell(10, 6), "F6-F9", RED)
         fml(ws.cell(10, 7), "F10/12", RED)
-        ws["H7"] = "Increase on what owners pay now"
-        ws["H7"].font = Font(italic=True, size=9, color="1F4E79")
-        ws["I7"] = '=IF(PayNow=0,IF(OrdinaryActual=0,"",(F9-OrdinaryActual)/OrdinaryActual),(F9-PayNow)/PayNow)'
-        ws["I7"].number_format = "0.0%"
-        ws["I7"].font = Font(name="Calibri", size=10)
-        ws["I7"].border = THIN
         _pay_now_year = float(state.get("current_monthly_levy") or 0) * 12.0
         ws["AA1"] = _pay_now_year
         ws["AA1"].number_format = MONEY
         wb.defined_names.add(DefinedName(name="PayNow", attr_text="BUDGET!$AA$1"))
         ws.column_dimensions["AA"].hidden = True
+        if state.get("show_levy_pct"):
+            ws["B4"] = "Levy increase"
+            ws["B4"].font = Font(name="Calibri", bold=True, size=14, color=NAVY)
+            pct = ws["F4"]
+            pct.value = '=IF(PayNow=0,IF(OrdinaryActual=0,"",(F9-OrdinaryActual)/OrdinaryActual),(F9-PayNow)/PayNow)'
+            pct.number_format = "0.0%"
+            pct.font = Font(name="Calibri", bold=True, size=18, color=NAVY)
+            pct.border = THIN
+            pct.alignment = Alignment(horizontal="center")
+            ws["G4"] = "Worked out from the rand. It does not change the levy."
+            ws["G4"].font = Font(italic=True, size=9, color="1F4E79")
     if levy_rows.get("reserve"):
         res_row = levy_rows["reserve"]
         wb.defined_names.add(DefinedName(name="ReserveActual", attr_text=f"BUDGET!$D${res_row}"))
@@ -3699,6 +3704,16 @@ def generate_excel(state: dict) -> BytesIO:
     pq["A1"] = "PQ / LEVY SCHEDULE"
     pq["A1"].font = Font(bold=True, size=14, color=NAVY)
     pq["A2"] = state.get("complex_name") or ""
+    if state.get("show_levy_pct"):
+        pq["E1"] = "Levy increase"
+        pq["E1"].font = Font(name="Calibri", bold=True, size=14, color=NAVY)
+        pq["E1"].alignment = Alignment(horizontal="right", vertical="center")
+        pq_pct = pq["F1"]
+        pq_pct.value = "=BUDGET!F4"
+        pq_pct.number_format = "0.0%"
+        pq_pct.font = Font(name="Calibri", bold=True, size=18, color=NAVY)
+        pq_pct.border = THIN
+        pq_pct.alignment = Alignment(horizontal="center")
     bills = pq_bill_lines(state)
     inside = reserve_inside_levy(state) and reserve_contribution(state) > 0.5 and bool(levy_rows.get("reserve"))
     pq["B3"] = "Monthly"
@@ -4673,6 +4688,7 @@ def init():
     ss.setdefault("estate_levy_mode", "separate")
     ss.setdefault("estate_split", "equal")
     ss.setdefault("show_pct", False)
+    ss.setdefault("show_levy_pct", False)
 
 
 MOVE_TO = {
@@ -6930,14 +6946,14 @@ The names do not have to be identical. Sand beds, tree felling, windows, stairca
 ### 18. The meeting
 You prepare the budget. The trustees decide in the meeting.
 
-**Download Excel** on the Download tab. Tick **Include the % column** only when this complex wants the % shown. Tick **Actuals are estimates** when the Actual column is not a full 12 months. The notice sits in a large box to the right of the logo and says how many months were used. Then click **Build Excel file**. **BUDGET** is the levy. **RESERVE** is the reserve fund. **PQ** is the invoice. **EACH UNIT** is what each owner pays, split into common-property municipal, expenditure, repairs and the rest. **10 YMP** is the plan.
+**Download Excel** on the Download tab. Tick **Include the % column** only when this complex wants a % on each line. Tick **Show the levy increase % at the top** only when the increase is small enough to show the PRs. Leave it off when the increase is high. That % is on the Budget sheet and the PQ sheet. It follows the rand. It does not change the rand. Tick **Actuals are estimates** when the Actual column is not a full 12 months. The notice sits in a large box to the right of the logo. Then click **Build Excel file**. **BUDGET** is the levy. **RESERVE** is the reserve fund. **PQ** is the invoice. **EACH UNIT** is what each owner pays. **10 YMP** is the plan.
 
 The % on the sheet follows the yellow rand. It does not drive the rand. The meeting still agrees a rand on **Agreed increase**, not a %.
 
 The meeting block is at the top of **BUDGET**.
 
 - **What the costs need** is locked.
-- **Increase** is one figure, against what owners pay now. Type that monthly total on the left first. If the costs need 5.5% more than that, it shows 5.5%. There is no second %.
+- **Increase** is the rand the costs need above what owners pay now. The % is not on the sheet unless you ticked **Show the levy increase % at the top**. If the costs need 5.5% more, that tick shows 5.5%. There is no second %.
 - **Agreed increase** is yellow. Leave it to keep that increase. Type **0** when the levy must stay the same. **What owners will pay** then equals what they pay now, and the PQ does not change.
 - **What owners will be charged** and **Still short** calculate. Still short would be R20,000.
 - **Agreed reserve** is yellow. Type the reserve contribution in rands.
@@ -7614,6 +7630,11 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             help="Shows the % next to each line. It is worked out from Actual and Budgeted yearly. Changing the yellow rand changes the %. Typing a % does not change the rand.",
         )
         st.checkbox(
+            "Show the levy increase % at the top",
+            key="show_levy_pct",
+            help="Puts one % at the top of the Budget sheet and the PQ sheet. It follows the agreed rand. It does not change any amount. Leave it off when the increase is high.",
+        )
+        st.checkbox(
             "Actuals are estimates — show the notice next to the logo",
             key="show_estimate_note",
             help="Adds a large notice on the sheets. It says the Actual totals are estimates, using the months typed on the left. Ten months means the next two months may still change the totals.",
@@ -7624,10 +7645,12 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             xls = generate_excel(st.session_state)
             st.session_state["xlsx"] = xls.getvalue()
             st.session_state["_xlsx_pct"] = bool(st.session_state.get("show_pct"))
+            st.session_state["_xlsx_levy_pct"] = bool(st.session_state.get("show_levy_pct"))
             st.session_state["_xlsx_note"] = bool(st.session_state.get("show_estimate_note"))
         built = st.session_state.get("xlsx")
         stale = built and (
             st.session_state.get("_xlsx_pct") != bool(st.session_state.get("show_pct"))
+            or st.session_state.get("_xlsx_levy_pct") != bool(st.session_state.get("show_levy_pct"))
             or st.session_state.get("_xlsx_note") != bool(st.session_state.get("show_estimate_note"))
         )
         if stale:
