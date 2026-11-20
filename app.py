@@ -3739,7 +3739,7 @@ def generate_excel(state: dict) -> BytesIO:
     for j, (name, _y, _s) in enumerate(count_bills):
         count_col[name] = change_col + 1 + j
     bill_start = change_col + 1 + len(count_bills)
-    headers = ["#", "Unit", "PQ", "Paid last year"]
+    headers = ["#", "Unit", "PQ", "Pay now"]
     if inside:
         headers += ["Ordinary levy", "Reserve fund"]
     headers += ["Will pay this year", "Change"]
@@ -5069,7 +5069,7 @@ def local_box_help(key: str, state) -> str:
             "This is what owners pay **this month**, ordinary levy only, all units added together. "
             "Not the year total. Not the reserve, CSOS, insurance or garden.\n\n"
             "Look at the billing run. Add only the ordinary levy column. "
-            f"You have typed **{money(levy_m)}**. That fills **Paid last year** on the PQ. It does not change the budget."
+            f"You have typed **{money(levy_m)}**. That fills **Pay now** on the PQ. It does not change the budget until the meeting agrees an increase."
         )
     if key == "months":
         return (
@@ -5459,9 +5459,11 @@ def _pr_grids(state: dict, approved: float, current_m: float) -> dict:
     """The three sheets, drawn into the presentation so Excel does not have to be open."""
     costs = ordinary_total(state)
     actual = ordinary_actual(state)
-    increase = costs - actual if actual > 0.5 else costs
+    pay_year = float(state.get("current_monthly_levy") or 0) * 12.0
+    base = pay_year if pay_year > 0.5 else actual
+    increase = costs - base if base > 0.5 else costs
     agreed_levy = approved
-    agreed_increase = agreed_levy - actual if actual > 0.5 else agreed_levy
+    agreed_increase = agreed_levy - base if base > 0.5 else agreed_levy
     short = costs - agreed_levy
     reserve = reserve_contribution(state)
     last_r = 0.0
@@ -5470,9 +5472,9 @@ def _pr_grids(state: dict, approved: float, current_m: float) -> dict:
             last_r = float(r.get("actual") or 0)
     levy_rows = [
         ["What the costs need", costs, False, "White. Leave it. This is what the bills add up to."],
-        ["Increase the costs need", increase, False, "White. Leave it. How much more than last year."],
-        ["Agreed increase — type the rand", agreed_increase, True, "Yellow. This is the number the meeting changes."],
-        ["What owners will be charged", agreed_levy, False, "White. Last year plus the yellow rand."],
+        ["Increase the costs need", increase, False, "White. Leave it. How much more than what owners pay now."],
+        ["Agreed increase — type the rand", agreed_increase, True, "Yellow. Leave it, or type 0 if the levy must stay the same."],
+        ["What owners will be charged", agreed_levy, False, "White. What they pay now, plus the yellow rand."],
         ["Still short", short, False, "Pink if it is above zero. The bills have not gone down."],
         ["Last year’s contribution", last_r, False, "White. What was collected last year."],
         ["Agreed reserve — type the rand", reserve, True, "Yellow. The other number the meeting may change."],
@@ -5504,7 +5506,7 @@ def _pr_grids(state: dict, approved: float, current_m: float) -> dict:
         {"cells": [_cell("Overspent"), _cell(money(max(0.0, -close_d)), num=True, pink=close_d < -0.5), _cell(money(max(0.0, -close_f)), num=True, pink=close_f < -0.5), _cell("Above zero is the hole. Not added again.")]},
     ]}
     inside = reserve_inside_levy(state) and reserve > 0.5
-    headers = ["Unit", "PQ", "Paid last year"]
+    headers = ["Unit", "PQ", "Pay now"]
     if inside:
         headers += ["Ordinary levy", "Reserve fund"]
     headers += ["Will pay this year", "CSOS", "Total"]
@@ -5856,6 +5858,9 @@ def pr_pack(state: dict) -> dict:
             for x in movers[:3]
         ],
         "show_pct": bool(state.get("show_pct")),
+        "show_levy_pct": bool(state.get("show_levy_pct")),
+        "costs_year": money(ordinary_total(state)),
+        "costs_month": money(ordinary_total(state) / 12.0),
         "sections": sections,
         "close": close,
         "grids": _pr_grids(state, approved, current_m),
@@ -5903,11 +5908,12 @@ def pr_slides(pack: dict) -> list:
             "Start at the top. Do not scroll yet.",
             "The first block is the levy decision.",
             [
-                {"where": "What the costs need", "do": "White. Leave it.", "why": f"What it costs to run the complex. {pack.get('year_new') or ''} for the year. {pack.get('new') or ''} a month."},
-                {"where": "Increase the costs need", "do": "White. Leave it.", "why": "How much more than last year those costs need."},
-                {"where": "Agreed increase — type the rand", "do": "Yellow. This is the one you change.", "why": "It starts as the full increase. If the meeting will not pay that, type a smaller rand. Not a percentage."},
-                {"where": "What owners will be charged", "do": "White. It follows the yellow.", "why": "Last year plus the yellow rand. This is the levy."},
-                {"where": "Still short", "do": "Pink. Read it.", "why": "Above zero means the costs are still higher than the levy. The insurance and the city bill have not gone down."},
+                {"where": "What the costs need", "do": "White. Leave it.", "why": f"What the bills add up to. {pack.get('costs_year') or ''} for the year. {pack.get('costs_month') or ''} a month. This is not the levy yet."},
+                {"where": "Increase the costs need", "do": "White. Leave it.", "why": "How much more those bills are than what owners pay now. Not last year's cash received."},
+                {"where": "Agreed increase — type the rand", "do": "Yellow. This is the one you change.", "why": "Leave it to charge the full increase. Type 0 if the levy must stay the same. Type another rand only if the meeting agrees a different increase. Not a percentage."},
+                {"where": "What owners will be charged", "do": "White. It follows the yellow.", "why": "What they pay now, plus the yellow rand. If the yellow rand is 0, they pay the same and the PQ does not change."},
+                {"where": "Levy increase", "do": "At the top, only if it is there.", "why": "One %. It follows the yellow rand. It does not change the amount. If you do not see it, we left it off because the increase is high."},
+                {"where": "Still short", "do": "Pink. Read it.", "why": "Above zero means the costs are still higher than the levy. The bills have not gone down. Below zero means the costs are lower and the levy was not cut."},
             ],
             "Say this. Typing a lower rand does not make a bill smaller. It only says what owners will pay. If it is short, the meeting still has to say which bill comes down, or that the reserve pays it.",
         ),
@@ -6008,7 +6014,7 @@ def pr_slides(pack: dict) -> list:
                 "say": line.get("say") or "",
             })
     pq_steps = [
-        {"where": "Paid last year", "do": "What they pay now, shared by PQ.", "why": "It is the current ordinary levy on the left, not last year's received amount. If there is no increase, Will pay this year is the same."},
+        {"where": "Pay now", "do": "What they pay now, shared by PQ.", "why": "It is the current ordinary levy on the left, not last year's received amount. If the yellow rand is 0, Will pay this year is the same."},
     ]
     if inside:
         pq_steps += [
@@ -6598,7 +6604,7 @@ def main():
             value=float(st.session_state.current_monthly_levy),
             min_value=0.0,
             step=100.0,
-            help="What the whole complex collects now, for one month, ordinary levy only. This fills Paid last year on the PQ. It does not change the budget.",
+            help="What the whole complex pays now, for one month, ordinary levy only. This fills Pay now on the PQ. It is not last year's received levy.",
         )
         box_help("levy_now")
         st.session_state.actual_months = st.number_input(
@@ -6741,7 +6747,9 @@ On the left, in this order:
 
 If the WeConnectU file only covers part of the year, set **Months covered by the Actual column**. 12 means a full year and nothing is stretched. 7 means seven months, and the levy comparison is scaled up to a year. Leave it on **12** unless you mean to stretch.
 
-**Current ordinary levy — all units, one month** is what owners pay now, for the whole complex, for one month. It is only for the comparison at the top. It is not the new budget.
+**Current ordinary levy — all units, one month** is what owners pay **now**. Open the billing run and add the ordinary levy for every unit, for one month. If that total is R1,341.03, type **1341.03**. Do not type last year’s received levy divided by 12. That received amount stays in the Actual column. It is not the current levy.
+
+This number is the starting point. The increase on the sheet is against it. The PQ column **Pay now** is this number, shared by PQ. If there is no increase, **Will pay this year** stays on this number.
 
 ### 3. Type this year’s amounts
 On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly, and Notes.
@@ -6751,6 +6759,7 @@ On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly, and Note
 - The Excel sheet shows rands. Yellow cells are Budgeted yearly.
 - Some complexes also want the %. On **Download**, tick **Include the % column**, then click **Build Excel file**. The % is worked out from Actual and Budgeted yearly. Change the yellow rand and the % changes. Do not type on the %. Typing 10% on the sheet does not change the rand, so the meeting cannot underbudget.
 - Leave the tick off when the complex only wants rands.
+- On **Download**, **Show the levy increase % at the top** puts one % above the meeting block, and the same % on the PQ sheet. Tick it when the increase is small. Leave it off when the increase is high. The % follows the agreed rand. It does not change the rand.
 - If Actual is 0, type the Budgeted yearly. A % cannot make a rand from nothing.
 - **Monthly** is yearly ÷ 12. You cannot type it.
 - **Notes** go to the Comments column on the Excel sheet.
@@ -6904,6 +6913,8 @@ Upload the unit file in the sidebar or on **PQ / Levies**. If the PQ column is 0
 
 The **PQ** sheet is the invoice: Levies, Reserve, CSOS, Insurance and any fixed charge. Each owner’s levy share = their PQ × the monthly total. A fixed charge (garden, private refuse) is the same rand for every unit.
 
+The first money column is **Pay now**. It is the current ordinary levy from the left, shared by PQ. It is not last year’s cash received. **Will pay this year** follows the yellow agreed rand. If that rand is 0, the two columns are the same.
+
 If **Added into the ordinary levy** is chosen, the PQ tab shows **Ordinary levy** and **Reserve fund** as two amounts. **Will pay this year** is those two added. That is the one levy on the invoice. There is still no separate reserve line.
 
 **EACH UNIT** is a separate sheet. It does not change the PQ sheet. One row per unit, in rands a month:
@@ -6972,7 +6983,7 @@ Do not use **Erase everything** unless you mean to wipe the screen. Download fir
 ### 20. Notes for the PR
 On **Notes for the PR** the budget is the meeting, as if you are sitting next to the PR. Click the picture, or use the arrow keys.
 
-It goes in the same order as the workbook, and the sheet itself is on the slides. Excel does not have to be open during the meeting. First the **BUDGET** sheet, including the yellow agreed amount at the top. Then the **RESERVE** sheet. **Spent last year** is what was paid. The **2027** total is the whole column on the plan, plus Funded by reserve. Then the **PQ** sheet, every unit. If the reserve is inside the levy, the PQ shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added. Excel is used afterwards, only to type the yellow number they agreed.
+It goes in the same order as the workbook, and the sheet itself is on the slides. Excel does not have to be open during the meeting. First the **BUDGET** sheet, including the yellow agreed amount at the top. Then the **RESERVE** sheet. **Spent last year** is what was paid. The **2027** total is the whole column on the plan, plus Funded by reserve. Then the **PQ** sheet, every unit. **Pay now** is the current levy. **Will pay this year** follows the yellow rand. If that rand is 0, the two are the same. If the reserve is inside the levy, the PQ shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added. Excel is used afterwards, only to type the yellow number they agreed.
 
 Yellow is the only place they type. White cells follow. A pink cell is a shortfall. It is not added again. Typing a lower rand does not make a bill smaller.
 
@@ -7436,7 +7447,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             new_ordinary_m = approved_ordinary(st.session_state) / 12.0
             inside = reserve_inside_levy(st.session_state) and reserve_contribution(st.session_state) > 0.5
             reserve_m = reserve_contribution(st.session_state) / 12.0 if inside else 0.0
-            prev["Paid last year"] = prev["PQ"].astype(float) * last_m
+            prev["Pay now"] = prev["PQ"].astype(float) * last_m
             if inside:
                 prev["Ordinary levy"] = prev["PQ"].astype(float) * (new_ordinary_m - reserve_m)
                 prev["Reserve fund"] = prev["PQ"].astype(float) * reserve_m
@@ -7444,11 +7455,11 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 extra_cols = [c for c in extra_cols if c != "Levies"]
             else:
                 prev["Will pay this year"] = prev["PQ"].astype(float) * new_ordinary_m
-            prev["Change"] = prev["Will pay this year"] - prev["Paid last year"]
+            prev["Change"] = prev["Will pay this year"] - prev["Pay now"]
             if inside:
-                ordered = ["Unit", "PQ", "Paid last year", "Ordinary levy", "Reserve fund", "Will pay this year", "Change"] + extra_cols
+                ordered = ["Unit", "PQ", "Pay now", "Ordinary levy", "Reserve fund", "Will pay this year", "Change"] + extra_cols
             else:
-                ordered = ["Unit", "PQ", "Paid last year", "Will pay this year", "Change"] + extra_cols
+                ordered = ["Unit", "PQ", "Pay now", "Will pay this year", "Change"] + extra_cols
             if extra_cols or inside:
                 parts = (["Will pay this year"] if inside else []) + extra_cols
                 prev["Total monthly"] = prev[parts].sum(axis=1) if parts else 0.0
@@ -7459,7 +7470,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 show.columns = _dedupe_headers([str(c) for c in show.columns])
             if "PQ" in show.columns:
                 show["PQ"] = show["PQ"].astype(float).round(6)
-            money_cols = ["Paid last year", "Will pay this year", "Change"] + extra_cols
+            money_cols = ["Pay now", "Will pay this year", "Change"] + extra_cols
             if inside:
                 money_cols += ["Ordinary levy", "Reserve fund", "Total monthly"]
             elif extra_cols:
@@ -7487,12 +7498,12 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 )
             elif current_m > 0.5:
                 st.caption(
-                    f"Paid last year is the ordinary levy only ({money(current_m)} for the whole complex). "
+                    f"Pay now is the ordinary levy only ({money(current_m)} for the whole complex). "
                     f"Will pay this year is the new ordinary levy only ({money(new_ordinary_m)} for the whole complex). "
                     "Reserve, CSOS and insurance stay in their own columns. These two columns do not change the budget."
                 )
             else:
-                st.caption("Type the current ordinary levy in the sidebar to fill Paid last year. It does not change the budget.")
+                st.caption("Type the current ordinary levy on the left to fill Pay now. It does not change the budget.")
 
     with tabs[9]:
         st.subheader("10-year maintenance plan")
