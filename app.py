@@ -736,14 +736,11 @@ def ordinary_actual(state: dict) -> float:
 
 
 def levy_stay_amount(state: dict) -> float:
-    """Last year's ordinary levy. No increase and no decrease stay on this figure."""
-    actual = ordinary_actual(state)
-    if actual > 0.5:
-        return actual
+    """What owners pay now, for the year. No increase stays on this figure."""
     current_m = float(state.get("current_monthly_levy") or 0)
     if current_m > 0.5:
         return current_m * 12.0
-    return 0.0
+    return ordinary_actual(state)
 
 
 def approved_ordinary(state: dict) -> float:
@@ -764,10 +761,12 @@ def approved_ordinary(state: dict) -> float:
 
 
 def ordinary_change_rate(state: dict) -> float:
-    """How much the ordinary levy moves against last year. 0.10 means 10%."""
-    actual = ordinary_actual(state)
-    if actual > 0.5:
-        return approved_ordinary(state) / actual - 1.0
+    """How much the ordinary levy moves against what owners pay now. 0.10 means 10%."""
+    base = float(state.get("current_monthly_levy") or 0) * 12.0
+    if base < 0.5:
+        base = ordinary_actual(state)
+    if base > 0.5:
+        return approved_ordinary(state) / base - 1.0
     return 0.0
 
 
@@ -3167,12 +3166,15 @@ def generate_excel(state: dict) -> BytesIO:
     _approved_year = approved_ordinary(state)
     _costs_need = ordinary_total(state)
     ws["H8"] = (
-        "No increase. Type 0, or leave this 0. What owners will pay stays on last year's levy. The PQ does not change."
+        "No increase. Leave this at 0. What owners will pay stays on what they pay now. The PQ does not change."
         if _mode == "hold" else
-        "This follows the costs. Leave it to keep the true increase. Type 0 if the levy must stay the same as last year. Type another rand only when the meeting agrees a different increase."
+        "This follows the costs. Leave it to keep the true increase. Type 0 if the levy must stay the same. Type another rand only when the meeting agrees a different increase."
     )
-    if _ord_actual > 0.5:
-        _seed_increase = _approved_year - _ord_actual
+    _pay_base = float(state.get("current_monthly_levy") or 0) * 12.0
+    if _pay_base < 0.5:
+        _pay_base = _ord_actual
+    if _pay_base > 0.5:
+        _seed_increase = _approved_year - _pay_base
     else:
         _seed_increase = _approved_year
     approved_row = 9
@@ -3644,7 +3646,7 @@ def generate_excel(state: dict) -> BytesIO:
         wb.defined_names.add(DefinedName(name="OrdinaryActual", attr_text=f"BUDGET!$D${ord_row}"))
         fml(ws.cell(6, 6), f"F{ord_check}")
         fml(ws.cell(6, 7), "F6/12")
-        fml(ws.cell(7, 6), "IF(OrdinaryActual=0,F6,F6-OrdinaryActual)")
+        fml(ws.cell(7, 6), "IF(PayNow=0,IF(OrdinaryActual=0,F6,F6-OrdinaryActual),F6-PayNow)")
         fml(ws.cell(7, 7), "F7/12")
         agreed = ws.cell(8, 6)
         if _mode in ("hold", "pct", "amount") and _approved_year > 0.5 and not (
@@ -3658,16 +3660,21 @@ def generate_excel(state: dict) -> BytesIO:
             agreed.border = THIN
             agreed.protection = Protection(locked=False)
             agreed.number_format = MONEY
-        fml(ws.cell(9, 6), "IF(OrdinaryActual=0,F8,OrdinaryActual+F8)")
+        fml(ws.cell(9, 6), "IF(PayNow=0,IF(OrdinaryActual=0,F8,OrdinaryActual+F8),PayNow+F8)")
         fml(ws.cell(9, 7), "F9/12", "C6EFCE")
         fml(ws.cell(10, 6), "F6-F9", RED)
         fml(ws.cell(10, 7), "F10/12", RED)
-        ws["H7"] = "Increase"
+        ws["H7"] = "Increase on what owners pay now"
         ws["H7"].font = Font(italic=True, size=9, color="1F4E79")
-        ws["I7"] = '=IF(OrdinaryActual=0,"",(F9-OrdinaryActual)/OrdinaryActual)'
+        ws["I7"] = '=IF(PayNow=0,IF(OrdinaryActual=0,"",(F9-OrdinaryActual)/OrdinaryActual),(F9-PayNow)/PayNow)'
         ws["I7"].number_format = "0.0%"
         ws["I7"].font = Font(name="Calibri", size=10)
         ws["I7"].border = THIN
+        _pay_now_year = float(state.get("current_monthly_levy") or 0) * 12.0
+        ws["AA1"] = _pay_now_year
+        ws["AA1"].number_format = MONEY
+        wb.defined_names.add(DefinedName(name="PayNow", attr_text="BUDGET!$AA$1"))
+        ws.column_dimensions["AA"].hidden = True
     if levy_rows.get("reserve"):
         res_row = levy_rows["reserve"]
         wb.defined_names.add(DefinedName(name="ReserveActual", attr_text=f"BUDGET!$D${res_row}"))
@@ -3682,7 +3689,7 @@ def generate_excel(state: dict) -> BytesIO:
         row = levy_rows.get(fam)
         if not row:
             continue
-        fml(ws.cell(row, 6), f"IF(OrdinaryActual=0,0,D{row}*F9/OrdinaryActual)")
+        fml(ws.cell(row, 6), f"IF(PayNow=0,IF(OrdinaryActual=0,0,D{row}*F9/OrdinaryActual),D{row}*F9/PayNow)")
         fml(ws.cell(row, 7), f"F{row}/12")
     ws.column_dimensions["E"].hidden = not bool(state.get("show_pct"))
     if state.get("show_pct"):
@@ -3758,9 +3765,8 @@ def generate_excel(state: dict) -> BytesIO:
     levy_col = bill_start + next((j for j, (name, _, _) in enumerate(bills) if name == "Levies"), 0)
     levy_letter = get_column_letter(levy_col)
     will_letter = get_column_letter(will_col)
-    _last_month = float(state.get("current_monthly_levy") or 0)
-    fml(pq.cell(4, 4), f"IF(OrdinaryActual=0,{_last_month},OrdinaryActual/12)")
-    pq.cell(5, 4, "whole complex, last year's levy")
+    fml(pq.cell(4, 4), "IF(PayNow=0,IF(OrdinaryActual=0,0,OrdinaryActual/12),PayNow/12)")
+    pq.cell(5, 4, "whole complex, what they pay now")
     pq.cell(5, 4).font = Font(italic=True, size=8, color="666666")
     if inside:
         fml(pq.cell(4, reserve_split_col), f"BUDGET!G{levy_rows['reserve']}")
@@ -5986,7 +5992,7 @@ def pr_slides(pack: dict) -> list:
                 "say": line.get("say") or "",
             })
     pq_steps = [
-        {"where": "Paid last year", "do": "Last year's levy, shared by PQ.", "why": "It is last year's ordinary levy divided by 12. Do not type a second figure. If there is no increase, Will pay this year is the same."},
+        {"where": "Paid last year", "do": "What they pay now, shared by PQ.", "why": "It is the current ordinary levy on the left, not last year's received amount. If there is no increase, Will pay this year is the same."},
     ]
     if inside:
         pq_steps += [
@@ -6382,12 +6388,10 @@ def main():
     else:
         actual_year_full = actual_year
     current_m = float(st.session_state.get("current_monthly_levy") or 0)
-    if current_m <= 0 and actual_year_full > 0:
-        current_m = actual_year_full / 12
     approved = approved_ordinary(st.session_state)
     new_m = approved / 12
-    last_m = (actual_year / 12) if actual_year > 0.5 else current_m
-    levy_pct = 0.0 if last_m == 0 else (new_m / last_m) * 100 - 100
+    shown_now = current_m if current_m > 0.5 else ((actual_year / 12) if actual_year > 0.5 else 0.0)
+    levy_pct = 0.0 if shown_now == 0 else (new_m / shown_now) * 100 - 100
 
     if actual_year > 0 and ord_amt > 0 and 8 <= (ord_amt / actual_year) <= 15:
         st.error(
@@ -6399,7 +6403,7 @@ def main():
         )
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Last year's levy (monthly)" if actual_year > 0.5 else "What owners pay now (monthly)", money(last_m))
+    m1.metric("What owners pay now (monthly)", money(shown_now))
     m2.metric("What owners will pay (monthly)", money(new_m), delta=f"{levy_pct:+.1f}%")
     m3.metric("Approved ordinary levy", money(approved))
     m4.metric("Reserve for the year", money(float(reserve["yearly"]) if reserve else 0))
@@ -6739,7 +6743,7 @@ On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly, and Note
 ### 4. What ordinary levies are
 Ordinary levies are the rands the costs need. They are not last year’s levy plus a %.
 
-On **Levy Income**, under **Meeting decision**, choose **Levies stay as they are** when the levy must not change. Owners keep paying last year's ordinary levy. The PQ stays the same as last year. The cost lines can still be lower. The sheet then shows the saving under **Still short**, below zero.
+On **Levy Income**, under **Meeting decision**, choose **Levies stay as they are** when the levy must not change. Owners keep paying the current ordinary levy typed on the left. The PQ stays on that amount. Do not use last year's received levy for this. The sheet then shows any saving under **Still short**.
 
 **Ordinary = net municipal + expenditure + repairs + personnel + tax − income you tick − fixed charges owners pay on the invoice − rand the reserve pays**
 
@@ -6933,8 +6937,8 @@ The % on the sheet follows the yellow rand. It does not drive the rand. The meet
 The meeting block is at the top of **BUDGET**.
 
 - **What the costs need** is locked.
-- **Increase from last year's levy** is one figure. If the costs need 5.5% more than last year's levy, it shows 5.5%. There is no second %.
-- **Agreed increase** is yellow. Leave it to keep that increase. Type **0** when the levy must stay the same as last year. **What owners will pay** then equals last year's levy, and the PQ does not change.
+- **Increase** is one figure, against what owners pay now. Type that monthly total on the left first. If the costs need 5.5% more than that, it shows 5.5%. There is no second %.
+- **Agreed increase** is yellow. Leave it to keep that increase. Type **0** when the levy must stay the same. **What owners will pay** then equals what they pay now, and the PQ does not change.
 - **What owners will be charged** and **Still short** calculate. Still short would be R20,000.
 - **Agreed reserve** is yellow. Type the reserve contribution in rands.
 
@@ -7051,9 +7055,9 @@ Yellow is the only place they type. White cells follow. A pink cell is a shortfa
         if _mode == "hold":
             stay = levy_stay_amount(st.session_state)
             if stay > 0.5:
-                st.caption(f"No increase. Owners keep paying last year's levy, {money(stay)} a year ({money(stay / 12)} a month). The PQ stays the same.")
+                st.caption(f"No increase. Owners keep paying what they pay now, {money(stay)} a year ({money(stay / 12)} a month). The PQ stays the same.")
             else:
-                st.warning("Put last year's ordinary levy in Actual on Levy Income. Until then there is no last year to stay on.")
+                st.warning("Type the current ordinary levy on the left. That is what owners pay now.")
         if _actual_now > 0.5 and _mode == "pct":
             st.caption(f"Last year’s levies on the line: {money(_actual_now)}.")
         if _gap_now > 1:
@@ -7412,7 +7416,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 prev["Total monthly"] = prev[extra_cols].sum(axis=1)
             current_m = float(st.session_state.get("current_monthly_levy") or 0)
             last_year = ordinary_actual(st.session_state)
-            last_m = (last_year / 12.0) if last_year > 0.5 else current_m
+            last_m = current_m if current_m > 0.5 else ((last_year / 12.0) if last_year > 0.5 else 0.0)
             new_ordinary_m = approved_ordinary(st.session_state) / 12.0
             inside = reserve_inside_levy(st.session_state) and reserve_contribution(st.session_state) > 0.5
             reserve_m = reserve_contribution(st.session_state) / 12.0 if inside else 0.0
