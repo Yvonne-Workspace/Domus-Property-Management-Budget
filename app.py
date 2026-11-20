@@ -736,11 +736,14 @@ def ordinary_actual(state: dict) -> float:
 
 
 def levy_stay_amount(state: dict) -> float:
-    """What owners pay now, for the year. Used when the levy must not drop."""
+    """Last year's ordinary levy. No increase and no decrease stay on this figure."""
+    actual = ordinary_actual(state)
+    if actual > 0.5:
+        return actual
     current_m = float(state.get("current_monthly_levy") or 0)
     if current_m > 0.5:
         return current_m * 12.0
-    return ordinary_actual(state)
+    return 0.0
 
 
 def approved_ordinary(state: dict) -> float:
@@ -3043,6 +3046,7 @@ def _fix_logo_links(bio: BytesIO) -> BytesIO:
 
 
 def generate_excel(state: dict) -> BytesIO:
+    state["has_master_hoa"] = False
     apply_levy_lines(state)
     s = state["sections"]
     wb = Workbook()
@@ -3163,10 +3167,9 @@ def generate_excel(state: dict) -> BytesIO:
     _approved_year = approved_ordinary(state)
     _costs_need = ordinary_total(state)
     ws["H8"] = (
-        "Levies stay as they are. This rand does not follow a drop in the costs. "
-        "What owners will be charged stays on the current levy. Still short goes below zero when the costs are lower."
+        "No increase. Type 0, or leave this 0. What owners will pay stays on last year's levy. The PQ does not change."
         if _mode == "hold" else
-        "This follows the costs. Leave it. It changes when a yellow amount changes. Type a rand here only when the meeting agrees less, for example 30000. The shortfall shows on the line below."
+        "This follows the costs. Leave it to keep the true increase. Type 0 if the levy must stay the same as last year. Type another rand only when the meeting agrees a different increase."
     )
     if _ord_actual > 0.5:
         _seed_increase = _approved_year - _ord_actual
@@ -3659,25 +3662,12 @@ def generate_excel(state: dict) -> BytesIO:
         fml(ws.cell(9, 7), "F9/12", "C6EFCE")
         fml(ws.cell(10, 6), "F6-F9", RED)
         fml(ws.cell(10, 7), "F10/12", RED)
-        ws["H7"] = "Against levies received last year"
+        ws["H7"] = "Increase"
         ws["H7"].font = Font(italic=True, size=9, color="1F4E79")
-        ws["I7"] = '=IF(OrdinaryActual=0,"",F7/OrdinaryActual)'
+        ws["I7"] = '=IF(OrdinaryActual=0,"",(F9-OrdinaryActual)/OrdinaryActual)'
         ws["I7"].number_format = "0.0%"
         ws["I7"].font = Font(name="Calibri", size=10)
         ws["I7"].border = THIN
-        ws["B15"] = "Increase against what owners pay now"
-        ws["B15"].font = Font(italic=True, size=9, color="1F4E79")
-        ws["H15"] = "Owners pay now, the whole year. Yellow. This % uses that, not last year's received levies."
-        ws["H15"].font = Font(italic=True, size=9, color="1F4E79")
-        ws["H15"].alignment = Alignment(wrap_text=True, vertical="center")
-        inp(ws["I15"], float(state.get("current_monthly_levy") or 0) * 12, MONEY)
-        fml(ws["F15"], 'IF(I15=0,"",F6-I15)', RED)
-        fml(ws["G15"], 'IF(I15=0,"",F15/12)', RED)
-        ws["J15"] = '=IF(I15=0,"",F15/I15)'
-        ws["J15"].number_format = "0.0%"
-        ws["J15"].font = Font(name="Calibri", size=10)
-        ws["J15"].border = THIN
-        ws.row_dimensions[15].height = 28
     if levy_rows.get("reserve"):
         res_row = levy_rows["reserve"]
         wb.defined_names.add(DefinedName(name="ReserveActual", attr_text=f"BUDGET!$D${res_row}"))
@@ -3768,8 +3758,9 @@ def generate_excel(state: dict) -> BytesIO:
     levy_col = bill_start + next((j for j, (name, _, _) in enumerate(bills) if name == "Levies"), 0)
     levy_letter = get_column_letter(levy_col)
     will_letter = get_column_letter(will_col)
-    inp(pq.cell(4, 4), float(state.get("current_monthly_levy") or 0), MONEY)
-    pq.cell(5, 4, "whole complex, last year")
+    _last_month = float(state.get("current_monthly_levy") or 0)
+    fml(pq.cell(4, 4), f"IF(OrdinaryActual=0,{_last_month},OrdinaryActual/12)")
+    pq.cell(5, 4, "whole complex, last year's levy")
     pq.cell(5, 4).font = Font(italic=True, size=8, color="666666")
     if inside:
         fml(pq.cell(4, reserve_split_col), f"BUDGET!G{levy_rows['reserve']}")
@@ -5995,7 +5986,7 @@ def pr_slides(pack: dict) -> list:
                 "say": line.get("say") or "",
             })
     pq_steps = [
-        {"where": "Paid last year", "do": "What they pay now, shared by PQ.", "why": "Do not type it. It comes from the current levy on the side of the app."},
+        {"where": "Paid last year", "do": "Last year's levy, shared by PQ.", "why": "It is last year's ordinary levy divided by 12. Do not type a second figure. If there is no increase, Will pay this year is the same."},
     ]
     if inside:
         pq_steps += [
@@ -6361,6 +6352,7 @@ def show_pr_notes(state: dict) -> None:
 
 def main():
     init()
+    st.session_state.has_master_hoa = False
     apply_falcon_view_notes(st.session_state)
     pending = st.session_state.pop("_pending_insurance_bill", None)
     if pending is not None:
@@ -6394,7 +6386,8 @@ def main():
         current_m = actual_year_full / 12
     approved = approved_ordinary(st.session_state)
     new_m = approved / 12
-    levy_pct = 0.0 if current_m == 0 else (new_m / current_m) * 100 - 100
+    last_m = (actual_year / 12) if actual_year > 0.5 else current_m
+    levy_pct = 0.0 if last_m == 0 else (new_m / last_m) * 100 - 100
 
     if actual_year > 0 and ord_amt > 0 and 8 <= (ord_amt / actual_year) <= 15:
         st.error(
@@ -6406,7 +6399,7 @@ def main():
         )
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("What owners pay now (monthly)", money(current_m))
+    m1.metric("Last year's levy (monthly)" if actual_year > 0.5 else "What owners pay now (monthly)", money(last_m))
     m2.metric("What owners will pay (monthly)", money(new_m), delta=f"{levy_pct:+.1f}%")
     m3.metric("Approved ordinary levy", money(approved))
     m4.metric("Reserve for the year", money(float(reserve["yearly"]) if reserve else 0))
@@ -6415,11 +6408,10 @@ def main():
         d = (r.get("desc") or "").lower()
         if "xanadu" in d or "eco park" in d:
             xanadu_left += float(r.get("yearly") or 0)
-    if xanadu_left > 1 and not st.session_state.get("has_master_hoa"):
+    if xanadu_left > 1:
         st.warning(
-            f"An estate levy of {money(xanadu_left)} is still on the books. "
-            "Tick **We still bill an estate levy to owners** on Income if owners pay it through us. "
-            "If owners pay that estate themselves, set that expense to 0."
+            f"An estate line of {money(xanadu_left)} is still on Expenditure. "
+            "There is no second levy. If owners pay that estate themselves, set that line to 0."
         )
     if insurance_on_pq(st.session_state) is False and insurance_expense_amount(st.session_state) > 1:
         st.info(
@@ -6692,35 +6684,6 @@ def main():
             help="Leave this off. The reserve pays these jobs. Tick it only when this complex pays the plan from the levy.",
         )
         box_help("plan")
-        st.header("Second levy (master estate)")
-        st.caption("Use this when owners also pay another estate / HOA.")
-        st.session_state.estate_levy_name = st.text_input(
-            "Name on the owner schedule",
-            st.session_state.estate_levy_name,
-        )
-        st.session_state.estate_levy_mode = st.radio(
-            "Who collects it?",
-            ["separate", "we_collect"],
-            format_func=lambda x: (
-                "Owners pay the estate themselves — do not put it in our ordinary levy"
-                if x == "separate"
-                else "We collect it and pay the estate"
-            ),
-            index=0 if st.session_state.estate_levy_mode == "separate" else 1,
-        )
-        st.session_state.estate_levy_yearly = st.number_input(
-            "Estate levy for the whole complex (yearly rands)",
-            value=float(st.session_state.estate_levy_yearly),
-            min_value=0.0,
-            step=1000.0,
-        )
-        st.session_state.estate_split = st.radio(
-            "How is it split per unit?",
-            ["equal", "pq"],
-            format_func=lambda x: "Same amount each unit" if x == "equal" else "By PQ",
-            index=0 if st.session_state.estate_split == "equal" else 1,
-        )
-        box_help("estate")
         st.caption("This wipes the screen. Download Excel first if you still need the numbers.")
         if st.button("Erase everything"):
             for k in list(st.session_state.keys()):
@@ -6776,7 +6739,7 @@ On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly, and Note
 ### 4. What ordinary levies are
 Ordinary levies are the rands the costs need. They are not last year’s levy plus a %.
 
-On **Levy Income**, under **Meeting decision**, choose **Levies stay as they are** when the costs are lower but the owners must keep paying the same levy. The cost lines stay lower. **What owners will pay** and the PQ stay on the current levy. The sheet shows the saving as a shortfall below zero. Type the current ordinary levy on the left first.
+On **Levy Income**, under **Meeting decision**, choose **Levies stay as they are** when the levy must not change. Owners keep paying last year's ordinary levy. The PQ stays the same as last year. The cost lines can still be lower. The sheet then shows the saving under **Still short**, below zero.
 
 **Ordinary = net municipal + expenditure + repairs + personnel + tax − income you tick − fixed charges owners pay on the invoice − rand the reserve pays**
 
@@ -6787,7 +6750,6 @@ The box **Why is the levy this amount?** lists each piece in rand.
 - Reserve fund
 - CSOS
 - Insurance, when owners pay it on its own invoice line
-- A master-estate levy, when owners pay another estate through us
 - Garden service, when owners pay the gardener on the invoice (Fixed monthly charges). The Expenditure line stays. Only that invoice amount is left out of the levy. Garden repairs stay in.
 - Income you did **not** tick
 
@@ -6887,12 +6849,8 @@ On the Income tab, choose one:
 - **Inside the ordinary levy** — no extra column. The premium on Expenditure is part of the levy.
 - **Extra on the owner invoice** — owners pay it on its own PQ column. Keep the premium on Expenditure, whatever the line is called. It is **not** inside ordinary levies, and it is **not** a line under Levy Income. Type the yearly amount in the box on Income. Leave it 0 to use the premium.
 
-### 12. Master estate
-Tick **We still bill an estate levy to owners** only if owners pay another estate **through us**. Those amounts are extra PQ columns, not part of ordinary levies.
-
-If owners pay that estate themselves, leave the tick off and set that expense to R0. It must not sit in our levy.
-
-In the sidebar you can also name that levy, type the yearly total, and split it **the same rand each unit** or **by PQ**.
+### 12. No second levy
+There is no master-estate levy on this budget. Owners do not pay a second estate through this sheet. If an old estate line is still on Expenditure and owners pay that estate themselves, set that line to 0.
 
 ### 13. CSOS
 We collect CSOS from owners and pay the same amount to CSOS. Income and expense are the same rand, so owners are not charged twice. It is its own PQ column, not inside ordinary levies.
@@ -6975,9 +6933,8 @@ The % on the sheet follows the yellow rand. It does not drive the rand. The meet
 The meeting block is at the top of **BUDGET**.
 
 - **What the costs need** is locked.
-- **Increase the costs need** is locked. It is against last year’s levies received. The % beside it is that same comparison.
-- **Increase against what owners pay now** is the other %. It uses the yellow yearly amount, owners pay now times 12. Do not replace one % with the other.
-- **Agreed increase** is yellow. It follows the costs until you choose otherwise. Choose **Levies stay as they are** when the costs are lower but the levy must not drop. The agreed rand is then zero against the current levy, and **Still short** goes below zero.
+- **Increase from last year's levy** is one figure. If the costs need 5.5% more than last year's levy, it shows 5.5%. There is no second %.
+- **Agreed increase** is yellow. Leave it to keep that increase. Type **0** when the levy must stay the same as last year. **What owners will pay** then equals last year's levy, and the PQ does not change.
 - **What owners will be charged** and **Still short** calculate. Still short would be R20,000.
 - **Agreed reserve** is yellow. Type the reserve contribution in rands.
 
@@ -7093,12 +7050,10 @@ Yellow is the only place they type. White cells follow. A pink cell is a shortfa
         )
         if _mode == "hold":
             stay = levy_stay_amount(st.session_state)
-            if float(st.session_state.get("current_monthly_levy") or 0) > 0.5:
-                st.caption(f"Owners keep paying {money(stay)} a year ({money(stay / 12)} a month). A lower cost does not lower the levy.")
-            elif stay > 0.5:
-                st.caption(f"No current levy was typed, so this uses last year’s ordinary levy, {money(stay)}. A lower cost does not lower the levy.")
+            if stay > 0.5:
+                st.caption(f"No increase. Owners keep paying last year's levy, {money(stay)} a year ({money(stay / 12)} a month). The PQ stays the same.")
             else:
-                st.warning("Type the current ordinary levy on the left, or put last year’s levy in Actual. Until then the levy stays on the costs.")
+                st.warning("Put last year's ordinary levy in Actual on Levy Income. Until then there is no last year to stay on.")
         if _actual_now > 0.5 and _mode == "pct":
             st.caption(f"Last year’s levies on the line: {money(_actual_now)}.")
         if _gap_now > 1:
@@ -7119,26 +7074,6 @@ Yellow is the only place they type. White cells follow. A pink cell is a shortfa
             "Add a row, then Save.",
             income=True,
         )
-        st.session_state.has_master_hoa = st.checkbox(
-            "We still bill an estate levy to owners (they pay it through us).",
-            value=bool(st.session_state.get("has_master_hoa")),
-            help="Off = owners pay that estate themselves. On = extra columns on our owner schedule.",
-        )
-        if st.session_state.has_master_hoa:
-            st.divider()
-            section_form(
-                "hoa_income",
-                "Estate / HOA recovered from owners",
-                "Billed to owners on the PQ as extra columns. Not part of ordinary levies.",
-            )
-            st.divider()
-            section_form(
-                "hoa_expense",
-                "Estate / HOA paid to the estate",
-                "What we pay the master HOA. Not included in ordinary levies.",
-            )
-        else:
-            st.caption("Estate lines are hidden. Owners pay that estate directly — it does not go through this budget.")
         st.divider()
         section_form(
             "other",
@@ -7476,10 +7411,12 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             if extra_cols:
                 prev["Total monthly"] = prev[extra_cols].sum(axis=1)
             current_m = float(st.session_state.get("current_monthly_levy") or 0)
+            last_year = ordinary_actual(st.session_state)
+            last_m = (last_year / 12.0) if last_year > 0.5 else current_m
             new_ordinary_m = approved_ordinary(st.session_state) / 12.0
             inside = reserve_inside_levy(st.session_state) and reserve_contribution(st.session_state) > 0.5
             reserve_m = reserve_contribution(st.session_state) / 12.0 if inside else 0.0
-            prev["Paid last year"] = prev["PQ"].astype(float) * current_m
+            prev["Paid last year"] = prev["PQ"].astype(float) * last_m
             if inside:
                 prev["Ordinary levy"] = prev["PQ"].astype(float) * (new_ordinary_m - reserve_m)
                 prev["Reserve fund"] = prev["PQ"].astype(float) * reserve_m
