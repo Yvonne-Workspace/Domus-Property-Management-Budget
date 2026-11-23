@@ -367,6 +367,23 @@ def income_used(state: dict) -> float:
             total += max(0.0, float(r.get("yearly") or 0))
     for r in (state.get("sections") or {}).get("levy") or []:
         if r.get("reduces_levy") and levy_line_can_reduce(r.get("desc") or ""):
+            if goes_to_municipal(r) or goes_to_reserve(r, state):
+                continue
+            total += max(0.0, float(r.get("yearly") or 0))
+    return total
+
+
+def goes_to_municipal(item: dict) -> bool:
+    """True when this levy was raised to pay the city bill."""
+    dest = norm(item.get("goes_to") or "")
+    return dest in ("municipal", "municipal charges", "city bill")
+
+
+def municipal_from_special(state: dict) -> float:
+    """Budgeted special levies that pay the city bill. Taken off the municipal net once."""
+    total = 0.0
+    for r in (state.get("sections") or {}).get("levy") or []:
+        if goes_to_municipal(r):
             total += max(0.0, float(r.get("yearly") or 0))
     return total
 
@@ -389,8 +406,8 @@ def goes_to_reserve(item: dict, state: dict) -> bool:
 
 
 def goes_to_options(state: dict) -> list:
-    opts = ["— stays on the invoice —", "Reserve fund"]
-    seen = {"reserve fund"}
+    opts = ["— stays on the invoice —", "Reserve fund", "Municipal"]
+    seen = {"reserve fund", "municipal"}
     for key in ("special", "expenditure", "rm"):
         for r in (state.get("sections") or {}).get(key) or []:
             name = (r.get("desc") or "").strip()
@@ -715,9 +732,14 @@ def municipal_net(state: dict) -> float:
     return g - rec
 
 
+def municipal_in_levy(state: dict) -> float:
+    """City bill minus recoveries, minus a special levy that goes to municipal."""
+    return max(0.0, municipal_net(state) - municipal_from_special(state))
+
+
 def ordinary_total(state: dict) -> float:
     s = state["sections"]
-    total = municipal_net(state)
+    total = municipal_in_levy(state)
     for key in ("rm", "personnel", "tax", "expenditure"):
         total += sum(line_in_levy(state, r) for r in s[key])
     if state.get("special_in_ordinary"):
@@ -773,7 +795,7 @@ def ordinary_change_rate(state: dict) -> float:
 def levy_pieces(state: dict) -> list:
     s = state["sections"]
     return [
-        ("Net municipal (gross minus recoveries)", municipal_net(state)),
+        ("Net municipal (city bill minus recovered, minus a special levy sent to municipal)", municipal_in_levy(state)),
         ("Expenditure", sum(line_in_levy(state, r) for r in s["expenditure"])),
         ("R&M after insurance and recovery income", sum(line_in_levy(state, r) for r in s["rm"])),
         ("Personnel", sum(line_in_levy(state, r) for r in s["personnel"])),
@@ -3224,12 +3246,13 @@ def generate_excel(state: dict) -> BytesIO:
     cover_pending = []
     recovery_excel_rows = {}
     reserve_from_rows = []
+    muni_from_rows = []
     reserve_mark_rows = []
     write_bucket = {"name": None}
 
     def write(items, recovery_as_income=False, in_levy=False, owner_box=False, levy_tick=False, claim_col=False, reserve_col=False, mains=None, l_rows=None, no_pct=False):
         """Old pack formulas: F = D*(1+E), G = F/12. Recoveries shown as positive income when asked."""
-        nonlocal r, reserve_mark_rows, cover_pending, recovery_excel_rows, reserve_from_rows
+        nonlocal r, reserve_mark_rows, cover_pending, recovery_excel_rows, reserve_from_rows, muni_from_rows
         if not items:
             start = r
             r += 1
@@ -3386,6 +3409,10 @@ def generate_excel(state: dict) -> BytesIO:
                 if goes_to_reserve(it, state):
                     reserve_from_rows.append((r, desc))
                     extra = "Goes to the reserve fund. Added to the reserve contributions. Not part of the ordinary levy."
+                    note = f"{note} | {extra}".strip(" |") if note else extra
+                elif goes_to_municipal(it):
+                    muni_from_rows.append(r)
+                    extra = "Goes to municipal. Taken off the city bill inside the ordinary levy. Not added again."
                     note = f"{note} | {extra}".strip(" |") if note else extra
                 elif dest and norm(dest) not in ("", "stays on the invoice"):
                     extra = "Goes to " + dest + ". Taken off that account, not added again."
@@ -3604,12 +3631,17 @@ def generate_excel(state: dict) -> BytesIO:
             levy_buckets[bucket].append(piece)
 
     # Ordinary = net municipal + each cost line that is not billed separately (estate / insurance / garden / CSOS)
-    bits = f"F{net_muni}"
+    muni_piece = f"F{net_muni}"
+    if muni_from_rows:
+        muni_piece = f"MAX(0,F{net_muni}-(" + "+".join(f"F{n}" for n in muni_from_rows) + "))"
+    bits = muni_piece
     if levy_comp_rows:
         bits += "+" + "+".join(str(n) if isinstance(n, str) else f"F{n}" for n in levy_comp_rows)
     cut = []
     for it in list(s.get("other") or []) + list(s.get("levy") or []):
         if not it.get("reduces_levy") or abs(float(it.get("yearly") or 0)) < 0.5:
+            continue
+        if goes_to_municipal(it) or goes_to_reserve(it, state):
             continue
         if not levy_line_can_reduce(it.get("desc") or ""):
             continue
@@ -3623,7 +3655,7 @@ def generate_excel(state: dict) -> BytesIO:
     if reserve_inside_levy(state) and levy_rows.get("reserve"):
         bits += f"+F{levy_rows['reserve']}"
     bar("ORDINARY LEVY (what we charge)")
-    levy_words = "Ordinary levies = net municipal + expenditure + repairs + personnel + tax, minus income marked Yes, minus the rand funded by the reserve, minus fixed monthly charges the owners pay on the invoice."
+    levy_words = "Ordinary levies = net municipal + expenditure + repairs + personnel + tax, minus income marked Yes, minus the rand funded by the reserve, minus fixed monthly charges the owners pay on the invoice. A special levy set to Municipal is already taken off the city bill."
     if reserve_inside_levy(state):
         levy_words += " The reserve contribution is included."
     label = ws.cell(r, 2, "Ordinary levy")
@@ -6782,7 +6814,7 @@ The box **Why is the levy this amount?** lists each piece in rand.
 - Garden service, when owners pay the gardener on the invoice (Fixed monthly charges). The Expenditure line stays. Only that invoice amount is left out of the levy. Garden repairs stay in.
 - Income you did **not** tick
 
-On a special levy, open **Goes to** and choose **Reserve fund**. On the reserve sheet it shows on its own line, under the normal contribution. It is not added into the contribution line.
+On a special levy, open **Goes to**. **Reserve fund** sends that money into the reserve. **Municipal** means it was raised to pay the city bill: put the amount in **Budgeted yearly**, and that rand comes off the municipal amount inside the ordinary levy. It is not added again. A project or an expense works the same way for that cost.
 
 ### 5. Other income — you tick it
 On **Income → Other Income** each line has **Lower the levies**.
@@ -6816,7 +6848,7 @@ On **Municipal**, the city bill and the recovery are separate lines.
 
 - Type the city bill as a positive amount (electricity, water, sewerage, refuse, rates).
 - Type what owners pay back as a positive amount on the **Less: … recovered** line. Do not type a minus. Any line with the word **recovered** in the name is subtracted, including a sewer-plant recovery.
-- **Net municipal** = city bill minus recovered. That net is what goes into the levy.
+- **Net municipal** = city bill minus recovered. A special levy set to **Municipal** is then taken off. That net is what goes into the levy.
 - If recovered is less than the city bill, the difference is a **cost shortfall**. It is this year's **Actual**, not Budgeted yearly. It is already inside the actual net. Do not add it again. The **Budgeted yearly** net is what goes into the new levy. The same actual shortfall is shown on **Notes for the PR**.
 
 ### 8. Expenditure and repairs
@@ -7099,6 +7131,7 @@ Yellow is the only place they type. White cells follow. A pink cell is a shortfa
             "Levy Income",
             "Ordinary levies, the reserve levy and CSOS cannot lower the ordinary levy. "
             "On a special levy, use Goes to. Reserve fund sends that money into the reserve. "
+            "Municipal sends it to the city bill, so the ordinary levy does not also charge that rand. "
             "A project does the same. An expense takes it off that cost. "
             "Boathouse and boatport use the same % as the ordinary levy. Do not type their Budgeted yearly. Save puts it back. "
             "Any other levy can lower the ordinary levy: tick that box when the money helps pay repairs. "
@@ -7176,13 +7209,22 @@ Yellow is the only place they type. White cells follow. A pink cell is a shortfa
         n1, n2, n3 = st.columns(3)
         n1.metric("Budget city bill", money(yg))
         n2.metric("Budget recovered", money(yr))
-        n3.metric("Budget net (in the levy)", money(yg - yr))
-        st.caption(
-            f"Next year's levy uses the budget net: city bill {money(yg)} − recovered {money(yr)} = **{money(yg - yr)}**. "
-            "The shortfall above is this year's actuals. It is not the new budget. "
-            "Every line on this tab is a positive rand. Monthly = Budgeted yearly ÷ 12. "
-            "We subtract the lines named recovered. Do not add them to the city bill."
-        )
+        special_m = municipal_from_special(st.session_state)
+        net_in_levy = max(0.0, yg - yr - special_m)
+        n3.metric("Budget net (in the levy)", money(net_in_levy))
+        if special_m > 0.5:
+            st.caption(
+                f"Next year's levy uses {money(net_in_levy)}: "
+                f"city bill {money(yg)} − recovered {money(yr)} − special levy {money(special_m)}. "
+                "The special levy is not added again. The shortfall above is this year's actuals, not the new budget."
+            )
+        else:
+            st.caption(
+                f"Next year's levy uses the budget net: city bill {money(yg)} − recovered {money(yr)} = **{money(yg - yr)}**. "
+                "The shortfall above is this year's actuals. It is not the new budget. "
+                "Every line on this tab is a positive rand. Monthly = Budgeted yearly ÷ 12. "
+                "We subtract the lines named recovered. Do not add them to the city bill."
+            )
         gaps = municipal_gaps(st.session_state)
         missing_gross = [
             x["name"] for x in gaps
