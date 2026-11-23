@@ -733,8 +733,29 @@ def municipal_net(state: dict) -> float:
 
 
 def municipal_in_levy(state: dict) -> float:
-    """City bill minus recoveries, minus a special levy that goes to municipal."""
-    return max(0.0, municipal_net(state) - municipal_from_special(state))
+    """City bill, plus arrears the levy still has to pay.
+
+    A special levy set to Municipal pays the arrears first. Anything left of that
+    special levy comes off the current city bill. The reserve pays only its share
+    of the arrears. Nothing is added twice.
+    """
+    city = municipal_net(state)
+    arrears = max(0.0, float(state.get("muni_arrears") or 0))
+    special = municipal_from_special(state)
+    reserve_pay = max(0.0, float(state.get("muni_arrears_reserve") or 0))
+    special_on_arrears = min(special, arrears)
+    reserve_on = min(reserve_pay, max(0.0, arrears - special_on_arrears))
+    left = max(0.0, arrears - special_on_arrears - reserve_on)
+    special_left = max(0.0, special - special_on_arrears)
+    return max(0.0, city - special_left) + left
+
+
+def arrears_paid_by_reserve(state: dict) -> float:
+    """The reserve share of municipal arrears. Never more than the arrears left after the special levy."""
+    arrears = max(0.0, float(state.get("muni_arrears") or 0))
+    special = municipal_from_special(state)
+    typed = max(0.0, float(state.get("muni_arrears_reserve") or 0))
+    return min(typed, max(0.0, arrears - min(special, arrears)))
 
 
 def ordinary_total(state: dict) -> float:
@@ -874,6 +895,7 @@ def reserve_project_spend(state: dict) -> float:
     for key in ("expenditure", "rm", "personnel", "tax"):
         for r in state["sections"].get(key) or []:
             total += funded_by_reserve(state, r)
+    total += arrears_paid_by_reserve(state)
     return total
 
 
@@ -3532,6 +3554,34 @@ def generate_excel(state: dict) -> BytesIO:
             fml(ws.cell(r, 7), f"D{r}/12")
             r += 1
     r += 1
+    ws.cell(r, 2, "Municipal arrears").font = Font(bold=True)
+    inp(ws.cell(r, 4), float(state.get("muni_arrears_actual") or 0), MONEY)
+    inp(ws.cell(r, 6), float(state.get("muni_arrears") or 0), MONEY)
+    fml(ws.cell(r, 7), f"F{r}/12")
+    ws.cell(r, 8, "Old city accounts. Not this year's electricity, water or refuse. Yellow: type the rand.").font = Font(italic=True, size=9, color="1F4E79")
+    arrears_row = r
+    r += 1
+    ws.cell(r, 2, "Arrears paid by special levy")
+    if muni_from_rows:
+        fml(ws.cell(r, 6), "+".join(f"F{n}" for n in muni_from_rows))
+    else:
+        fml(ws.cell(r, 6), "0")
+    fml(ws.cell(r, 7), f"F{r}/12")
+    ws.cell(r, 8, "Special levies set to Municipal. Counted here first. Not added again.").font = Font(italic=True, size=9, color="1F4E79")
+    arrears_special_row = r
+    r += 1
+    ws.cell(r, 2, "Arrears paid by reserve")
+    inp(ws.cell(r, 6), float(state.get("muni_arrears_reserve") or 0), MONEY)
+    fml(ws.cell(r, 7), f"F{r}/12")
+    ws.cell(r, 8, "Yellow. This rand leaves the reserve. It shows on the reserve budget.").font = Font(italic=True, size=9, color="1F4E79")
+    arrears_reserve_row = r
+    r += 1
+    ws.cell(r, 2, "Arrears left in the ordinary levy").font = Font(bold=True)
+    fml(ws.cell(r, 6), f"MAX(0,F{arrears_row}-F{arrears_special_row}-F{arrears_reserve_row})", RED)
+    fml(ws.cell(r, 7), f"F{r}/12", RED)
+    ws.cell(r, 8, "What the levy still pays after the special levy and the reserve. Not added again.").font = Font(italic=True, size=9, color="9C0006")
+    arrears_left_row = r
+    r += 1
     def write_actual_after_recoveries(label, total_row, items):
         nonlocal r
         names = {norm(it.get("desc") or "") for it in items}
@@ -3631,9 +3681,7 @@ def generate_excel(state: dict) -> BytesIO:
             levy_buckets[bucket].append(piece)
 
     # Ordinary = net municipal + each cost line that is not billed separately (estate / insurance / garden / CSOS)
-    muni_piece = f"F{net_muni}"
-    if muni_from_rows:
-        muni_piece = f"MAX(0,F{net_muni}-(" + "+".join(f"F{n}" for n in muni_from_rows) + "))"
+    muni_piece = f"MAX(0,F{net_muni}-MAX(0,F{arrears_special_row}-F{arrears_row}))+F{arrears_left_row}"
     bits = muni_piece
     if levy_comp_rows:
         bits += "+" + "+".join(str(n) if isinstance(n, str) else f"F{n}" for n in levy_comp_rows)
@@ -3655,7 +3703,7 @@ def generate_excel(state: dict) -> BytesIO:
     if reserve_inside_levy(state) and levy_rows.get("reserve"):
         bits += f"+F{levy_rows['reserve']}"
     bar("ORDINARY LEVY (what we charge)")
-    levy_words = "Ordinary levies = net municipal + expenditure + repairs + personnel + tax, minus income marked Yes, minus the rand funded by the reserve, minus fixed monthly charges the owners pay on the invoice. A special levy set to Municipal is already taken off the city bill."
+    levy_words = "Ordinary levies = net municipal + arrears left after the special levy and the reserve + expenditure + repairs + personnel + tax, minus income marked Yes, minus the rand funded by the reserve, minus fixed monthly charges the owners pay on the invoice. A special levy set to Municipal pays the arrears first."
     if reserve_inside_levy(state):
         levy_words += " The reserve contribution is included."
     label = ws.cell(r, 2, "Ordinary levy")
@@ -4198,6 +4246,17 @@ def generate_excel(state: dict) -> BytesIO:
             plan_rows.append(rr)
             maint_rows.append(rr)
             rr += 1
+    res.cell(rr, 2, "Municipal arrears").border = THIN
+    res.cell(rr, 2).font = Font(name="Calibri", size=10)
+    fml(
+        res.cell(rr, 6),
+        f"MIN(N(BUDGET!F{arrears_reserve_row}),MAX(0,N(BUDGET!F{arrears_row})-N(BUDGET!F{arrears_special_row})))",
+    )
+    res.cell(rr, 8, "The part of the municipal arrears the reserve pays. A special levy pays its own part first. This rand leaves the reserve. It is not added again.").font = Font(italic=True, size=9, color="1F4E79")
+    res.cell(rr, 8).alignment = Alignment(wrap_text=True, vertical="center")
+    arrears_pay_row = rr
+    plan_rows.append(rr)
+    rr += 1
     funded_row = rr
     res.cell(rr, 2, "Funded by reserve (typed on the levy sheet)").border = THIN
     res.cell(rr, 2).font = Font(name="Calibri", size=10)
@@ -4226,18 +4285,18 @@ def generate_excel(state: dict) -> BytesIO:
     res.cell(tot_r, 2, "TOTAL RESERVE EXPENDITURE").font = Font(bold=True)
     fml(res.cell(tot_r, 4), "+".join(f"D{n}" for n in plan_rows), TOTAL)
     manual = "+".join(f"N(F{n})" for n in manual_plan_rows)
-    spend = plan_sum + (("+" + manual) if manual else "") + f"+N(F{funded_row})"
+    spend = plan_sum + (("+" + manual) if manual else "") + f"+N(F{funded_row})+N(F{arrears_pay_row})"
     if state.get("special_in_ordinary"):
-        spend = f"N(F{funded_row})"
+        spend = f"N(F{funded_row})+N(F{arrears_pay_row})"
     fml(res.cell(tot_r, 6), spend, TOTAL)
     fml(res.cell(tot_r, 7), f"F{tot_r}/12", TOTAL)
     fml(res.cell(maint_summary, 4), f"D{tot_r}")
     if state.get("special_in_ordinary"):
-        fml(res.cell(maint_summary, 6), f"N(F{funded_row})")
+        fml(res.cell(maint_summary, 6), f"N(F{funded_row})+N(F{arrears_pay_row})")
         res.cell(maint_summary, 8, "The plan is paid from the levy, so it is not taken off the reserve. Funded by reserve still is.")
     else:
         fml(res.cell(maint_summary, 6), spend)
-        res.cell(maint_summary, 8, f"The whole {plan_year} column on the 10-year plan, rows 6 to 200, plus Funded by reserve. One project line is not this total.")
+        res.cell(maint_summary, 8, f"The whole {plan_year} column on the 10-year plan, rows 6 to 200, plus Funded by reserve, plus municipal arrears the reserve pays. One project line is not this total.")
     res.cell(maint_summary, 8).font = Font(italic=True, size=9, color="1F4E79")
     res.cell(maint_summary, 8).alignment = Alignment(wrap_text=True, vertical="center")
     lock_sheet(res)
@@ -4270,6 +4329,9 @@ def generate_excel(state: dict) -> BytesIO:
         "tax_auto": bool(state.get("tax_auto", True)),
         "deck_copy": state.get("deck_copy") or {},
         "facilities": state.get("facilities") or {},
+        "muni_arrears": float(state.get("muni_arrears") or 0),
+        "muni_arrears_actual": float(state.get("muni_arrears_actual") or 0),
+        "muni_arrears_reserve": float(state.get("muni_arrears_reserve") or 0),
     }
     blob = json.dumps(payload, ensure_ascii=False)
     # Excel cell cap is 32767; split across rows if needed.
@@ -4721,6 +4783,9 @@ def init():
     ss.setdefault("estate_split", "equal")
     ss.setdefault("show_pct", False)
     ss.setdefault("show_levy_pct", False)
+    ss.setdefault("muni_arrears", 0.0)
+    ss.setdefault("muni_arrears_actual", 0.0)
+    ss.setdefault("muni_arrears_reserve", 0.0)
 
 
 MOVE_TO = {
@@ -5671,8 +5736,30 @@ def pr_pack(state: dict) -> dict:
             "tone": "same",
             "impact": 0,
             "where": "Next year's budget",
-            "say": f"Next year's levy carries {money(net)} of the city bill, after what owners are expected to pay back. That is the budget, not this year's shortfall.",
+            "say": f"Next year's levy carries {money(municipal_in_levy(state))} of the city bill, after recoveries, arrears, the special levy and the reserve. That is the budget, not this year's shortfall.",
         }]
+        _arrears_now = max(0.0, float(state.get("muni_arrears") or 0))
+        if _arrears_now > 0.5:
+            _spec = municipal_from_special(state)
+            _resv = arrears_paid_by_reserve(state)
+            _left_now = max(0.0, _arrears_now - min(_spec, _arrears_now) - _resv)
+            extra_lines.append({
+                "name": "Municipal arrears",
+                "last": money(float(state.get("muni_arrears_actual") or 0)),
+                "budget": money(_arrears_now),
+                "change": "Old city accounts",
+                "headline": f"Arrears {money(_arrears_now)}. Special levy {money(_spec)}. Reserve {money(_resv)}.",
+                "tone": "up" if _left_now > 0.5 else "same",
+                "impact": _left_now,
+                "where": "The reserve part is on the reserve budget. It is not added again.",
+                "say": (
+                    f"Municipal arrears to pay are {money(_arrears_now)}. "
+                    f"The special levy pays {money(min(_spec, _arrears_now))}. "
+                    f"The reserve pays {money(_resv)}. "
+                    f"The levy still pays {money(_left_now)}. "
+                    "The reserve amount is on the reserve budget and comes off the reserve. It is not added again."
+                ),
+            })
         for gap in municipal_gaps(state, "actual"):
             g = float(gap.get("gap") or 0)
             if g > 0.5:
@@ -6620,6 +6707,7 @@ def main():
                     "current_monthly_levy", "actual_months", "tax_auto",
                     "levy_approve_mode", "levy_approved_pct", "levy_approved_amount",
                     "deck_copy", "facilities",
+                    "muni_arrears", "muni_arrears_actual", "muni_arrears_reserve",
                 ):
                     if k in data and data[k] is not None:
                         st.session_state[k] = data[k]
@@ -6848,7 +6936,7 @@ On **Municipal**, the city bill and the recovery are separate lines.
 
 - Type the city bill as a positive amount (electricity, water, sewerage, refuse, rates).
 - Type what owners pay back as a positive amount on the **Less: … recovered** line. Do not type a minus. Any line with the word **recovered** in the name is subtracted, including a sewer-plant recovery.
-- **Net municipal** = city bill minus recovered. A special levy set to **Municipal** is then taken off. That net is what goes into the levy.
+- **Net municipal** = city bill minus recovered. A special levy set to **Municipal** pays **Municipal arrears** first. Type the arrears on this tab, and how much the **reserve** pays. What is left stays in the ordinary levy. The reserve part shows on the reserve budget and comes off the reserve. It is not added again.
 - If recovered is less than the city bill, the difference is a **cost shortfall**. It is this year's **Actual**, not Budgeted yearly. It is already inside the actual net. Do not add it again. The **Budgeted yearly** net is what goes into the new levy. The same actual shortfall is shown on **Notes for the PR**.
 
 ### 8. Expenditure and repairs
@@ -7210,21 +7298,46 @@ Yellow is the only place they type. White cells follow. A pink cell is a shortfa
         n1.metric("Budget city bill", money(yg))
         n2.metric("Budget recovered", money(yr))
         special_m = municipal_from_special(st.session_state)
-        net_in_levy = max(0.0, yg - yr - special_m)
+        net_in_levy = municipal_in_levy(st.session_state)
         n3.metric("Budget net (in the levy)", money(net_in_levy))
-        if special_m > 0.5:
-            st.caption(
-                f"Next year's levy uses {money(net_in_levy)}: "
-                f"city bill {money(yg)} − recovered {money(yr)} − special levy {money(special_m)}. "
-                "The special levy is not added again. The shortfall above is this year's actuals, not the new budget."
-            )
-        else:
-            st.caption(
-                f"Next year's levy uses the budget net: city bill {money(yg)} − recovered {money(yr)} = **{money(yg - yr)}**. "
-                "The shortfall above is this year's actuals. It is not the new budget. "
-                "Every line on this tab is a positive rand. Monthly = Budgeted yearly ÷ 12. "
-                "We subtract the lines named recovered. Do not add them to the city bill."
-            )
+        st.markdown("**Municipal arrears**")
+        st.caption(
+            "Old city accounts. Not this year's electricity, water or refuse. "
+            "A special levy set to Municipal on Income is counted first. "
+            "Type what the reserve pays. What is left stays in the ordinary levy. "
+            "The reserve part shows on the reserve budget and comes off the reserve. It is not added again."
+        )
+        ar1, ar2, ar3 = st.columns(3)
+        st.session_state.muni_arrears_actual = ar1.number_input(
+            "Arrears paid last year",
+            min_value=0.0,
+            step=1000.0,
+            value=float(st.session_state.get("muni_arrears_actual") or 0),
+            help="What was settled last year. It does not go into next year's levy.",
+        )
+        st.session_state.muni_arrears = ar2.number_input(
+            "Arrears to pay this year",
+            min_value=0.0,
+            step=1000.0,
+            value=float(st.session_state.get("muni_arrears") or 0),
+        )
+        st.session_state.muni_arrears_reserve = ar3.number_input(
+            "Of that, the reserve pays",
+            min_value=0.0,
+            step=1000.0,
+            value=float(st.session_state.get("muni_arrears_reserve") or 0),
+        )
+        _arrears = float(st.session_state.muni_arrears or 0)
+        _reserve_pay = arrears_paid_by_reserve(st.session_state)
+        _left = max(0.0, _arrears - min(special_m, _arrears) - _reserve_pay)
+        st.caption(
+            f"Next year's levy uses {money(net_in_levy)}. "
+            f"City bill {money(yg)} − recovered {money(yr)}. "
+            f"Arrears {money(_arrears)}. Special levy {money(special_m)}. Reserve {money(_reserve_pay)}. "
+            f"Left in the levy from the arrears: {money(_left)}. Nothing is added twice."
+        )
+        if float(st.session_state.muni_arrears_reserve or 0) > _reserve_pay + 0.5:
+            st.warning("The reserve amount is more than the arrears left after the special levy. Only the arrears amount leaves the reserve.")
         gaps = municipal_gaps(st.session_state)
         missing_gross = [
             x["name"] for x in gaps
