@@ -5765,7 +5765,10 @@ def pr_pack(state: dict) -> dict:
                 "Say this. This is tax on interest and other income, not on the levies. The first R 50,000.00 is free."
             ),
             "Special projects": (
-                "Say this. These jobs cannot wait. Owners pay them in the ordinary levy this year. They are not the reserve and not the 10-year plan."
+                "Say this. Stop here before the reserve. These jobs cannot wait. Owners pay them in the ordinary levy this year. "
+                "They are not the reserve fund and they are not the 10-year plan. "
+                "Yellow is the amount for the job. If the meeting changes it, the levy moves. "
+                "A job that can wait stays on the reserve sheet. Do not add the same job in both places."
             ),
         }
         block = _section(title, lines, intros.get(title, ""))
@@ -6003,12 +6006,13 @@ def pr_slides(pack: dict) -> list:
     slides.append(guide(
         "BUDGET sheet",
         "Now scroll down. One block at a time.",
-        "Levy income, other income, recoveries, the city bill, expenditure, repairs, personnel, tax. Same order as the sheet.",
+        "Levy income, other income, recoveries, the city bill, expenditure, repairs, personnel, tax, then special projects. Same order as the sheet.",
         [
             {"where": "Last year", "do": "What already happened", "why": "On the sheet this column is called Actual."},
             {"where": "Next year", "do": "Yellow, if the meeting changes that bill", "why": "On the sheet this column is called Budgeted Yearly. Leave it unless that bill must change."},
             {"where": "Each month", "do": "Next year divided by 12", "why": "Not a second charge."},
             {"where": "A note", "do": "Why the line moved", "why": "Read the note before you change the yellow amount."},
+            {"where": "Special projects", "do": "Jobs that cannot wait", "why": "Still on this Budget sheet, after tax. Inside the ordinary levy. Not the reserve. Not the 10-year plan. A job with no amount is not on the sheet."},
         ],
         "Go line by line. Say what it is, what it was, and what it will be. A line that says it is not in the levy is not added again.",
     ))
@@ -6033,6 +6037,19 @@ def pr_slides(pack: dict) -> list:
             reserve_grid = (pack.get("grids") or {}).get("reserve") or {}
             if reserve_grid.get("rows"):
                 slides.append({"kind": "grid", "sheet": "RESERVE sheet", "title": "The top of the reserve sheet", "lead": "Same rows as the Excel sheet. You do not need the file open.", **reserve_grid})
+        if sec["title"] == "Special projects":
+            slides.append(guide(
+                "BUDGET sheet",
+                "Special projects. These cannot wait.",
+                "This block is still on the BUDGET sheet, after tax. It is inside the ordinary levy. It is not the reserve and not the 10-year plan.",
+                [
+                    {"where": "What it is", "do": "A job that must be done this year.", "why": "A gate motor, a pump, a repair that cannot wait. Not a saving for later."},
+                    {"where": "Where the money comes from", "do": "The ordinary levy.", "why": "Owners pay it in the levy. It is not taken off the reserve."},
+                    {"where": "Yellow", "do": "Budgeted yearly, only if the meeting changes that job.", "why": "Change the rand and the levy moves. Leave it if the job stays."},
+                    {"where": "Not this block", "do": "The 10-year plan.", "why": "A job for a later year stays on the RESERVE sheet. Do not add the same job here as well."},
+                ],
+                "Say this. These jobs are part of the levy. They are not the reserve. If a job can wait, it belongs on the 10-year plan, not here.",
+            ))
         slides.append({
             "kind": "section",
             "title": sec["title"],
@@ -6957,10 +6974,23 @@ Owners do not pay SARS every month. The monthly column is only so the levy can f
 
 If the estimate is R0, nothing is paid. If tax is payable, SARS usually wants provisional tax: one payment six months into the year, and one at year-end. A top-up can be due a few months after year-end. A February year-end is often 31 August, 28 February, and a top-up by 30 September if needed. The return is filed after year-end. Confirm the dates and the amount with the auditor.
 
-### 15. Personnel, special projects and 10-year projects
-**Personnel** is salaries, casuals, PAYE / UIF, travel, bonuses and the like.
+### 15. Special projects — work that cannot wait
+This is its own tab, **Special projects**. Use it only for a job that must be done now.
 
-**Special projects** are jobs that cannot wait. They are on the **Budget** sheet and inside the ordinary levy. They are not the reserve and not the 10-year plan. Type Actual and Budgeted yearly, then Save. A blank row with no amount is left off the sheet.
+It is part of the ordinary levy. It is not the reserve fund. It is not the 10-year plan.
+
+- Type the job name, the **Actual** if it was already spent, and the **Budgeted yearly**. Then **Save this section**.
+- Add a row for each job. Delete the blank row if this complex has none.
+- A row with no amount is left off the Excel sheet. It does not change the levy.
+- On the **Budget** sheet the block is called **SPECIAL PROJECTS**. The ordinary levy adds those rands. The **RESERVE** sheet does not show them.
+- **EACH UNIT** shows a Special projects column only when there is an amount. That is each unit’s share of the same levy. It is not a second charge.
+- Yellow on the sheet is **Budgeted yearly**. If the meeting changes that rand, the levy moves with it.
+- If a line landed on Expenditure or Repairs by mistake, use **Move to → Special projects**, then Save.
+- If the job can wait, or it is on the 10-year plan, do not put it here. Put it on **10-year projects**. The reserve pays that.
+- Do not put the same job in both places. Owners would pay it twice.
+
+### 16. Personnel and the 10-year plan
+**Personnel** is salaries, casuals, PAYE / UIF, travel, bonuses and the like.
 
 **10 Year Maintenance Projects** do not show on the levy sheet. They are the reserve fund's costs. **GL code** is the WeConnectU code. **Spent last year** is what was paid. **Budgeted this year** is this year's plan. **Over / under** is spent last year minus that plan. Above zero means it cost more than was planned. **Next year** is 2027. The reserve total adds the whole 2027 column. It is in the closing balance. There is no %. Tick **Pay the 10-year projects from the ordinary levy** only when this complex pays the plan from the levy. Then they move onto the levy sheet and off the reserve sheet.
 
@@ -6968,7 +6998,7 @@ A job you did not do, and that has no amount next year, is not on this list. It 
 
 A cost that is not on the plan can still be paid by the reserve. Type the rand in **Funded by reserve**. A part is allowed. Do not also leave that same rand in the levy.
 
-### 16. PQ and what each unit pays
+### 17. PQ and what each unit pays
 Upload the unit file in the sidebar or on **PQ / Levies**. If the PQ column is 0, the app uses **Ratio 1**. The ratios must add up to about 1.000.
 
 The **PQ** sheet is the invoice: Levies, Reserve, CSOS, Insurance and any fixed charge. Each owner’s levy share = their PQ × the monthly total. A fixed charge (garden, private refuse) is the same rand for every unit.
@@ -6992,7 +7022,7 @@ If the meeting agrees less than the costs need, these rows use the lower rand. *
 
 Boathouse and boatport stay on the budget, under Levy Income. They move with the agreed levy, in the same proportion as last year. They are not on the PQ.
 
-### 17. 10-year plan and the projects
+### 18. 10-year plan and the projects
 Do these steps in this order.
 
 1. On the left, choose the WeConnectU **Actual vs Budget** file and click **Load Excel**.
@@ -7015,7 +7045,7 @@ Do these steps in this order.
 
 The names do not have to be identical. Sand beds, tree felling, windows, staircase lights and jetty are matched. If a name is quite different, such as Roadways and Access Road, you will see two lines. That is correct. Do not force them together.
 
-### 18. The meeting
+### 19. The meeting
 You prepare the budget. The trustees decide in the meeting.
 
 **Download Excel** on the Download tab. Tick **Include the % column** only when this complex wants a % on each line. Tick **Show the levy increase % at the top** only when the increase is small enough to show the PRs. Leave it off when the increase is high. That % is on the Budget sheet and the PQ sheet. It follows the rand. It does not change the rand. Tick **Actuals are estimates** when the Actual column is not a full 12 months. The notice sits in a large box to the right of the logo. Then click **Build Excel file**. **BUDGET** is the levy. **RESERVE** is the reserve fund. **PQ** is the invoice. **EACH UNIT** is what each owner pays. **10 YMP** is the plan.
@@ -7036,15 +7066,15 @@ On a cost line, type **Budgeted yearly** only. **Cost recoveries** come off that
 
 If you already know the decision before you download, you can set the same choice on the Income tab under **Meeting decision**. The sheet still shows it, so the meeting can change it.
 
-### 19. When the sheet comes back
+### 20. When the sheet comes back
 **Restore my budget** on the left, and choose their file. Their approved levy, yellow cells, notes, which income lowers the levy, and which recovery comes off which cost, come back. Then download again if you need a clean sheet.
 
 Do not use **Erase everything** unless you mean to wipe the screen. Download first if you still need the numbers.
 
-### 20. Notes for the PR
+### 21. Notes for the PR
 On **Notes for the PR** the budget is the meeting, as if you are sitting next to the PR. Click the picture, or use the arrow keys.
 
-It goes in the same order as the workbook, and the sheet itself is on the slides. Excel does not have to be open during the meeting. First the **BUDGET** sheet, including the yellow agreed amount at the top. Then the **RESERVE** sheet. **Spent last year** is what was paid. The **2027** total is the whole column on the plan, plus Funded by reserve. Then the **PQ** sheet, every unit. **Pay now** is the current levy. **Will pay this year** follows the yellow rand. If that rand is 0, the two are the same. If the reserve is inside the levy, the PQ shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added. Excel is used afterwards, only to type the yellow number they agreed.
+It goes in the same order as the workbook, and the sheet itself is on the slides. Excel does not have to be open during the meeting. First the **BUDGET** sheet, including the yellow agreed amount at the top. Special projects are on that sheet, after tax. Say that those jobs cannot wait and are inside the levy. They are not the reserve. Then the **RESERVE** sheet. **Spent last year** is what was paid. The **2027** total is the whole column on the plan, plus Funded by reserve. Then the **PQ** sheet, every unit. **Pay now** is the current levy. **Will pay this year** follows the yellow rand. If that rand is 0, the two are the same. If the reserve is inside the levy, the PQ shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added. Excel is used afterwards, only to type the yellow number they agreed.
 
 Yellow is the only place they type. White cells follow. A pink cell is a shortfall. It is not added again. Typing a lower rand does not make a bill smaller.
 
