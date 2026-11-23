@@ -275,6 +275,9 @@ def default_sections() -> dict:
         "special": [
             row("Maintenance project 1"), row("Maintenance project 2"), row("Maintenance project 3"),
         ],
+        "projects": [
+            row("Special project"),
+        ],
         "fixed": [
             row("Prepaid meters estimate (monthly)"),
             row("Eskom fixed charge (monthly)"),
@@ -740,8 +743,8 @@ def municipal_in_levy(state: dict) -> float:
 def ordinary_total(state: dict) -> float:
     s = state["sections"]
     total = municipal_in_levy(state)
-    for key in ("rm", "personnel", "tax", "expenditure"):
-        total += sum(line_in_levy(state, r) for r in s[key])
+    for key in ("rm", "personnel", "tax", "expenditure", "projects"):
+        total += sum(line_in_levy(state, r) for r in (s.get(key) or []))
     if state.get("special_in_ordinary"):
         total += sum_net(s["special"])
     if reserve_inside_levy(state):
@@ -800,6 +803,7 @@ def levy_pieces(state: dict) -> list:
         ("R&M after insurance and recovery income", sum(line_in_levy(state, r) for r in s["rm"])),
         ("Personnel", sum(line_in_levy(state, r) for r in s["personnel"])),
         ("Tax", sum(line_in_levy(state, r) for r in s["tax"])),
+        ("Special projects (in the levy now)", sum(line_in_levy(state, r) for r in (s.get("projects") or []))),
         ("Special (only if ticked into the levy)", sum_net(s["special"]) if state.get("special_in_ordinary") else 0.0),
         ("Reserve contribution (only if inside the levy)", reserve_contribution(state) if reserve_inside_levy(state) else 0.0),
         ("Income used to lower the levy", -income_used(state)),
@@ -2509,6 +2513,8 @@ def _story_costs(state: dict) -> list:
         add(label, y, blurbs[label])
     for r in state["sections"].get("tax") or []:
         add("Tax", net_of(r), blurbs["Tax"])
+    for r in state["sections"].get("projects") or []:
+        add("Work that cannot wait", line_in_levy(state, r), "A job that has to be done now. Owners pay it in the levy. It is not the reserve and not the 10-year plan.")
     if state.get("special_in_ordinary"):
         add("Special projects", sum_net(state["sections"].get("special") or []), "Big jobs the owners asked to pay this year, not from the reserve.")
     rows = [(label, groups[label][0], groups[label][1]) for label in order]
@@ -3242,7 +3248,7 @@ def generate_excel(state: dict) -> BytesIO:
     levy_rows = {}
     named_rows = {}
     levy_comp_rows = []
-    levy_buckets = {"expenditure": [], "rm": [], "personnel": [], "tax": [], "special": []}
+    levy_buckets = {"expenditure": [], "rm": [], "personnel": [], "tax": [], "special": [], "projects": []}
     cover_pending = []
     recovery_excel_rows = {}
     reserve_from_rows = []
@@ -3599,6 +3605,17 @@ def generate_excel(state: dict) -> BytesIO:
         write_bucket["name"] = "special"
         a, b = write(s.get("special") or [], in_levy=True, no_pct=True)
         tot("Total 10-year maintenance projects", a, b)
+    proj_items = [
+        x for x in (s.get("projects") or [])
+        if str(x.get("desc") or "").strip()
+        and (abs(float(x.get("actual") or 0)) > 0.5 or abs(float(x.get("yearly") or 0)) > 0.5)
+    ]
+    if proj_items:
+        bar("SPECIAL PROJECTS")
+        hdr()
+        write_bucket["name"] = "projects"
+        a, b = write(proj_items, in_levy=True)
+        tot("TOTAL SPECIAL PROJECTS", a, b)
     charged = [x for x in (s.get("fixed") or []) if float(x.get("yearly") or 0) > 0.5]
     if charged:
         bar("EQUAL CHARGES BILLED TO OWNERS (same rand each unit)")
@@ -3655,7 +3672,7 @@ def generate_excel(state: dict) -> BytesIO:
     if reserve_inside_levy(state) and levy_rows.get("reserve"):
         bits += f"+F{levy_rows['reserve']}"
     bar("ORDINARY LEVY (what we charge)")
-    levy_words = "Ordinary levies = net municipal + expenditure + repairs + personnel + tax, minus income marked Yes, minus the rand funded by the reserve, minus fixed monthly charges the owners pay on the invoice. A special levy set to Municipal is already taken off the city bill."
+    levy_words = "Ordinary levies = net municipal + expenditure + repairs + personnel + tax + special projects, minus income marked Yes, minus the rand funded by the reserve, minus fixed monthly charges the owners pay on the invoice. Special projects are work that must be done now. They are in the levy. They are not the reserve and not the 10-year plan. A special levy set to Municipal is already taken off the city bill."
     if reserve_inside_levy(state):
         levy_words += " The reserve contribution is included."
     label = ws.cell(r, 2, "Ordinary levy")
@@ -3943,6 +3960,8 @@ def generate_excel(state: dict) -> BytesIO:
         eu_cols.append(("Tax", _bucket_year(levy_buckets["tax"])))
     if state.get("special_in_ordinary") and levy_buckets["special"]:
         eu_cols.append(("10-year projects", _bucket_year(levy_buckets["special"])))
+    if levy_buckets["projects"]:
+        eu_cols.append(("Special projects", _bucket_year(levy_buckets["projects"])))
     if reserve_mark_rows and any(funded_by_reserve(state, it) > 0.5 for key in ("expenditure", "rm", "personnel", "tax") for it in s.get(key) or []):
         eu_cols.append(("Reserve pays", "-(" + "+".join(f"BUDGET!J{n}" for n in reserve_mark_rows) + ")"))
     if income_refs:
@@ -4303,6 +4322,7 @@ RESTORE_BARS = [
     ("repair", "rm"),
     ("personnel", "personnel"),
     ("income tax", "tax"),
+    ("special projects", "projects"),
     ("special", "special"),
     ("fixed monthly", "fixed"),
     ("levy income", "levy"),
@@ -4692,6 +4712,7 @@ def apply_falcon_view_notes(state: dict) -> None:
 def init():
     ss = st.session_state
     ss.setdefault("sections", default_sections())
+    ss["sections"].setdefault("projects", [row("Special project")])
     ss.setdefault("complex_name", "")
     ss.setdefault("fin_year", "01-03-2026 / 28-02-2027")
     ss.setdefault("reserve_mode", "amount")
@@ -4730,6 +4751,7 @@ MOVE_TO = {
     "Municipal": "municipal",
     "Taxation": "tax",
     "Reserve fund": "special",
+    "Special projects": "projects",
 }
 
 
@@ -4917,7 +4939,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                 ),
                 "Move to": st.column_config.SelectboxColumn(
                     "Move to",
-                    options=["Stay", "Expenditure", "Repairs and maintenance", "Personnel", "Municipal", "Taxation", "Reserve fund"],
+                    options=["Stay", "Expenditure", "Repairs and maintenance", "Personnel", "Municipal", "Taxation", "Reserve fund", "Special projects"],
                     help="WeConnectU sometimes files a line in the wrong place. Choose a section and Save. The amounts move with it.",
                 ),
                 "Notes": st.column_config.TextColumn("Notes", width="large", help="Shows on the Excel Comments / Notes column. Click Save after typing."),
@@ -5018,7 +5040,7 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
         else:
             st.caption("Type the yearly total for the whole complex. Name it like the cost (Garden Services, Refuse). That amount is left out of the levy. Each owner pays total ÷ 12 ÷ units.")
     else:
-        if key in ("expenditure", "rm", "personnel", "tax"):
+        if key in ("expenditure", "rm", "personnel", "tax", "projects"):
             off_bits = []
             for it in st.session_state.sections.get(key) or []:
                 off = sum(abs(float(c.get("actual") or 0)) for c in claims_for_cost(st.session_state, it.get("desc") or ""))
@@ -5448,7 +5470,7 @@ def _levy_story(state: dict, current_m: float) -> dict:
             f"The reserve is its own line, {money(own / 12.0)} a month. It is not inside the levy."
         )
     shifts = []
-    for key in ("municipal", "expenditure", "rm", "personnel", "tax"):
+    for key in ("municipal", "expenditure", "rm", "personnel", "tax", "projects"):
         for r in (state.get("sections") or {}).get(key) or []:
             if key == "municipal" and is_muni_recovery(r.get("desc") or "", r.get("is_recovery")):
                 continue
@@ -5718,6 +5740,7 @@ def pr_pack(state: dict) -> dict:
         ("rm", "Repairs and maintenance"),
         ("personnel", "Personnel"),
         ("tax", "Tax"),
+        ("projects", "Special projects"),
     ):
         lines = []
         for r in s.get(key) or []:
@@ -5740,6 +5763,9 @@ def pr_pack(state: dict) -> dict:
             ),
             "Tax": (
                 "Say this. This is tax on interest and other income, not on the levies. The first R 50,000.00 is free."
+            ),
+            "Special projects": (
+                "Say this. These jobs cannot wait. Owners pay them in the ordinary levy this year. They are not the reserve and not the 10-year plan."
             ),
         }
         block = _section(title, lines, intros.get(title, ""))
@@ -5860,7 +5886,7 @@ def pr_pack(state: dict) -> dict:
     )
     movers = []
     for sec in sections:
-        if sec["title"] not in ("Municipal charges", "Expenditure", "Repairs and maintenance", "Personnel", "Tax"):
+        if sec["title"] not in ("Municipal charges", "Expenditure", "Repairs and maintenance", "Personnel", "Tax", "Special projects"):
             continue
         for line in sec["lines"]:
             if float(line.get("impact") or 0) < 500:
@@ -6753,7 +6779,7 @@ def main():
 
     tabs = st.tabs([
         "How it works", "Income", "Municipal", "Expenditure",
-        "Repair & Maintenance", "Personnel", "Tax", "10-year projects",
+        "Repair & Maintenance", "Personnel", "Tax", "Special projects", "10-year projects",
         "PQ / Levies", "10-year plan", "Notes for the PR", "Download",
     ])
 
@@ -6802,7 +6828,7 @@ Ordinary levies are the rands the costs need. They are not last year’s levy pl
 
 On **Levy Income**, under **Meeting decision**, choose **Levies stay as they are** when the levy must not change. Owners keep paying the current ordinary levy typed on the left. The PQ stays on that amount. Do not use last year's received levy for this. The sheet then shows any saving under **Still short**.
 
-**Ordinary = net municipal + expenditure + repairs + personnel + tax − income you tick − fixed charges owners pay on the invoice − rand the reserve pays**
+**Ordinary = net municipal + expenditure + repairs + personnel + tax + special projects − income you tick − fixed charges owners pay on the invoice − rand the reserve pays**
 
 The box **Why is the levy this amount?** lists each piece in rand.
 
@@ -6931,8 +6957,10 @@ Owners do not pay SARS every month. The monthly column is only so the levy can f
 
 If the estimate is R0, nothing is paid. If tax is payable, SARS usually wants provisional tax: one payment six months into the year, and one at year-end. A top-up can be due a few months after year-end. A February year-end is often 31 August, 28 February, and a top-up by 30 September if needed. The return is filed after year-end. Confirm the dates and the amount with the auditor.
 
-### 15. Personnel and 10-year projects
+### 15. Personnel, special projects and 10-year projects
 **Personnel** is salaries, casuals, PAYE / UIF, travel, bonuses and the like.
+
+**Special projects** are jobs that cannot wait. They are on the **Budget** sheet and inside the ordinary levy. They are not the reserve and not the 10-year plan. Type Actual and Budgeted yearly, then Save. A blank row with no amount is left off the sheet.
 
 **10 Year Maintenance Projects** do not show on the levy sheet. They are the reserve fund's costs. **GL code** is the WeConnectU code. **Spent last year** is what was paid. **Budgeted this year** is this year's plan. **Over / under** is spent last year minus that plan. Above zero means it cost more than was planned. **Next year** is 2027. The reserve total adds the whole 2027 column. It is in the closing balance. There is no %. Tick **Pay the 10-year projects from the ordinary levy** only when this complex pays the plan from the levy. Then they move onto the levy sheet and off the reserve sheet.
 
@@ -6956,6 +6984,7 @@ If **Added into the ordinary levy** is chosen, the PQ tab shows **Ordinary levy*
 - Repairs
 - Personnel, only if there is a salary
 - Tax, only if there is tax
+- Special projects, when a job must be done now and is in the levy
 - Reserve, CSOS, insurance and garden, where those are billed on their own
 - **Total** — what that unit pays
 
@@ -7413,6 +7442,16 @@ Confirm the dates and the amount with the auditor or tax practitioner.
 
     with tabs[7]:
         section_form(
+            "projects",
+            "Special projects",
+            "Jobs that must be done now. They are part of the ordinary levy. They are not the reserve fund and not the 10-year plan. "
+            "Type the actual and the budgeted yearly, then Save. Add a row for each job. Delete the blank row if there is none.",
+            reorder=True,
+            move=True,
+        )
+
+    with tabs[8]:
+        section_form(
             "special",
             "10 Year Maintenance Projects",
             f"Spent last year is what was paid. Budgeted this year is the plan for this year, so spent last year minus that shows an overspend. "
@@ -7428,7 +7467,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             f"Next year ({NOW_YEAR + 1}) {money(yr_sum)}. Above zero on Over / under means we spent more than was budgeted."
         )
 
-    with tabs[8]:
+    with tabs[9]:
         st.subheader("PQ / levy schedule")
         st.caption("Choose the unit ratio Excel here. WeConnectU’s PQ column is often 0 — we use Ratio 1. The ratios must add to 1.000.")
         pq_here = st.file_uploader(
@@ -7547,7 +7586,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             else:
                 st.caption("Type the current ordinary levy on the left to fill Pay now. It does not change the budget.")
 
-    with tabs[9]:
+    with tabs[10]:
         st.subheader("10-year maintenance plan")
         st.caption(
             "Type the plan, or paste it from Excel, including the year headings. "
@@ -7671,12 +7710,12 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             st.success(f"Saved {len(kept)} projects. Next year is on 10 Year Maintenance Projects ({n} lines). Deleted rows stay deleted.")
             st.rerun()
 
-    with tabs[10]:
+    with tabs[11]:
         show_pr_notes(st.session_state)
 
-    with tabs[11]:
+    with tabs[12]:
         st.subheader("Download Excel")
-        st.caption("Budget, Reserve, PQ and 10-year plan. Yellow cells are Budgeted Yearly. Type the rand. The levy follows the rand.")
+        st.caption("Budget, Reserve, PQ and 10-year plan. Special projects that must be done now are on the Budget sheet, inside the levy. Yellow cells are Budgeted Yearly. Type the rand. The levy follows the rand.")
         st.checkbox(
             "Include the % column",
             key="show_pct",
