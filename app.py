@@ -876,10 +876,14 @@ def prev_admin_contributions(state: dict) -> float:
 
 
 def reserve_project_spend(state: dict) -> float:
-    """What the reserve pays next year. The plan, plus any rand marked Funded by reserve."""
+    """What the reserve pays in this budget. A 2026 budget uses the 2026 plan, not 2027."""
     total = 0.0
     if not state.get("special_in_ordinary"):
-        total += sum(max(0.0, float(r.get("yearly") or 0)) for r in (state["sections"].get("special") or []))
+        rows = state["sections"].get("special") or []
+        if budget_uses_this_plan_year(state):
+            total += sum(max(0.0, float(r.get("this_budget") or 0)) for r in rows)
+        else:
+            total += sum(max(0.0, float(r.get("yearly") or 0)) for r in rows)
     for key in ("expenditure", "rm", "personnel", "tax"):
         for r in state["sections"].get(key) or []:
             total += funded_by_reserve(state, r)
@@ -4105,11 +4109,17 @@ def generate_excel(state: dict) -> BytesIO:
     res.row_dimensions[1].height = 64
     brand(res)
     use_this_plan = budget_uses_this_plan_year(state)
-    plan_year = NOW_YEAR + 1
-    plan_col_idx = 5 + (plan_year - start_y)
-    if not 5 <= plan_col_idx <= 14:
-        plan_col_idx = 6
-    plan_col = get_column_letter(plan_col_idx)
+    plan_year = NOW_YEAR if use_this_plan else NOW_YEAR + 1
+    next_year = NOW_YEAR + 1
+
+    def _plan_col(year: int) -> str:
+        idx = 5 + (year - start_y)
+        if not 5 <= idx <= 14:
+            idx = 6
+        return get_column_letter(idx)
+
+    plan_col = _plan_col(plan_year)
+    next_col = _plan_col(next_year)
     plan_sum = f"SUM('10 YMP'!{plan_col}6:{plan_col}200)"
     res["B6"] = (
         f"Spent last year is what was paid. The {plan_year} figure at the top is the whole {plan_year} column on the 10-year plan, "
@@ -4214,7 +4224,7 @@ def generate_excel(state: dict) -> BytesIO:
             inp(res.cell(rr, 5), allowed, MONEY)
             src = plan_index.get(norm(desc))
             if src:
-                fml(res.cell(rr, 6), f"'10 YMP'!{plan_col}{src}")
+                fml(res.cell(rr, 6), f"'10 YMP'!{next_col}{src}")
             else:
                 inp(res.cell(rr, 6), float(it.get("yearly") or 0), MONEY)
                 manual_plan_rows.append(rr)
@@ -4266,7 +4276,7 @@ def generate_excel(state: dict) -> BytesIO:
     tot_r = rr
     res.cell(tot_r, 2, "TOTAL RESERVE EXPENDITURE").font = Font(bold=True)
     fml(res.cell(tot_r, 4), "+".join(f"D{n}" for n in plan_rows), TOTAL)
-    manual = "+".join(f"N(F{n})" for n in manual_plan_rows)
+    manual = "+".join((f"N(E{n})" if use_this_plan else f"N(F{n})") for n in manual_plan_rows)
     spend = plan_sum + (("+" + manual) if manual else "") + f"+N(F{funded_row})"
     if state.get("special_in_ordinary"):
         spend = f"N(F{funded_row})"
@@ -6074,7 +6084,13 @@ def pr_slides(pack: dict) -> list:
                 [
                     {"where": "Opening reserve balance", "do": "Yellow only if the bank figure is wrong.", "why": "Money in the reserve account now. Do not include this year’s contribution in it."},
                     {"where": "Reserve contributions", "do": "White. It follows the yellow reserve on the BUDGET sheet.", "why": reserve_where},
-                    {"where": "Maintenance plan expenditure", "do": "White.", "why": f"This is the whole {NOW_YEAR + 1} column on the 10-year plan, plus Funded by reserve. One project is not the total. Spent last year is what was paid."},
+                    {"where": "Maintenance plan expenditure", "do": "White.", "why": (
+                        f"On a {NOW_YEAR} budget this is the whole {NOW_YEAR} column, plus Funded by reserve. "
+                        f"The {NOW_YEAR + 1} column stays on the list. It is not in this closing balance. "
+                        "One project is not the total. Spent last year is what was paid."
+                        if budget_uses_this_plan_year(state) else
+                        f"This is the whole {NOW_YEAR + 1} column on the 10-year plan, plus Funded by reserve. One project is not the total. Spent last year is what was paid."
+                    )},
                     {"where": "Closing reserve balance", "do": "White.", "why": "Opening, plus contributions, minus the plan."},
                     {"where": "Overspent", "do": "Pink, if it is above zero.", "why": "The fund is short. It is not added again."},
                 ],
@@ -6975,7 +6991,7 @@ Then pick one. It works for a body corporate and an HOA:
 - 25% of last year’s ordinary levy (that same Actual)
 - 100% of this year’s Repairs and Maintenance (after recovery income and payouts)
 
-The amount shows on **Reserve Fund Contribution**. On the Excel file it is on the **RESERVE** sheet, not at the top of the levy sheet. The **2027** total at the top of that sheet is the whole 2027 column on the 10-year plan, not one project. **Funded by reserve** is live: type it on the levy sheet and the reserve comes down by the same rand.
+The amount shows on **Reserve Fund Contribution**. On the Excel file it is on the **RESERVE** sheet, not at the top of the levy sheet. On a **2026** budget the total at the top is the whole **2026** column, not one project and not 2027. **Funded by reserve** is live: type it on the levy sheet and the reserve comes down by the same rand.
 
 Then choose how owners pay it. Pick one:
 
@@ -7039,7 +7055,7 @@ It is part of the ordinary levy. It is not the reserve fund. It is not the 10-ye
 ### 16. Personnel and the 10-year plan
 **Personnel** is salaries, casuals, PAYE / UIF, travel, bonuses and the like.
 
-**10 Year Maintenance Projects** do not show on the levy sheet. They are the reserve fund's costs. **GL code** is the WeConnectU code. **Spent last year** is what was paid. **Budgeted this year** is this year's plan. **Over / under** is spent last year minus that plan. Above zero means it cost more than was planned. **Next year** is 2027. The reserve total adds the whole 2027 column. It is in the closing balance. There is no %. Tick **Pay the 10-year projects from the ordinary levy** only when this complex pays the plan from the levy. Then they move onto the levy sheet and off the reserve sheet.
+**10 Year Maintenance Projects** do not show on the levy sheet. They are the reserve fund's costs. **GL code** is the WeConnectU code. **Spent last year** is what was paid. **Budgeted this year** is this year's plan. **Over / under** is spent last year minus that plan. Above zero means it cost more than was planned. **Next year** is 2027. On a 2026 budget the reserve total adds the whole **2026** column. The 2027 column stays on the list. It is not in this closing balance. There is no %. Tick **Pay the 10-year projects from the ordinary levy** only when this complex pays the plan from the levy. Then they move onto the levy sheet and off the reserve sheet.
 
 A job you did not do, and that has no amount next year, is not on this list. It stays on the 10-year plan if a later year still has it.
 
@@ -7073,14 +7089,14 @@ Boathouse and boatport stay on the budget, under Levy Income. They move with the
 Do these steps in this order.
 
 1. On the left, choose the WeConnectU **Actual vs Budget** file and click **Load Excel**.
-2. Open **10-year projects**. **Spent last year** is what was paid. **Budgeted this year** is the plan for this year. A **2027** amount shows as **Next year**. The reserve sheet adds the **whole** 2027 column. To add a project that is not on the plan, type it on a new row, enter the amount, and click **Save this section**. It stays, and it is written onto the plan. A total line is not a project.
+2. Open **10-year projects**. **Spent last year** is what was paid. **Budgeted this year** is the plan for this year. A **2027** amount shows as **Next year**. On a 2026 budget the reserve sheet adds the **whole 2026** column. The 2027 column is not in this closing balance. To add a project that is not on the plan, type it on a new row, enter the amount, and click **Save this section**. It stays, and it is written onto the plan. A total line is not a project.
 3. Open **10-year plan**. Upload the Excel, or copy from the row that says **2025  2026  2027** down to the last project and paste it. Every project line comes through, including a line with no amount yet. The app does not add a total, and it does not fill Current estimate unless that column is on your sheet.
 4. To remove a project, click the trash can on that row, then click **Save 10-year plan**. It stays deleted. Click a project name to read the full words. Scroll right for the later years. A note that sat to the right of the years is in the **Note** column.
 5. Open **10-year projects** again.
    - Paid last year and also on this year's plan: both amounts are filled.
    - Paid last year only: Spent last year is filled, Budgeted this year is blank.
    - Not paid last year, but on this year's plan: Spent last year is 0, Budgeted this year is the plan.
-   - **2026** is **Budgeted this year**. **2027** is the next column. The reserve total adds the **whole** 2027 column, rows 6 to 200. A new door or carport typed on the plan reduces the reserve. One line, such as Staircases, is not the total.
+   - **2026** is **Budgeted this year**. **2027** is the next column. On a 2026 budget the reserve total adds the **whole 2026** column, rows 6 to 200. A 2027 amount stays on the list and does not reduce this closing balance. One line, such as Staircases, is not the total.
 6. On **10-year projects**, a line you type stays, even if it is not on the plan. Click the note, change it or delete it, then **Save this section**. A blank note stays blank. Saving the 10-year plan does not remove a line you added.
 7. Leave **Pay the 10-year projects from the ordinary levy** unticked. The reserve pays these jobs.
 
@@ -7693,7 +7709,8 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             "First cycle is the year the job starts, for example 2025. Leave it blank if the rands are already in the year columns. "
             "Frequency is not a year. 10 means every 10 years. 3 means every 3 years. Leave it blank if the years are already filled. "
             "Current estimate is the whole project cost, if you have one. It is not 2026 and not 2027. "
-            f"The {NOW_YEAR + 1} column is next year. The reserve total adds that whole column. Spent last year is what was paid. There is no %."
+            f"The {NOW_YEAR} column is this budget when the year starts in {NOW_YEAR}. The reserve total adds that column. "
+            f"The {NOW_YEAR + 1} column is next year. It stays on the plan and is not taken off this closing balance. Spent last year is what was paid. There is no %."
         )
         ymp_up = st.file_uploader("Upload 10-year plan Excel (or last year’s budget workbook)", type=["xlsx", "xls"], key="ymp_xlsx")
         if ymp_up and st.button("Load 10-year plan"):
