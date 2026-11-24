@@ -756,8 +756,13 @@ def municipal_net(state: dict) -> float:
 
 
 def municipal_in_levy(state: dict) -> float:
-    """City bill minus recoveries, minus a special levy that goes to municipal."""
-    return max(0.0, municipal_net(state) - municipal_from_special(state))
+    """City bill minus recovered. A credit (owners paid back more than the city bill) lowers the levy.
+    A special levy sent to municipal is taken off once. It cannot push this piece below zero.
+    """
+    net = municipal_net(state) - municipal_from_special(state)
+    if municipal_from_special(state) > 0.5:
+        return max(0.0, net)
+    return net
 
 
 def ordinary_total(state: dict) -> float:
@@ -906,11 +911,24 @@ def reserve_project_spend(state: dict) -> float:
 
 
 def projected_reserve(state: dict) -> float:
-    """Opening balance already includes interest earned to date. Do not add it again.
-    A municipal payment already made is taken off once, so the carry-over is lower.
+    """Same closing as the RESERVE sheet.
+    Last year = bank now + last year’s contribution − what was paid (projects and a municipal payment).
+    This budget = that figure + this year’s contribution − this year’s plan.
+    Interest already sits in the bank figure. It is not added again.
     """
-    opening = float(state.get("reserve_balance") or 0) - municipal_paid_by_reserve(state)
-    return opening + reserve_contribution(state) - reserve_project_spend(state)
+    opening = float(state.get("reserve_balance") or 0)
+    last = 0.0
+    for r in (state.get("sections") or {}).get("levy") or []:
+        if family(r.get("desc") or "") == "reserve":
+            last = float(r.get("actual") or 0)
+    spent_last = municipal_paid_by_reserve(state)
+    if not state.get("special_in_ordinary"):
+        spent_last += sum(
+            max(0.0, float(r.get("actual") or 0))
+            for r in (state.get("sections") or {}).get("special") or []
+        )
+    close_last = opening + last - spent_last
+    return close_last + reserve_contribution(state) - reserve_project_spend(state)
 
 
 def rm_budget(state: dict) -> float:
@@ -5615,13 +5633,14 @@ def _pr_grids(state: dict, approved: float, current_m: float) -> dict:
             _cell(note),
         ]})
     opening = float(state.get("reserve_balance") or 0)
-    spent = sum(float(r.get("actual") or 0) for r in (state.get("sections") or {}).get("special") or [])
+    spent = municipal_paid_by_reserve(state)
+    if not state.get("special_in_ordinary"):
+        spent += sum(float(r.get("actual") or 0) for r in (state.get("sections") or {}).get("special") or [])
+    nxt = reserve_project_spend(state)
     if budget_uses_this_plan_year(state):
-        nxt = sum(float(r.get("this_budget") or 0) for r in (state.get("sections") or {}).get("special") or [])
-        plan_note = f"The {NOW_YEAR} plan, from Budgeted this year. It is in this year's closing balance."
+        plan_note = f"The {NOW_YEAR} jobs only. A {NOW_YEAR + 1} job stays on the list. It is not taken off this closing balance."
     else:
-        nxt = sum(max(0.0, float(r.get("yearly") or 0)) for r in (state.get("sections") or {}).get("special") or [])
-        plan_note = "What was spent, and what the plan costs next year."
+        plan_note = f"The {NOW_YEAR + 1} plan, plus any rand the reserve pays. One project is not the total."
     close_d = opening + last_r - spent
     close_f = close_d + reserve - nxt
     reserve_grid = {"headers": ["", "Spent last year", "This year" if budget_uses_this_plan_year(state) else "Next year", "What to do"], "rows": [
@@ -5970,16 +5989,23 @@ def pr_pack(state: dict) -> dict:
             "title": "Reserve fund budget",
             "lines": reserve_lines,
             "intro": (
-                "Say this. This is the savings for big jobs, not the monthly levy. Spent last year is what was paid. This year is the plan. The bank figure is already there. Do not add this year's contribution into it."
+                "Say this. This is the savings account for the big jobs. It is not the monthly levy. "
+                "Spent last year is what was already paid. "
+                + (
+                    f"This budget only takes off the {NOW_YEAR} jobs. A {NOW_YEAR + 1} job stays on the list for next year. It does not make this reserve smaller."
+                    if budget_uses_this_plan_year(state) else
+                    f"This budget takes off the {NOW_YEAR + 1} jobs."
+                )
+                + " The bank figure is the money in the account now. Do not add this year's contribution into that figure."
             ),
         })
 
     close = (
-        "Only the yellow amount on the sheet may be changed. "
-        "If they type a lower rand, the pink line shows what is still short. "
-        "Do not type on the white cells. Those are formulas. "
-        "A lower rand does not reduce the insurance or the city bill. "
-        "Something else must come down, or the reserve must pay it."
+        "Say this at the end. Only the yellow numbers may be changed. "
+        "Leave a yellow number as it is to keep the true increase. Type 0 on the agreed increase if the levy must stay the same. "
+        "If they type a smaller rand, the pink line shows what is still short. That pink number is not added again. "
+        "A smaller levy does not make a bill smaller. The meeting must say which bill comes down, or that the reserve pays it. "
+        "Do not type on a white cell. Those are formulas."
     )
     movers = []
     for sec in sections:
@@ -6043,9 +6069,9 @@ def pr_slides(pack: dict) -> list:
             "Three sheets. Top to bottom.",
             "Sit with this presentation. The sheets are on the slides. Excel does not have to be open to follow the meeting. Excel is only used afterwards, to type the yellow number they agreed.",
             [
-                {"where": "1. BUDGET", "do": "The costs, then the levy", "why": "The yellow agreed amount is at the very top. That is the meeting decision."},
-                {"where": "2. RESERVE", "do": "The reserve fund", "why": "What is in the bank, what owners add, and what the 10-year plan spends."},
-                {"where": "3. PQ", "do": "What each unit pays", "why": "This follows the yellow amount. Do not type the unit figures."},
+                {"where": "1. BUDGET", "do": "What the complex spends, then what owners pay", "why": "Start at the yellow box at the top. That is the only number the meeting has to agree for the levy."},
+                {"where": "2. RESERVE", "do": "The savings for the big jobs", "why": "Money in the bank, what owners add this year, and the jobs the plan pays. It is not the monthly levy."},
+                {"where": "3. PQ", "do": "What each unit pays", "why": "The sheet works this out from the yellow number. Nobody types a unit by hand."},
             ],
         ),
         guide(
@@ -6064,12 +6090,12 @@ def pr_slides(pack: dict) -> list:
             "Start at the top. Do not scroll yet.",
             "The first block is the levy decision.",
             [
-                {"where": "What the costs need", "do": "White. Leave it.", "why": f"What the bills add up to. {pack.get('costs_year') or ''} for the year. {pack.get('costs_month') or ''} a month. This is not the levy yet."},
-                {"where": "Increase the costs need", "do": "White. Leave it.", "why": "How much more those bills are than what owners pay now. Not last year's cash received."},
-                {"where": "Agreed increase — type the rand", "do": "Yellow. This is the one you change.", "why": "Leave it to charge the full increase. Type 0 if the levy must stay the same. Type another rand only if the meeting agrees a different increase. Not a percentage."},
-                {"where": "What owners will be charged", "do": "White. It follows the yellow.", "why": "What they pay now, plus the yellow rand. If the yellow rand is 0, they pay the same and the PQ does not change."},
-                {"where": "Levy increase", "do": "At the top, only if it is there.", "why": "One %. It follows the yellow rand. It does not change the amount. If you do not see it, we left it off because the increase is high."},
-                {"where": "Still short", "do": "Pink. Read it.", "why": "Above zero means the costs are still higher than the levy. The bills have not gone down. Below zero means the costs are lower and the levy was not cut."},
+                {"where": "What the costs need", "do": "White. Leave it.", "why": f"Add up the bills. That is {pack.get('costs_year') or 'the yearly total'} for the year, {pack.get('costs_month') or 'the monthly total'} a month. This is not the levy until the meeting agrees it."},
+                {"where": "Increase the costs need", "do": "White. Leave it.", "why": "How many more rands the bills need than what owners pay now. It is not last year's cash in the bank."},
+                {"where": "Agreed increase — type the rand", "do": "Yellow. This is the one you change.", "why": "Leave it if owners must pay the full increase. Type 0 if the levy must stay exactly what they pay now. Type another rand only if the meeting agrees a different increase. It is rands, not a percentage."},
+                {"where": "What owners will be charged", "do": "White. It follows the yellow.", "why": "What they pay now, plus the yellow rand. If the yellow rand is 0, they pay the same and every unit on the PQ stays the same."},
+                {"where": "Levy increase", "do": "At the top, only if you can see it.", "why": "One percentage. It follows the yellow rand. Typing here does not change the rand. If it is missing, the increase was left off because it is high."},
+                {"where": "Still short", "do": "Pink. Read it. Do not add it.", "why": "Above zero means the bills are still higher than the levy. Below zero means the bills are lower and the levy was not cut."},
             ],
             "Say this. Typing a lower rand does not make a bill smaller. It only says what owners will pay. If it is short, the meeting still has to say which bill comes down, or that the reserve pays it.",
         ),
@@ -6123,17 +6149,17 @@ def pr_slides(pack: dict) -> list:
                 [
                     {"where": "Opening reserve balance", "do": "Yellow only if the bank figure is wrong.", "why": "Money in the reserve account now. Do not include this year’s contribution in it."},
                     {"where": "Reserve contributions", "do": "White. It follows the yellow reserve on the BUDGET sheet.", "why": reserve_where},
-                    {"where": "Maintenance plan expenditure", "do": "White.", "why": (
-                        f"On a {NOW_YEAR} budget this is the whole {NOW_YEAR} column, plus Funded by reserve. "
-                        f"The {NOW_YEAR + 1} column stays on the list. It is not in this closing balance. "
-                        "One project is not the total. Spent last year is what was paid."
+                    {"where": "Maintenance plan expenditure", "do": "White. Leave it.", "why": (
+                        f"On a {NOW_YEAR} budget this is every job in the {NOW_YEAR} column, added together, plus any rand marked Funded by reserve. "
+                        f"A {NOW_YEAR + 1} job is still on the list so you can see it. It is not taken off this year's reserve. "
+                        "One line, such as staircases, is not the total."
                         if pack.get("use_this_plan") else
-                        f"This is the whole {NOW_YEAR + 1} column on the 10-year plan, plus Funded by reserve. One project is not the total. Spent last year is what was paid."
+                        f"This is every job in the {NOW_YEAR + 1} column, added together, plus any rand marked Funded by reserve. One line is not the total."
                     )},
-                    {"where": "Closing reserve balance", "do": "White.", "why": "Opening, plus contributions, minus the plan."},
-                    {"where": "Overspent", "do": "Pink, if it is above zero.", "why": "The fund is short. It is not added again."},
+                    {"where": "Closing reserve balance", "do": "White. Leave it.", "why": "Money left, plus what owners add, minus the jobs. If this is below zero, the fund is short."},
+                    {"where": "Overspent", "do": "Pink, only if it is above zero.", "why": "The hole. It is not added to the levy. Read it, do not type it."},
                 ],
-                "Then go down the list of jobs. Spent last year is what was paid. This year is the plan. A job with nothing in either year is not on this list.",
+                "Then read the jobs underneath. Spent last year is money already paid. A job with nothing in it is not on this list. A later year stays on the 10-year plan only.",
             ))
             reserve_grid = (pack.get("grids") or {}).get("reserve") or {}
             if reserve_grid.get("rows"):
@@ -6992,7 +7018,7 @@ On **Municipal**, the city bill and the recovery are separate lines.
 
 - Type the city bill as a positive amount (electricity, water, sewerage, refuse, rates).
 - Type what owners pay back as a positive amount on the **Less: … recovered** line. Do not type a minus. Any line with the word **recovered** in the name is subtracted, including a sewer-plant recovery.
-- **Net municipal** = city bill minus recovered. A special levy set to **Municipal** is then taken off. That net is what goes into the levy.
+- **Net municipal** = city bill minus recovered. If owners paid back **more** than the city bill, that extra comes **off** the levy. It is not ignored. A special levy set to **Municipal** is then taken off the city bill, and that piece cannot go below zero. The result is what goes into the levy.
 - If recovered is less than the city bill, the difference is a **cost shortfall**. It is this year's **Actual**, not Budgeted yearly. It is already inside the actual net. Do not add it again. The **Budgeted yearly** net is what goes into the new levy. The same actual shortfall is shown on **Notes for the PR**.
 - **Already paid by the reserve.** If the reserve paid part of the municipal account, type that rand here. It comes off this year's actual only, so the amount still owing is less. Next year's levy does not change. The reserve carry-over is lower by the same rand. Type the reserve bank balance **before** this payment. If the bank figure is already after the payment, leave this box at 0.
 
@@ -7136,8 +7162,8 @@ Do these steps in this order.
    - Paid last year only: Spent last year is filled, Budgeted this year is blank.
    - Not paid last year, but on this year's plan: Spent last year is 0, Budgeted this year is the plan.
    - **2026** is **Budgeted this year**. **2027** is the next column. On a 2026 budget the reserve total adds the **whole 2026** column, rows 6 to 200. A 2027 amount stays on the list and does not reduce this closing balance. One line, such as Staircases, is not the total.
-6. On **10-year projects**, a line you type stays, even if it is not on the plan. Click the note, change it or delete it, then **Save this section**. A blank note stays blank. Saving the 10-year plan does not remove a line you added.
-7. Leave **Pay the 10-year projects from the ordinary levy** unticked. The reserve pays these jobs.
+6. On **10-year projects**, type a new job and click **Save this section**. That writes it onto the plan. Click the note, change it or clear it, then Save. A blank note stays blank.
+7. **Paste** or **Save 10-year plan** replaces the plan. A project that is not on the list you just saved is removed. It does not come back. Leave **Pay the 10-year projects from the ordinary levy** unticked. The reserve pays these jobs.
 
 **First cycle** is the year a job starts, for example 2025. Leave it blank if the rands are already under the years.
 
@@ -7174,13 +7200,14 @@ If you already know the decision before you download, you can set the same choic
 Do not use **Erase everything** unless you mean to wipe the screen. Download first if you still need the numbers.
 
 ### 21. Notes for the PR
-On **Notes for the PR** the budget is the meeting, as if you are sitting next to the PR. Click the picture, or use the arrow keys.
+It goes in the same order as the workbook. The sheet itself is on the slides, so Excel does not have to be open.
 
-It goes in the same order as the workbook, and the sheet itself is on the slides. Excel does not have to be open during the meeting. First the **BUDGET** sheet, including the yellow agreed amount at the top. Special projects are on that sheet, after tax. Say that those jobs cannot wait and are inside the levy. They are not the reserve. Then the **RESERVE** sheet. **Spent last year** is what was paid. The **2027** total is the whole column on the plan, plus Funded by reserve. Then the **PQ** sheet, every unit. **Pay now** is the current levy. **Will pay this year** follows the yellow rand. If that rand is 0, the two are the same. If the reserve is inside the levy, the PQ shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added. Excel is used afterwards, only to type the yellow number they agreed.
+1. **BUDGET sheet.** Start at the top. Yellow is the only place the meeting types. **What the costs need** is the bills added up. **Agreed increase** is the rand they accept. Type **0** if the levy must stay what owners pay now. The PQ then stays the same. **Still short** is pink. Above zero means the bills are still higher. It is not added again. Then go down the sheet, one block at a time: levy income, other income, recoveries, the city bill, expenditure, repairs, personnel, tax, then special projects. Say what the line is, what it was, and what it will be. A line that says it is not in the levy is not added again.
+2. **Special projects** are on that same Budget sheet, after tax. These jobs cannot wait. They are inside the ordinary levy. They are not the reserve and not the 10-year plan.
+3. **RESERVE sheet.** This is the savings account. Spent last year is what was paid. On a **2026** budget the total at the top is the whole **2026** column, plus any rand marked Funded by reserve. A **2027** job stays on the list. It is not taken off this closing balance. One project is not the total.
+4. **PQ sheet.** **Pay now** is the current levy, shared by PQ. **Will pay this year** follows the yellow rand. If that rand is 0, the two are the same. CSOS is 2% of (that unit’s levy minus R500), never more than R40. If the reserve is inside the levy, the PQ shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added.
 
-Yellow is the only place they type. White cells follow. A pink cell is a shortfall. It is not added again. Typing a lower rand does not make a bill smaller.
-
-**Download the presentation**, open it in the browser, and press F for full screen. The Excel sheet is where the yellow amount is changed. Download a fresh workbook after the app reboots if the PQ columns must show the reserve inside the levy.
+Yellow is the only place they type. White cells follow. A pink cell is a result to check. It is not a second charge. Typing a lower rand does not make a bill smaller. Download the presentation, open it in the browser, and press F for full screen. The Excel sheet is where the yellow amount is changed.
             """
         )
 
