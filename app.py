@@ -161,7 +161,22 @@ def refresh_special(state: dict, fill_only: bool = False) -> int:
     return len(rows)
 
 
-def sync_special_from_plan(state: dict) -> int:
+def replace_plan(state: dict, projects: list) -> int:
+    """A new plan replaces the old one. Projects that are not on it are removed."""
+    state["ymp"] = [p for p in projects if (p.get("desc") or "").strip()]
+    straighten_plan(state)
+    names = {norm(p.get("desc") or "") for p in state["ymp"]}
+    by_name = {norm(p.get("desc") or ""): p for p in state["ymp"]}
+    special = []
+    for r in (state.get("sections") or {}).get("special") or []:
+        key = norm(r.get("desc") or "")
+        if key not in names:
+            continue
+        years = (list((by_name[key].get("years") or [])) + [0.0] * 10)[:10]
+        r["this_budget"] = float(years[0] or 0)
+        r["yearly"] = float(years[1] or 0)
+        special.append(r)
+    state.setdefault("sections", {})["special"] = special
     return refresh_special(state)
 
 
@@ -2025,22 +2040,42 @@ def save_editor(edited: pd.DataFrame, previous: list, rm: bool, municipal: bool 
     return out
 
 
-def ymp_years_from_nums(nums: list, start_year: int | None = None) -> list:
-    """Old pack: First cycle | Frequency | Current estimate | 2025 | 2026 | … then roll so Year 1 = this budget year."""
-    start_year = int(start_year or NOW_YEAR)
-    n = [float(x) for x in nums if x is not None]
-    if n and 2020 <= n[0] <= 2040:
-        n = n[1:]
-        if n and 1 <= n[0] <= 20:
-            n = n[1:]
-        if n and (len(n) >= 11 or (n[0] >= 50 and len(n) >= 2 and n[0] > max([x for x in n[1:] if x] or [0]) * 1.2)):
-            n = n[1:]  # drop Current Estimate
-        offset = max(0, start_year - 2025)
-        if offset:
-            n = n[offset:] if len(n) > offset else [0.0] * 10
-    if len(n) > 10:
-        n = n[:10]
-    return (n + [0.0] * 10)[:10]
+def _plain_plan_fields(cells: list) -> tuple:
+    """A paste with no year headings: name, first cycle, frequency, then the year amounts."""
+    desc = ""
+    rest = []
+    for v in cells:
+        s = str(v or "").strip()
+        if not desc:
+            if s and re.search(r"[A-Za-z]", s) and num(s) is None:
+                desc = s
+            continue
+        rest.append(v)
+    first = ""
+    freq = ""
+    idx = 0
+    if idx < len(rest):
+        n = num(rest[idx])
+        if n is not None and 2020 <= n <= 2045:
+            first = int(n)
+            idx += 1
+    if idx < len(rest):
+        raw = str(rest[idx] or "").strip()
+        n = num(rest[idx]) if raw else None
+        if raw == "" or (n is not None and 1 <= n <= 30):
+            if n is not None:
+                freq = int(n)
+            idx += 1
+    years = []
+    for v in rest[idx:]:
+        n = num(v)
+        if n is None and str(v or "").strip() == "":
+            years.append(0.0)
+        elif n is None:
+            break
+        else:
+            years.append(float(n))
+    return desc, first, freq, (years + [0.0] * 10)[:10]
 
 
 def parse_ymp_paste(text: str, start_year: int | None = None) -> list:
@@ -2134,24 +2169,27 @@ def parse_ymp_sheet(df, start_year: int | None = None) -> list:
                     years.append(float(num(cells[c]) or 0))
             years = (years + [0.0] * 10)[:10]
         else:
-            nums = [num(v) for v in cells]
-            nums = [x for x in nums if x is not None]
-            years = ymp_years_from_nums(nums, start_year)
+            plain_desc, plain_first, plain_freq, years = _plain_plan_fields(cells)
+            if plain_desc:
+                desc = plain_desc
+            first = plain_first
+            freq = plain_freq
         est = 0.0
         if estimate_col is not None and estimate_col < len(cells):
             est = float(num(cells[estimate_col]) or 0)
-        first = ""
-        freq = ""
-        if first_col is not None and first_col < len(cells) and num(cells[first_col]) is not None:
-            first = int(num(cells[first_col]))
-        elif any(2020 <= (num(cells[j]) or 0) <= 2045 for j in range(limit)):
-            for j in range(limit):
-                n = num(cells[j])
-                if n is not None and 2020 <= n <= 2045:
-                    first = int(n)
-                    break
-        if freq_col is not None and freq_col < len(cells) and num(cells[freq_col]) is not None:
-            freq = int(num(cells[freq_col]))
+        if year_cols:
+            first = ""
+            freq = ""
+            if first_col is not None and first_col < len(cells) and num(cells[first_col]) is not None:
+                first = int(num(cells[first_col]))
+            elif any(2020 <= (num(cells[j]) or 0) <= 2045 for j in range(limit)):
+                for j in range(limit):
+                    n = num(cells[j])
+                    if n is not None and 2020 <= n <= 2045:
+                        first = int(n)
+                        break
+            if freq_col is not None and freq_col < len(cells) and num(cells[freq_col]) is not None:
+                freq = int(num(cells[freq_col]))
         note = ""
         used = {c for c in year_cols if c is not None}
         for col in (estimate_col, first_col, freq_col):
@@ -7091,7 +7129,7 @@ Do these steps in this order.
 
 1. On the left, choose the WeConnectU **Actual vs Budget** file and click **Load Excel**.
 2. Open **10-year projects**. **Spent last year** is what was paid. **Budgeted this year** is the plan for this year. A **2027** amount shows as **Next year**. On a 2026 budget the reserve sheet adds the **whole 2026** column. The 2027 column is not in this closing balance. To add a project that is not on the plan, type it on a new row, enter the amount, and click **Save this section**. It stays, and it is written onto the plan. A total line is not a project.
-3. Open **10-year plan**. Upload the Excel, or copy from the row that says **2025  2026  2027** down to the last project and paste it. Every project line comes through, including a line with no amount yet. The app does not add a total, and it does not fill Current estimate unless that column is on your sheet.
+3. Open **10-year plan**. Upload the Excel, or paste the projects. **This replaces the old plan.** Projects that are not in the new paste are removed. Copy from the project names down to the last project. A year heading row is useful, but a paste of name, first cycle, frequency and the amounts is enough.
 4. To remove a project, click the trash can on that row, then click **Save 10-year plan**. It stays deleted. Click a project name to read the full words. Scroll right for the later years. A note that sat to the right of the years is in the **Note** column.
 5. Open **10-year projects** again.
    - Paid last year and also on this year's plan: both amounts are filled.
@@ -7725,16 +7763,15 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                         parsed = trial
                 if parsed:
                     st.session_state.ymp = [p for p in parsed if (p.get("desc") or "").strip()]
-                    straighten_plan(st.session_state)
-                    n = sync_special_from_plan(st.session_state)
+                    n = replace_plan(st.session_state, st.session_state.ymp)
                     st.session_state["ymp_nonce"] = int(st.session_state.get("ymp_nonce") or 0) + 1
-                    st.success(f"Loaded {len(st.session_state.ymp)} projects. Next year is on 10 Year Maintenance Projects ({n} lines).")
+                    st.success(f"Replaced the old plan. {len(st.session_state.ymp)} projects. Anything that was not in this file has been removed.")
                     st.rerun()
                 else:
                     st.error("Could not find the year headings 2025, 2026, 2027 on that sheet.")
             except Exception as e:
                 st.error(f"Could not read 10-year plan: {e}")
-        paste = st.text_area("Or paste from Excel (keep the empty cells / tabs)", height=160, key="ymp_paste")
+        paste = st.text_area("Paste the new plan here. This replaces the old plan.", height=160, key="ymp_paste")
         if st.button("Paste into plan") and paste.strip():
             if not re.search(r"20[2-4]\d", paste):
                 st.error(
@@ -7746,11 +7783,9 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 parsed = parse_ymp_paste(paste, plan_start_year(st.session_state))
                 good = [p for p in parsed if (p.get("desc") or "").strip()]
                 if good:
-                    st.session_state.ymp = good
-                    straighten_plan(st.session_state)
-                    n = sync_special_from_plan(st.session_state)
+                    n = replace_plan(st.session_state, good)
                     st.session_state["ymp_nonce"] = int(st.session_state.get("ymp_nonce") or 0) + 1
-                    st.success(f"Pasted {len(good)} projects. Open 10-year projects to see what was spent and next year ({n} lines).")
+                    st.success(f"Replaced the old plan with {len(good)} projects. The old projects are gone.")
                     st.rerun()
                 else:
                     st.error(
@@ -7803,27 +7838,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                     "years": years,
                     "note": str(r.get("Note") or "").strip(),
                 })
-            st.session_state.ymp = kept
-            for r in st.session_state.sections.get("special") or []:
-                desc = str(r.get("desc") or "").strip()
-                if not desc or norm(desc) in {norm(p.get("desc") or "") for p in kept}:
-                    continue
-                if not (r.get("manual") or r.get("note_edited")):
-                    continue
-                years = [0.0] * 10
-                years[0] = float(r.get("this_budget") or 0)
-                years[1] = float(r.get("yearly") or 0)
-                kept.append({
-                    "desc": desc,
-                    "first_cycle": "",
-                    "freq": "",
-                    "estimate": 0.0,
-                    "years": years,
-                    "note": r.get("note") or "Added on 10-year projects",
-                })
-            st.session_state.ymp = kept
-            straighten_plan(st.session_state)
-            n = sync_special_from_plan(st.session_state)
+            n = replace_plan(st.session_state, kept)
             st.session_state["ymp_nonce"] = nonce + 1
             st.success(f"Saved {len(kept)} projects. Next year is on 10 Year Maintenance Projects ({n} lines). Deleted rows stay deleted.")
             st.rerun()
