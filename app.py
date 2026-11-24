@@ -730,6 +730,11 @@ def municipal_gaps(state: dict, field: str = "yearly") -> list:
     return out
 
 
+def municipal_paid_by_reserve(state: dict) -> float:
+    """Rand the reserve already paid toward the municipal account. Actual only."""
+    return max(0.0, float(state.get("muni_paid_by_reserve") or 0))
+
+
 def municipal_net(state: dict) -> float:
     g, rec = municipal_gross_and_rec(state)
     return g - rec
@@ -882,8 +887,10 @@ def reserve_project_spend(state: dict) -> float:
 
 
 def projected_reserve(state: dict) -> float:
-    """Opening balance already includes interest earned to date. Do not add it again."""
-    opening = float(state.get("reserve_balance") or 0)
+    """Opening balance already includes interest earned to date. Do not add it again.
+    A municipal payment already made is taken off once, so the carry-over is lower.
+    """
+    opening = float(state.get("reserve_balance") or 0) - municipal_paid_by_reserve(state)
     return opening + reserve_contribution(state) - reserve_project_spend(state)
 
 
@@ -3515,9 +3522,16 @@ def generate_excel(state: dict) -> BytesIO:
     fml(ws.cell(r, 7), f"F{r}/12", RED)
     net_muni = r
     r += 1
-    ws.cell(r, 2, "COST SHORTFALL this year (actuals: city bill minus recovered). Already inside the actual net — do not add it again.")
+    ws.cell(r, 2, "Paid by the reserve (already paid)")
+    inp(ws.cell(r, 4), municipal_paid_by_reserve(state), MONEY)
+    ws.cell(r, 6).value = None
+    ws.cell(r, 8, "Comes off this year's municipal actual only. The reserve carry-over is lower by this rand. It is not in next year's levy.").font = Font(italic=True, size=9, color="1F4E79")
+    ws.cell(r, 8).alignment = Alignment(wrap_text=True, vertical="center")
+    paid_row = r
+    r += 1
+    ws.cell(r, 2, "COST SHORTFALL this year (actuals: city bill minus recovered, minus what the reserve already paid). Already inside the actual. Do not add it again.")
     ws.cell(r, 2).font = Font(italic=True, size=9, color="9C0006")
-    fml(ws.cell(r, 4), f"MAX(0,D{net_muni})", RED)
+    fml(ws.cell(r, 4), f"MAX(0,D{net_muni}-N(D{paid_row}))", RED)
     fml(ws.cell(r, 7), f"D{r}/12", RED)
     r += 1
     actual_gaps = municipal_gaps(state, "actual")
@@ -4217,6 +4231,14 @@ def generate_excel(state: dict) -> BytesIO:
             plan_rows.append(rr)
             maint_rows.append(rr)
             rr += 1
+    res.cell(rr, 2, "Municipal paid from the reserve").border = THIN
+    res.cell(rr, 2).font = Font(name="Calibri", size=10)
+    fml(res.cell(rr, 4), f"N(BUDGET!D{paid_row})")
+    fml(res.cell(rr, 6), "0")
+    res.cell(rr, 8, "Already paid. Comes off the municipal actual and off this carry-over. Not in next year's levy.").font = Font(italic=True, size=9, color="1F4E79")
+    res.cell(rr, 8).alignment = Alignment(wrap_text=True, vertical="center")
+    plan_rows.append(rr)
+    rr += 1
     funded_row = rr
     res.cell(rr, 2, "Funded by reserve (typed on the levy sheet)").border = THIN
     res.cell(rr, 2).font = Font(name="Calibri", size=10)
@@ -4289,6 +4311,7 @@ def generate_excel(state: dict) -> BytesIO:
         "tax_auto": bool(state.get("tax_auto", True)),
         "deck_copy": state.get("deck_copy") or {},
         "facilities": state.get("facilities") or {},
+        "muni_paid_by_reserve": municipal_paid_by_reserve(state),
     }
     blob = json.dumps(payload, ensure_ascii=False)
     # Excel cell cap is 32767; split across rows if needed.
@@ -4742,6 +4765,7 @@ def init():
     ss.setdefault("estate_split", "equal")
     ss.setdefault("show_pct", False)
     ss.setdefault("show_levy_pct", False)
+    ss.setdefault("muni_paid_by_reserve", 0.0)
 
 
 MOVE_TO = {
@@ -5729,9 +5753,31 @@ def pr_pack(state: dict) -> dict:
                         "If the city also charges that amount and it is missing from the list, the figures are too low."
                     ),
                 })
+        paid_m = municipal_paid_by_reserve(state)
+        if paid_m > 0.5:
+            ag, ar = municipal_split(state, "actual")
+            still = ag - ar - paid_m
+            extra_lines.append({
+                "name": "Paid by the reserve",
+                "last": money(paid_m),
+                "budget": "",
+                "change": "Already paid",
+                "headline": f"The reserve paid {money(paid_m)}.",
+                "tone": "down",
+                "impact": paid_m,
+                "where": "Off this year's municipal actual. The reserve carry-over is lower. Not in next year's levy.",
+                "say": (
+                    f"The reserve already paid {money(paid_m)} of the municipal account. "
+                    f"The amount still owing on the actuals is {money(still)}. "
+                    "That payment is not added again, and it is not in next year's levy. "
+                    "The reserve carry-over is lower by the same rand."
+                ),
+            })
         block["lines"].extend(extra_lines)
         block["intro"] = (
-            "Say this. Add what the city charged. Take off what owners paid back. What is left is what the levy must cover next year. A shortfall is this year, and it is already counted. Do not add it again."
+            "Say this. Add what the city charged. Take off what owners paid back. What is left is what the levy must cover next year. "
+            "A shortfall is this year, and it is already counted. Do not add it again. "
+            "If the reserve already paid part of the municipal account, that rand is off the actual and the reserve carry-over is lower. It is not in next year's levy."
         )
         sections.append(block)
 
@@ -6662,7 +6708,7 @@ def main():
                     "reserve_mode", "reserve_amount", "reserve_balance", "reserve_bill", "scheme_type", "special_in_ordinary",
                     "current_monthly_levy", "actual_months", "tax_auto",
                     "levy_approve_mode", "levy_approved_pct", "levy_approved_amount",
-                    "deck_copy", "facilities",
+                    "deck_copy", "facilities", "muni_paid_by_reserve",
                 ):
                     if k in data and data[k] is not None:
                         st.session_state[k] = data[k]
@@ -6703,7 +6749,7 @@ def main():
             value=float(st.session_state.get("reserve_balance") or 0),
             min_value=0.0,
             step=1000.0,
-            help="Money in the reserve bank account now. Not this year’s contribution.",
+            help="Money in the reserve bank account before any municipal payment typed on the Municipal tab. Not this year’s contribution. If this figure is already after that payment, leave Paid by the reserve at 0.",
         )
         box_help("balance")
         mode_now = st.session_state.get("reserve_mode") or "amount"
@@ -6893,6 +6939,7 @@ On **Municipal**, the city bill and the recovery are separate lines.
 - Type what owners pay back as a positive amount on the **Less: … recovered** line. Do not type a minus. Any line with the word **recovered** in the name is subtracted, including a sewer-plant recovery.
 - **Net municipal** = city bill minus recovered. A special levy set to **Municipal** is then taken off. That net is what goes into the levy.
 - If recovered is less than the city bill, the difference is a **cost shortfall**. It is this year's **Actual**, not Budgeted yearly. It is already inside the actual net. Do not add it again. The **Budgeted yearly** net is what goes into the new levy. The same actual shortfall is shown on **Notes for the PR**.
+- **Already paid by the reserve.** If the reserve paid part of the municipal account, type that rand here. It comes off this year's actual only, so the amount still owing is less. Next year's levy does not change. The reserve carry-over is lower by the same rand. Type the reserve bank balance **before** this payment. If the bank figure is already after the payment, leave this box at 0.
 
 ### 8. Expenditure and repairs
 **Expenditure** is the operating costs (accounting, audit, security, legal, garden contract, and so on). Not repairs, not salaries, not tax.
@@ -7243,15 +7290,38 @@ Yellow is the only place they type. White cells follow. A pink cell is a shortfa
             kind = "subtract" if is_muni_recovery(r.get("desc") or "", r.get("is_recovery")) else "add"
             st.write(f"- {r.get('desc')}: Actual {money(act)} — **{kind}**")
         st.write(f"**{money(ag)} − {money(ar)} = {money(ag - ar)}**")
+        st.session_state.muni_paid_by_reserve = st.number_input(
+            "Already paid by the reserve",
+            min_value=0.0,
+            step=1000.0,
+            value=float(st.session_state.get("muni_paid_by_reserve") or 0),
+            help="The reserve paid this much of the municipal account. It comes off this year's actual only. Next year's levy does not change. The reserve carry-over is lower by the same rand.",
+        )
+        paid_m = municipal_paid_by_reserve(st.session_state)
+        still = ag - ar - paid_m
+        if paid_m > 0.5:
+            st.caption(
+                f"Actual still owing: {money(ag)} − {money(ar)} − reserve paid {money(paid_m)} = **{money(still)}**. "
+                "This is not added to next year's levy. The reserve carry-over is lower by the same rand. "
+                "Type the reserve bank balance before this payment. If the bank figure is already after the payment, put 0 here."
+            )
         actual_gaps = municipal_gaps(st.session_state, "actual")
         under = [x for x in actual_gaps if x["gap"] > 1]
         over = [x for x in actual_gaps if x["gap"] < -1]
         if under:
             total_under = sum(x["gap"] for x in under)
-            st.warning(
-                f"**This year's shortfall {money(total_under)}** — on the actuals, the city bill is more than owners paid back. "
-                f"It is already inside the actual net. Do not add it again. Trustees should attend: meters, billing, or raise what owners pay back."
-            )
+            paid_m = municipal_paid_by_reserve(st.session_state)
+            still_under = max(0.0, total_under - paid_m)
+            if paid_m > 0.5:
+                st.warning(
+                    f"**This year's shortfall was {money(total_under)}.** The reserve already paid {money(paid_m)}, "
+                    f"so the amount still owing is {money(still_under)}. It is not added again, and it is not in next year's levy."
+                )
+            else:
+                st.warning(
+                    f"**This year's shortfall {money(total_under)}** — on the actuals, the city bill is more than owners paid back. "
+                    f"It is already inside the actual net. Do not add it again. Trustees should attend: meters, billing, or raise what owners pay back."
+                )
             for x in under:
                 st.write(
                     f"- **{x['name']}**: city {money(x['gross'])} − recovered {money(x['rec'])} = **shortfall {money(x['gap'])}** (actual)"
