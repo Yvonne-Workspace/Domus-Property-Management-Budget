@@ -5981,6 +5981,7 @@ def pr_pack(state: dict) -> dict:
         "sections": sections,
         "close": close,
         "grids": _pr_grids(state, approved, current_m),
+        "use_this_plan": budget_uses_this_plan_year(state),
     }
 
 
@@ -6088,7 +6089,7 @@ def pr_slides(pack: dict) -> list:
                         f"On a {NOW_YEAR} budget this is the whole {NOW_YEAR} column, plus Funded by reserve. "
                         f"The {NOW_YEAR + 1} column stays on the list. It is not in this closing balance. "
                         "One project is not the total. Spent last year is what was paid."
-                        if budget_uses_this_plan_year(state) else
+                        if pack.get("use_this_plan") else
                         f"This is the whole {NOW_YEAR + 1} column on the 10-year plan, plus Funded by reserve. One project is not the total. Spent last year is what was paid."
                     )},
                     {"where": "Closing reserve balance", "do": "White.", "why": "Opening, plus contributions, minus the plan."},
