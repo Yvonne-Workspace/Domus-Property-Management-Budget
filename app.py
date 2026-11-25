@@ -3147,14 +3147,17 @@ def generate_excel(state: dict) -> BytesIO:
     ws = wb.active
     ws.title = "BUDGET"
 
-    def brand(sheet, anchor="A1", width=340, height=148):
-        path = Path(__file__).parent / "domus_logo.jpeg"
+    def brand(sheet, anchor="B1"):
+        path = Path(__file__).parent / "domus_logo_excel.png"
+        if not path.exists():
+            path = Path(__file__).parent / "domus_logo.jpeg"
         if path.exists():
             img = XLImage(str(path))
-            img.width = width
-            img.height = height
+            # 96 dpi file, sized to the artwork. A wrong dpi makes Excel show only a corner.
+            img.width = 300
+            img.height = 116
             sheet.add_image(img, anchor)
-            sheet.row_dimensions[1].height = 130
+            sheet.row_dimensions[1].height = 96
         name = (state.get("complex_name") or "").strip()
         year = (state.get("fin_year") or "").strip()
         foot = "Domus Property Management  /  Eiendomsbestuur"
@@ -3824,9 +3827,8 @@ def generate_excel(state: dict) -> BytesIO:
         ws.column_dimensions["E"].width = 12
 
     pq = wb.create_sheet("PQ")
-    pq["A1"] = "PQ / LEVY SCHEDULE"
-    pq["A1"].font = Font(bold=True, size=14, color=NAVY)
-    pq["A2"] = state.get("complex_name") or ""
+    pq["A2"] = "PQ / LEVY SCHEDULE" + (("  ·  " + (state.get("complex_name") or "")) if state.get("complex_name") else "")
+    pq["A2"].font = Font(bold=True, size=14, color=NAVY)
     if state.get("show_levy_pct"):
         pq["E1"] = "Levy increase"
         pq["E1"].font = Font(name="Calibri", bold=True, size=14, color=NAVY)
@@ -3999,9 +4001,8 @@ def generate_excel(state: dict) -> BytesIO:
     brand(pq)
 
     eu = wb.create_sheet("EACH UNIT")
-    eu["A1"] = "WHAT EACH UNIT PAYS"
-    eu["A1"].font = Font(bold=True, size=14, color=NAVY)
-    eu["A2"] = state.get("complex_name") or ""
+    eu["A2"] = "WHAT EACH UNIT PAYS" + (("  ·  " + (state.get("complex_name") or "")) if state.get("complex_name") else "")
+    eu["A2"].font = Font(bold=True, size=14, color=NAVY)
     eu["A3"] = "Monthly rand for that unit. Municipal — common property is the city bill for the complex after owners have paid their own electricity and water. It is not their home's municipal account. Personnel and tax are left off when they are zero."
     eu["A3"].font = Font(italic=True, size=9, color="666666")
     eu.merge_cells("A3:L3")
@@ -4102,14 +4103,14 @@ def generate_excel(state: dict) -> BytesIO:
 
     ymp = wb.create_sheet("10 YMP")
     start_y = plan_start_year(state)
-    ymp["B1"] = (state.get("complex_name") or "").upper()
-    ymp["B1"].font = Font(bold=True, size=14, color=NAVY)
     ymp["A2"] = "10 YEAR MAINTENANCE PLAN"
     ymp["A2"].font = Font(bold=True, size=12, color=NAVY)
+    ymp["C2"] = (state.get("complex_name") or "").upper()
+    ymp["C2"].font = Font(bold=True, size=14, color=NAVY)
     ymp["A3"] = "Colours. Yellow with blue numbers: type here. White: do not type. Dark blue with white words: a heading. A red figure in the first year is this year’s project."
     ymp["A3"].font = Font(italic=True, size=9, color="666666")
     ymp.row_dimensions[1].height = 64
-    brand(ymp)
+    brand(ymp, "A1")
     headers = ["PROJECTS", "First Cycle", "Frequency of Cycles", "Current Estimate"] + [str(start_y + i) for i in range(10)] + ["Notes"]
     sub = ["", "", "", ""] + [f"Year {i+1}" for i in range(10)] + [""]
     for i, h in enumerate(headers, 1):
