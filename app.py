@@ -6250,29 +6250,29 @@ def pr_slides(pack: dict) -> list:
                 "say": line.get("say") or "",
             })
     pq_steps = [
-        {"where": "Pay now", "do": "What they pay now, shared by PQ.", "why": "It is the current ordinary levy on the left, not last year's received amount. If the yellow rand is 0, Will pay this year is the same."},
+        {"where": "Pay now", "do": "White. Leave it.", "why": "What this unit pays today for the ordinary levy. It comes from the current levy on the left, shared by PQ. It is not last year’s cash in the bank."},
     ]
     if inside:
         pq_steps += [
-            {"where": "Ordinary levy", "do": "The running costs, this unit’s share.", "why": "Part of the one levy. Not a second charge."},
-            {"where": "Reserve fund", "do": "The reserve inside that levy.", "why": "There is no reserve line on the invoice."},
-            {"where": "Will pay this year", "do": "Ordinary levy plus reserve fund.", "why": "This is the one levy. It moves when the yellow agreed rand on the BUDGET sheet moves."},
+            {"where": "Ordinary levy", "do": "White. Leave it.", "why": "This unit’s share of the running costs. It is part of the one levy, not a second charge."},
+            {"where": "Reserve fund", "do": "White. Leave it.", "why": "The reserve that sits inside that same levy. There is no extra reserve line on the invoice."},
+            {"where": "Will pay this year", "do": "White. Leave it.", "why": "Ordinary levy plus reserve. That is the one amount on the invoice. It follows the yellow rand."},
         ]
     else:
         pq_steps += [
-            {"where": "Will pay this year", "do": "The levy only.", "why": "It moves when the yellow agreed rand on the BUDGET sheet moves."},
-            {"where": "Reserve fund", "do": "Its own column, if they pay one.", "why": "Not inside the levy. It follows the yellow reserve amount."},
+            {"where": "Will pay this year", "do": "White. Leave it.", "why": "The new ordinary levy for this unit. If the yellow increase is 0, it is the same as Pay now."},
+            {"where": "Reserve fund", "do": "Its own column, if they pay one.", "why": "Not inside the levy. It follows the yellow reserve amount. Owners see it as its own line."},
         ]
-    pq_steps.append({"where": "Levy change", "do": "White. Leave it.", "why": "The ordinary levy only. This year minus what they pay now."})
-    pq_steps.append({"where": "Reserve change", "do": "White. Leave it.", "why": "This year’s reserve minus last year’s reserve, for that unit. It follows the yellow reserve rand."})
-    pq_steps.append({"where": "Total change", "do": "White. Leave it.", "why": "Levy change plus reserve change. It is not added again into the invoice Total."})
-    pq_steps.append({"where": "CSOS and the Total", "do": "White. Leave them.", "why": "CSOS is worked from the levy. The Total is the levy plus CSOS and anything else on the invoice. Do not type a unit."})
+    pq_steps.append({"where": "Levy change", "do": "White. Leave it.", "why": "Will pay this year minus Pay now. Ordinary levy only. Say this number when they ask how much the levy itself moved."})
+    pq_steps.append({"where": "Reserve change", "do": "White. Leave it.", "why": "This year’s reserve minus last year’s reserve, for this unit. If the reserve did not change, it is zero."})
+    pq_steps.append({"where": "Total change", "do": "White. Leave it.", "why": "Levy change plus reserve change. This is how much more, or less, the unit pays for both. It is not added again into the invoice Total."})
+    pq_steps.append({"where": "CSOS and the Total", "do": "White. Leave them.", "why": "CSOS is 2% of (the levy minus R500), never more than R40. The Total is the bill: levy, reserve, CSOS and any fixed charge. Do not type a unit."})
     slides.append(guide(
         "PQ sheet",
-        "Open the PQ sheet. Top to bottom.",
-        "The PQ sheet is on the next slide. One row is one unit. Nothing is typed here. It follows the yellow rand.",
+        "What each owner pays",
+        "One row is one unit. Nothing here is typed. Read across the row: what they pay now, what they will pay, then the three change columns, then the bill.",
         pq_steps,
-        "Say this. We do not work out each unit by hand. The sheet does it from the yellow amount we just agreed.",
+        "Say this. The levy change is the ordinary levy only. The reserve change is separate. Total change adds the two. The Total on the right is the bill. Do not add the change columns into that bill again.",
     ))
     pq_grid = (pack.get("grids") or {}).get("pq") or {}
     if pq_grid.get("rows"):
@@ -7166,13 +7166,21 @@ A cost that is not on the plan can still be paid by the reserve. Type the rand i
 ### 17. PQ and what each unit pays
 Upload the unit file in the sidebar or on **PQ / Levies**. If the PQ column is 0, the app uses **Ratio 1**. The ratios must add up to about 1.000.
 
-The **PQ** sheet is the invoice: Levies, Reserve, CSOS, Insurance and any fixed charge. Each owner’s levy share = their PQ × the monthly total. A fixed charge (garden, private refuse) is the same rand for every unit.
+The **PQ** sheet is what each owner pays. One row is one unit. Nothing on this sheet is typed. It follows the yellow amounts on the Budget sheet.
 
-The first money column is **Pay now**. It is the current ordinary levy from the left, shared by PQ. It is not last year’s cash received. **Will pay this year** follows the yellow agreed rand. If that rand is 0, the two columns are the same.
+Read the columns from left to right:
 
-**Levy change** is the ordinary levy only: this year minus what they pay now. **Reserve change** is this year’s reserve minus last year’s reserve, shared by PQ. **Total change** is those two added. None of these three is added again into the invoice Total.
+- **Pay now** — the ordinary levy they pay today, shared by PQ. It comes from the number on the left (all units, one month). It is not last year’s cash received.
+- **Will pay this year** — the new ordinary levy, after the meeting’s yellow rand. If that yellow rand is 0, this matches Pay now.
+- **Levy change** — Will pay this year minus Pay now. Ordinary levy only. The reserve is not in this column.
+- **Reserve change** — this year’s reserve minus last year’s reserve, for that unit. It follows the yellow reserve rand. If the reserve stays the same, this is 0.
+- **Total change** — Levy change plus Reserve change. This is how much more, or less, that unit pays for the levy and the reserve together.
+- **Levies, Reserve, CSOS** and any fixed charge — the invoice. A fixed charge (garden, private refuse) is the same rand for every unit, not by PQ.
+- **Total** — what that unit is billed. Levy change, Reserve change and Total change are **not** added into this Total again.
 
-If **Added into the ordinary levy** is chosen, the PQ tab shows **Ordinary levy** and **Reserve fund** as two amounts. **Will pay this year** is those two added. That is the one levy on the invoice. There is still no separate reserve line.
+Example for the whole complex, one month. They pay R10,000 now. The new levy is R11,000. Levy change is R1,000. Last year’s reserve was R2,000 a month and this year it is R2,500. Reserve change is R500. Total change is R1,500. Each unit then gets its PQ share of those three numbers.
+
+If **Added into the ordinary levy** is chosen, the sheet also shows **Ordinary levy** and **Reserve fund** as two amounts. **Will pay this year** is those two added. That is the one levy. There is still no second reserve line on the invoice. **Levy change** is still the running-cost part only.
 
 **EACH UNIT** is a separate sheet. It does not change the PQ sheet. One row per unit, in rands a month:
 
@@ -7224,7 +7232,7 @@ The meeting block is at the top of **BUDGET**.
 - **What the costs need** is locked.
 - **Increase** is the rand the costs need above what owners pay now. The % is not on the sheet unless you ticked **Show the levy increase % at the top**. If the costs need 5.5% more, that tick shows 5.5%. There is no second %.
 - **Agreed increase** is yellow. Leave it to keep that increase. Type **0** when the levy must stay the same. **What owners will pay** then equals what they pay now, and the PQ does not change.
-- **What owners will be charged** and **Still short** calculate. Still short would be R20,000.
+- **What owners will be charged** and **Still short** calculate. Above zero on Still short means the bills are still higher than the amount the meeting agreed. It is not added again.
 - **Agreed reserve** is yellow. Type the reserve contribution in rands.
 
 Yellow cells can be typed without a password. White cells are locked. Pink is a result to check, not a second charge. Green is the monthly levy the meeting approved. To unlock a white cell: Review, Unprotect Sheet, password **domus**. If Excel offered to repair the file, do not use that copy. Download a fresh one.
@@ -7244,7 +7252,7 @@ It goes in the same order as the workbook. The sheet itself is on the slides, so
 1. **BUDGET sheet.** Start at the top. Yellow is the only place the meeting types. **What the costs need** is the bills added up. **Agreed increase** is the rand they accept. Type **0** if the levy must stay what owners pay now. The PQ then stays the same. **Still short** is pink. Above zero means the bills are still higher. It is not added again. Then go down the sheet, one block at a time: levy income, other income, recoveries, the city bill, expenditure, repairs, personnel, tax, then special projects. Say what the line is, what it was, and what it will be. A line that says it is not in the levy is not added again.
 2. **Special projects** are on that same Budget sheet, after tax. These jobs cannot wait. They are inside the ordinary levy. They are not the reserve and not the 10-year plan.
 3. **RESERVE sheet.** This is the savings account. Spent last year is what was paid. On a **2026** budget the total at the top is the whole **2026** column, plus any rand marked Funded by reserve. A **2027** job stays on the list. It is not taken off this closing balance. One project is not the total.
-4. **PQ sheet.** **Pay now** is the current levy, shared by PQ. **Will pay this year** follows the yellow rand. If that rand is 0, the two are the same. **Levy change** is the ordinary levy only. **Reserve change** is this year’s reserve minus last year’s. **Total change** adds those two. CSOS is 2% of (that unit’s levy minus R500), never more than R40. If the reserve is inside the levy, the PQ shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added.
+4. **PQ sheet.** Go across one unit, then the next. **Pay now** is what they pay today. **Will pay this year** is the new ordinary levy. **Levy change** is the difference, ordinary levy only. **Reserve change** is this year’s reserve minus last year’s, for that unit. **Total change** adds those two. It tells the meeting how much more, or less, that owner pays for the levy and the reserve together. Do not add those three into the invoice Total. The Total on the right is the bill: levy, reserve, CSOS and any fixed charge. CSOS is 2% of (that unit’s levy minus R500), never more than R40. If the reserve is inside the levy, the sheet shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added.
 
 Yellow is the only place they type. White cells follow. A pink cell is a result to check. It is not a second charge. Typing a lower rand does not make a bill smaller. Download the presentation, open it in the browser, and press F for full screen. The Excel sheet is where the yellow amount is changed.
             """
