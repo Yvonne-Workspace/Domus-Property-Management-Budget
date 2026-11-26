@@ -3257,7 +3257,13 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B11"].font = Font(bold=True, size=12, color=NAVY)
     ws["B12"] = "Last year’s contribution"
     ws["B13"] = "Agreed reserve — type the rand"
-    ws["H13"] = "Type the reserve contribution for the year, in rands. Not a %. This is what owners pay into the reserve."
+    ws["H13"] = (
+        "Type the reserve for the year, in rands. Not a %. It is not a line under Levy Income. "
+        "Changing it does not change the ordinary levy. The reserve sheet and the PQ follow this cell."
+        if not reserve_inside_levy(state) else
+        "Type the reserve for the year, in rands. Not a %. It is not a line under Levy Income. "
+        "It is included in the one levy owners pay. The PQ still shows the two parts."
+    )
     ws["H13"].font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
     _ord_actual = ordinary_actual(state)
     _mode = state.get("levy_approve_mode") or "costs"
@@ -3551,7 +3557,8 @@ def generate_excel(state: dict) -> BytesIO:
 
     bar("LEVY INCOME")
     hdr()
-    a, b = write(s["levy"], levy_tick="extra")
+    levy_items = [it for it in (s.get("levy") or []) if family(it.get("desc") or "") != "reserve"]
+    a, b = write(levy_items, levy_tick="extra")
     inc_tot = tot("TOTAL LEVY INCOME", a, b)
     bar("OTHER INCOME")
     hdr()
@@ -3746,12 +3753,12 @@ def generate_excel(state: dict) -> BytesIO:
         bits += "-" + "-".join(cut)
     if reserve_mark_rows:
         bits += f"-({yes_sum(reserve_mark_rows)})"
-    if reserve_inside_levy(state) and levy_rows.get("reserve"):
-        bits += f"+F{levy_rows['reserve']}"
+    if reserve_inside_levy(state):
+        bits += "+F13"
     bar("ORDINARY LEVY (what we charge)")
     levy_words = "Ordinary levies = net municipal + expenditure + repairs + personnel + tax + special projects, minus income marked Yes, minus the rand funded by the reserve, minus fixed monthly charges the owners pay on the invoice. Special projects are work that must be done now. They are in the levy. They are not the reserve and not the 10-year plan. A special levy set to Municipal is already taken off the city bill."
     if reserve_inside_levy(state):
-        levy_words += " The reserve contribution is included."
+        levy_words += " The agreed reserve at the top is included in this levy. It is not a line under Levy Income."
     label = ws.cell(r, 2, "Ordinary levy")
     label.font = Font(name="Calibri", bold=True, size=11)
     note = ws.cell(r, 8, levy_words)
@@ -3806,16 +3813,12 @@ def generate_excel(state: dict) -> BytesIO:
             pct.alignment = Alignment(horizontal="center")
             ws["G4"] = "Worked out from the rand. It does not change the levy."
             ws["G4"].font = Font(italic=True, size=9, color="1F4E79")
-    if levy_rows.get("reserve"):
-        res_row = levy_rows["reserve"]
-        wb.defined_names.add(DefinedName(name="ReserveActual", attr_text=f"BUDGET!$D${res_row}"))
-        fml(ws.cell(12, 6), f"D{res_row}")
-        fml(ws.cell(12, 7), "F12/12")
-        _res_year = float(reserve_contribution(state) or 0)
-        inp(ws.cell(13, 6), _res_year, MONEY)
-        fml(ws.cell(13, 7), "F13/12", "C6EFCE")
-        fml(ws.cell(res_row, 6), "F13")
-        fml(ws.cell(res_row, 7), "F13/12")
+    wb.defined_names.add(DefinedName(name="ReserveActual", attr_text="RESERVE!$D$9"))
+    fml(ws.cell(12, 6), "RESERVE!D9")
+    fml(ws.cell(12, 7), "F12/12")
+    _res_year = float(reserve_contribution(state) or 0)
+    inp(ws.cell(13, 6), _res_year, MONEY)
+    fml(ws.cell(13, 7), "F13/12", "C6EFCE")
     for fam in ("boathouse", "boatport"):
         row = levy_rows.get(fam)
         if not row:
@@ -3840,12 +3843,12 @@ def generate_excel(state: dict) -> BytesIO:
         pq_pct.border = THIN
         pq_pct.alignment = Alignment(horizontal="center")
     bills = pq_bill_lines(state)
-    inside = reserve_inside_levy(state) and reserve_contribution(state) > 0.5 and bool(levy_rows.get("reserve"))
+    inside = reserve_inside_levy(state) and reserve_contribution(state) > 0.5
     pq["B3"] = "Monthly"
     name_to_budget = {
         "Levies": f"BUDGET!G{approved_row}" if approved_row else (f"BUDGET!G{levy_rows['ordinary']}" if levy_rows.get("ordinary") else None),
         "CSOS": f"BUDGET!G{levy_rows['csos']}" if levy_rows.get("csos") else None,
-        "Reserve Fund": f"BUDGET!G{levy_rows['reserve']}" if levy_rows.get("reserve") else None,
+        "Reserve Fund": "BUDGET!G13",
         "Insurance": f"BUDGET!G{levy_rows['insurance']}" if levy_rows.get("insurance") else None,
     }
     for it in (s.get("hoa_income") or []) + (s.get("fixed") or []):
@@ -3912,7 +3915,7 @@ def generate_excel(state: dict) -> BytesIO:
     pq.cell(5, 4, "whole complex, what they pay now")
     pq.cell(5, 4).font = Font(italic=True, size=8, color="666666")
     if inside:
-        fml(pq.cell(4, reserve_split_col), f"BUDGET!G{levy_rows['reserve']}")
+        fml(pq.cell(4, reserve_split_col), "BUDGET!G13")
         fml(pq.cell(4, ordinary_col), f"{levy_letter}4-{get_column_letter(reserve_split_col)}4")
         pq.cell(5, ordinary_col, "running costs, this year")
         pq.cell(5, reserve_split_col, "inside the levy, this year")
@@ -3923,17 +3926,13 @@ def generate_excel(state: dict) -> BytesIO:
         fml(pq.cell(4, will_col), f"{levy_letter}4")
     pq.cell(5, will_col, "whole complex, this year")
     pq.cell(5, will_col).font = Font(italic=True, size=8, color="666666")
-    res_row = levy_rows.get("reserve")
     if inside:
         fml(pq.cell(4, levy_change_col), f"{get_column_letter(ordinary_col)}4-D4")
     else:
         fml(pq.cell(4, levy_change_col), f"{will_letter}4-D4")
     pq.cell(5, levy_change_col, "levy, this year − what they pay now")
     pq.cell(5, levy_change_col).font = Font(italic=True, size=8, color="666666")
-    if res_row:
-        fml(pq.cell(4, reserve_change_col), f"BUDGET!G{res_row}-BUDGET!D{res_row}/12")
-    else:
-        fml(pq.cell(4, reserve_change_col), "0")
+    fml(pq.cell(4, reserve_change_col), "BUDGET!G13-RESERVE!D9/12")
     pq.cell(5, reserve_change_col, "reserve, this year − last year")
     pq.cell(5, reserve_change_col).font = Font(italic=True, size=8, color="666666")
     fml(pq.cell(4, total_change_col), f"{get_column_letter(levy_change_col)}4+{get_column_letter(reserve_change_col)}4")
@@ -4214,12 +4213,19 @@ def generate_excel(state: dict) -> BytesIO:
     res["B8"] = "Opening reserve balance"
     inp(res["D8"], float(state.get("reserve_balance") or 0), MONEY)
     res["B9"] = "Reserve contributions"
-    if levy_rows.get("reserve"):
-        fml(res["D9"], f"BUDGET!D{levy_rows['reserve']}")
-        fml(res["F9"], f"BUDGET!F{levy_rows['reserve']}")
-    else:
-        inp(res["D9"], 0, MONEY)
-        inp(res["F9"], float(reserve_contribution(state) or 0), MONEY)
+    last_reserve = 0.0
+    for it in (s.get("levy") or []):
+        if family(it.get("desc") or "") == "reserve":
+            last_reserve = abs(float(it.get("actual") or 0))
+    inp(res["D9"], last_reserve, MONEY)
+    fml(res["F9"], "BUDGET!F13")
+    res["H9"] = (
+        "Last year is yellow only if the collected amount is wrong. This year follows Agreed reserve on the BUDGET sheet. Do not type this year here. It is not under Levy Income, and it does not change the ordinary levy."
+        if not reserve_inside_levy(state) else
+        "That yellow rand is inside the one levy. It is not a line under Levy Income."
+    )
+    res["H9"].font = Font(italic=True, size=9, color="1F4E79")
+    res["H9"].alignment = Alignment(wrap_text=True, vertical="center")
     sr = 10
     special_rows = []
     for src_row, src_desc in reserve_from_rows:
@@ -4624,6 +4630,22 @@ def _read_meeting_from_sheet(wb, data: dict) -> None:
                 data["reserve_mode"] = "amount"
                 data["reserve_amount"] = float(year_v)
             continue
+    if "RESERVE" in wb.sheetnames:
+        res = wb["RESERVE"]
+        for r in range(1, 25):
+            label = str(res.cell(r, 2).value or "")
+            if not label.startswith("Reserve contribution"):
+                continue
+            d_val = res.cell(r, 4).value
+            if isinstance(d_val, (int, float)):
+                for it in (data.get("sections") or {}).get("levy") or []:
+                    if family(it.get("desc") or "") == "reserve":
+                        it["actual"] = abs(float(d_val))
+            f_val = res.cell(r, 6).value
+            if isinstance(f_val, (int, float)):
+                data["reserve_mode"] = "amount"
+                data["reserve_amount"] = abs(float(f_val))
+            break
 
 
 def _restore_from_domus_sheet(wb) -> dict | None:
@@ -5731,6 +5753,8 @@ def pr_pack(state: dict) -> dict:
     sections = []
     levy_lines = []
     for r in s.get("levy") or []:
+        if family(r.get("desc") or "") == "reserve":
+            continue
         levy_lines.append(_one(state, r, _levy_where(state, r)))
     block = _section(
         "Levy income",
@@ -6088,9 +6112,9 @@ def pr_slides(pack: dict) -> list:
     why = pack.get("why") or {}
     inside = bool(why.get("inside"))
     reserve_where = (
-        "It is already inside the levy. Changing it changes the levy. Do not also add a reserve line."
+        "It is inside the one levy owners pay. It is not a line under Levy Income. The PQ still shows the two parts."
         if inside else
-        "It is its own line on the invoice. It is not inside the levy."
+        "It is not inside the ordinary levy. Changing this yellow rand does not change the levy. It changes the reserve sheet and the reserve column on the PQ."
     )
 
     def guide(sheet, title, lead, steps, say=""):
@@ -6182,7 +6206,7 @@ def pr_slides(pack: dict) -> list:
                 "This is not the monthly levy. This is the savings for the big jobs.",
                 [
                     {"where": "Opening reserve balance", "do": "Yellow only if the bank figure is wrong.", "why": "Money in the reserve account now. Do not include this year’s contribution in it."},
-                    {"where": "Reserve contributions", "do": "White. It follows the yellow reserve on the BUDGET sheet.", "why": reserve_where},
+                    {"where": "Reserve contributions", "do": "This year is white. It follows the yellow Agreed reserve.", "why": reserve_where},
                     {"where": "Maintenance plan expenditure", "do": "White. Leave it.", "why": (
                         f"On a {NOW_YEAR} budget this is every job in the {NOW_YEAR} column, added together, plus any rand marked Funded by reserve. "
                         f"A {NOW_YEAR + 1} job is still on the list so you can see it. It is not taken off this year's reserve. "
@@ -6939,9 +6963,9 @@ def main():
             ),
         )
         if st.session_state.reserve_bill == "levy":
-            st.caption("The contribution is inside the ordinary levy. There is no reserve column on the PQ. Do not add it again.")
+            st.caption("The contribution is inside the one levy. It is not a line under Levy Income. The PQ shows the two parts, and Will pay this year is those two added.")
         else:
-            st.caption("Owners see Levies and Reserve as two amounts. The contribution is not inside the ordinary levy.")
+            st.caption("Owners see Levies and Reserve as two amounts. The contribution is on the reserve sheet, not under Levy Income. Changing it does not change the ordinary levy.")
         box_help("bill")
         st.session_state.special_in_ordinary = st.checkbox(
             "Pay the 10-year projects from the ordinary levy",
@@ -7093,12 +7117,12 @@ Then pick one. It works for a body corporate and an HOA:
 - 25% of last year’s ordinary levy (that same Actual)
 - 100% of this year’s Repairs and Maintenance (after recovery income and payouts)
 
-The amount shows on **Reserve Fund Contribution**. On the Excel file it is on the **RESERVE** sheet, not at the top of the levy sheet. On a **2026** budget the total at the top is the whole **2026** column, not one project and not 2027. **Funded by reserve** is live: type it on the levy sheet and the reserve comes down by the same rand.
+The amount is **not** a line under Levy Income, and it is **not** in Total Levy Income. On the Excel file, type it once: the yellow **Agreed reserve** at the top of the BUDGET sheet. The RESERVE sheet shows the same number. Changing that yellow rand does **not** change the ordinary levy.
 
 Then choose how owners pay it. Pick one:
 
-- **Extra line on the owner invoice.** They see Levies and Reserve as two amounts. This is the usual choice.
-- **Added into the ordinary levy.** One amount. There is no reserve column. Do not also leave it as its own line.
+- **Extra line on the owner invoice.** They see Levies and Reserve as two amounts. This is the usual choice. The ordinary levy does not include it.
+- **Added into the ordinary levy.** Owners pay one levy. The yellow reserve rand is inside that levy. It is still not listed under Levy Income. The PQ shows Ordinary levy and Reserve fund apart, and Will pay this year is those two added.
 
 On Expenditure, Repairs, Personnel or Tax, type a rand in **Funded by reserve** when the reserve pays that line, or only a part of it. Leave it at 0 if the levy pays it. The rand you type leaves the ordinary levy and shows on the reserve sheet.
 
@@ -7233,7 +7257,7 @@ The meeting block is at the top of **BUDGET**.
 - **Increase** is the rand the costs need above what owners pay now. The % is not on the sheet unless you ticked **Show the levy increase % at the top**. If the costs need 5.5% more, that tick shows 5.5%. There is no second %.
 - **Agreed increase** is yellow. Leave it to keep that increase. Type **0** when the levy must stay the same. **What owners will pay** then equals what they pay now, and the PQ does not change.
 - **What owners will be charged** and **Still short** calculate. Above zero on Still short means the bills are still higher than the amount the meeting agreed. It is not added again.
-- **Agreed reserve** is yellow. Type the reserve contribution in rands.
+- **Agreed reserve** is yellow. Type the reserve contribution in rands. It is not a line under Levy Income. Changing it does not change the ordinary levy, unless you chose **Added into the ordinary levy**. Then that rand is inside the one levy, and the PQ still shows the two parts. The reserve sheet follows this cell.
 
 Yellow cells can be typed without a password. White cells are locked. Pink is a result to check, not a second charge. Green is the monthly levy the meeting approved. To unlock a white cell: Review, Unprotect Sheet, password **domus**. If Excel offered to repair the file, do not use that copy. Download a fresh one.
 
@@ -7251,7 +7275,7 @@ It goes in the same order as the workbook. The sheet itself is on the slides, so
 
 1. **BUDGET sheet.** Start at the top. Yellow is the only place the meeting types. **What the costs need** is the bills added up. **Agreed increase** is the rand they accept. Type **0** if the levy must stay what owners pay now. The PQ then stays the same. **Still short** is pink. Above zero means the bills are still higher. It is not added again. Then go down the sheet, one block at a time: levy income, other income, recoveries, the city bill, expenditure, repairs, personnel, tax, then special projects. Say what the line is, what it was, and what it will be. A line that says it is not in the levy is not added again.
 2. **Special projects** are on that same Budget sheet, after tax. These jobs cannot wait. They are inside the ordinary levy. They are not the reserve and not the 10-year plan.
-3. **RESERVE sheet.** This is the savings account. Spent last year is what was paid. On a **2026** budget the total at the top is the whole **2026** column, plus any rand marked Funded by reserve. A **2027** job stays on the list. It is not taken off this closing balance. One project is not the total.
+3. **RESERVE sheet.** This is the savings account. Reserve Fund Contribution is here, not under Levy Income. Last year can be corrected if the collected amount is wrong. This year follows the yellow Agreed reserve. Changing it does not change the ordinary levy, unless the reserve was added into that levy. Spent last year is what was paid. On a **2026** budget the total at the top is the whole **2026** column, plus any rand marked Funded by reserve. A **2027** job stays on the list. It is not taken off this closing balance. One project is not the total.
 4. **PQ sheet.** Go across one unit, then the next. **Pay now** is what they pay today. **Will pay this year** is the new ordinary levy. **Levy change** is the difference, ordinary levy only. **Reserve change** is this year’s reserve minus last year’s, for that unit. **Total change** adds those two. It tells the meeting how much more, or less, that owner pays for the levy and the reserve together. Do not add those three into the invoice Total. The Total on the right is the bill: levy, reserve, CSOS and any fixed charge. CSOS is 2% of (that unit’s levy minus R500), never more than R40. If the reserve is inside the levy, the sheet shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added.
 
 Yellow is the only place they type. White cells follow. A pink cell is a result to check. It is not a second charge. Typing a lower rand does not make a bill smaller. Download the presentation, open it in the browser, and press F for full screen. The Excel sheet is where the yellow amount is changed.
@@ -7364,7 +7388,8 @@ Yellow is the only place they type. White cells follow. A pink cell is a result 
         section_form(
             "levy",
             "Levy Income",
-            "Ordinary levies, the reserve levy and CSOS cannot lower the ordinary levy. "
+            "Ordinary levies and CSOS cannot lower the ordinary levy. "
+            "Reserve Fund Contribution is not on the normal budget. It is on the reserve sheet. Changing it does not change the ordinary levy, unless it is added into the one levy. "
             "On a special levy, use Goes to. Reserve fund sends that money into the reserve. "
             "Municipal sends it to the city bill, so the ordinary levy does not also charge that rand. "
             "A project does the same. An expense takes it off that cost. "
