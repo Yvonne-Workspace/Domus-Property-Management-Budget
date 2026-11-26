@@ -3857,17 +3857,20 @@ def generate_excel(state: dict) -> BytesIO:
             name_to_budget[name] = f"BUDGET!G{named_rows[name]}"
     count_bills = [(n, y, s) for n, y, s in bills if s == "count"]
     will_col = 7 if inside else 5
-    change_col = will_col + 1
+    levy_change_col = will_col + 1
+    reserve_change_col = levy_change_col + 1
+    total_change_col = reserve_change_col + 1
+    change_col = levy_change_col
     ordinary_col = 5 if inside else None
     reserve_split_col = 6 if inside else None
     count_col = {}
     for j, (name, _y, _s) in enumerate(count_bills):
-        count_col[name] = change_col + 1 + j
-    bill_start = change_col + 1 + len(count_bills)
+        count_col[name] = total_change_col + 1 + j
+    bill_start = total_change_col + 1 + len(count_bills)
     headers = ["#", "Unit", "PQ", "Pay now"]
     if inside:
         headers += ["Ordinary levy", "Reserve fund"]
-    headers += ["Will pay this year", "Change"]
+    headers += ["Will pay this year", "Levy change", "Reserve change", "Total change"]
     headers += [("Boathouse no." if facility_kind(n) == "boathouse" else "Boatport no.") for n, _y, _s in count_bills]
     headers += [n for n, _, _s in bills] + ["Total"]
     for i, h in enumerate(headers, 1):
@@ -3875,9 +3878,9 @@ def generate_excel(state: dict) -> BytesIO:
         fill(cell, NAVY)
         cell.font = Font(bold=True, color="FFFFFF")
     pq["A3"] = (
-        "Ordinary levy and Reserve fund are the two parts. Will pay this year is those two added. That is the one levy. Those columns are not in the Total again."
+        "Ordinary levy and Reserve fund are the two parts of the one levy. Levy change is the ordinary levy only. Reserve change is this year's reserve minus last year's. Total change is those two added."
         if inside else
-        "Ordinary levy only. These two columns are not in the Total."
+        "Levy change is the ordinary levy only. Reserve change is this year's reserve minus last year's. Total change is those two added. These three are not in the Total again."
     )
     pq["A3"].font = Font(italic=True, size=9, color="666666")
     for j, (name, yearly, split) in enumerate(bills):
@@ -3920,9 +3923,22 @@ def generate_excel(state: dict) -> BytesIO:
         fml(pq.cell(4, will_col), f"{levy_letter}4")
     pq.cell(5, will_col, "whole complex, this year")
     pq.cell(5, will_col).font = Font(italic=True, size=8, color="666666")
-    fml(pq.cell(4, change_col), f"{will_letter}4-D4")
-    pq.cell(5, change_col, "this year − last year")
-    pq.cell(5, change_col).font = Font(italic=True, size=8, color="666666")
+    res_row = levy_rows.get("reserve")
+    if inside:
+        fml(pq.cell(4, levy_change_col), f"{get_column_letter(ordinary_col)}4-D4")
+    else:
+        fml(pq.cell(4, levy_change_col), f"{will_letter}4-D4")
+    pq.cell(5, levy_change_col, "levy, this year − what they pay now")
+    pq.cell(5, levy_change_col).font = Font(italic=True, size=8, color="666666")
+    if res_row:
+        fml(pq.cell(4, reserve_change_col), f"BUDGET!G{res_row}-BUDGET!D{res_row}/12")
+    else:
+        fml(pq.cell(4, reserve_change_col), "0")
+    pq.cell(5, reserve_change_col, "reserve, this year − last year")
+    pq.cell(5, reserve_change_col).font = Font(italic=True, size=8, color="666666")
+    fml(pq.cell(4, total_change_col), f"{get_column_letter(levy_change_col)}4+{get_column_letter(reserve_change_col)}4")
+    pq.cell(5, total_change_col, "levy change + reserve change")
+    pq.cell(5, total_change_col).font = Font(italic=True, size=8, color="666666")
     units = state.get("pq") or [{"Unit": "UNIT-1", "PQ": 1.0}]
     n_units = max(len(units), 1)
     last_u = 6 + len(units)
@@ -3939,7 +3955,12 @@ def generate_excel(state: dict) -> BytesIO:
             fml(pq.cell(rr, will_col), f"{get_column_letter(ordinary_col)}{rr}+{get_column_letter(reserve_split_col)}{rr}")
         else:
             fml(pq.cell(rr, will_col), f"{levy_letter}{rr}")
-        fml(pq.cell(rr, change_col), f"{will_letter}{rr}-D{rr}")
+        if inside:
+            fml(pq.cell(rr, levy_change_col), f"{get_column_letter(ordinary_col)}{rr}-D{rr}")
+        else:
+            fml(pq.cell(rr, levy_change_col), f"{will_letter}{rr}-D{rr}")
+        fml(pq.cell(rr, reserve_change_col), f"$C{rr}*{get_column_letter(reserve_change_col)}$4")
+        fml(pq.cell(rr, total_change_col), f"{get_column_letter(levy_change_col)}{rr}+{get_column_letter(reserve_change_col)}{rr}")
         for name, _y, _s in count_bills:
             col = count_col[name]
             cell = pq.cell(rr, col, facility_qty(state, facility_kind(name) or "", u.get("Unit")))
@@ -3973,7 +3994,7 @@ def generate_excel(state: dict) -> BytesIO:
     pq.cell(tot_row, 2, "TOTAL")
     pq.cell(tot_row, 3, f"=SUM(C7:C{last_u})")
     pq.cell(tot_row, 3).number_format = "0.000000"
-    for col in range(4, change_col + 1):
+    for col in range(4, total_change_col + 1):
         letter = get_column_letter(col)
         pq.cell(tot_row, col, f"=SUM({letter}7:{letter}{last_u})").number_format = MONEY
     for name, _y, _s in count_bills:
@@ -3996,7 +4017,9 @@ def generate_excel(state: dict) -> BytesIO:
     pq.column_dimensions["E"].width = 20
     pq.column_dimensions["F"].width = 18
     pq.column_dimensions["G"].width = 20
-    pq.column_dimensions["H"].width = 14
+    pq.column_dimensions["H"].width = 16
+    for col in (levy_change_col, reserve_change_col, total_change_col):
+        pq.column_dimensions[get_column_letter(col)].width = 18
     pq.row_dimensions[1].height = 64
     brand(pq)
 
@@ -5655,22 +5678,32 @@ def _pr_grids(state: dict, approved: float, current_m: float) -> dict:
     headers = ["Unit", "PQ", "Pay now"]
     if inside:
         headers += ["Ordinary levy", "Reserve fund"]
-    headers += ["Will pay this year", "CSOS", "Total"]
+    headers += ["Will pay this year", "Levy change", "Reserve change", "Total change", "CSOS", "Total"]
     levy_m = agreed_levy / 12.0
     res_m = reserve / 12.0
+    last_res_m = last_r / 12.0
+    pay_m = current_m if current_m > 0.5 else (actual / 12.0 if actual > 0.5 else 0.0)
     pq_rows = []
     for u in state.get("pq") or []:
         quota = float(u.get("PQ") or u.get("pq") or 0)
-        paid = quota * current_m
-        will = quota * levy_m
+        paid = quota * pay_m
+        ordinary_share = quota * (levy_m - res_m) if inside else quota * levy_m
+        reserve_share = quota * res_m
+        will = ordinary_share + reserve_share if inside else ordinary_share
+        levy_chg = ordinary_share - paid
+        reserve_chg = quota * (res_m - last_res_m)
+        total_chg = levy_chg + reserve_chg
         csos = csos_monthly_for_levy(will) if state.get("auto_csos", True) else 0.0
         cells = [_cell(str(u.get("Unit") or "")), _cell(f"{quota:.6f}", num=True), _cell(money(paid), num=True)]
         if inside:
-            cells.append(_cell(money(quota * (levy_m - res_m)), num=True))
-            cells.append(_cell(money(quota * res_m), num=True))
+            cells.append(_cell(money(ordinary_share), num=True))
+            cells.append(_cell(money(reserve_share), num=True))
         cells.append(_cell(money(will), num=True))
+        cells.append(_cell(money(levy_chg), num=True))
+        cells.append(_cell(money(reserve_chg), num=True))
+        cells.append(_cell(money(total_chg), num=True))
         cells.append(_cell(money(csos), num=True))
-        cells.append(_cell(money(will + csos), num=True))
+        cells.append(_cell(money(will + csos + (0 if inside else reserve_share)), num=True))
         pq_rows.append({"cells": cells})
     if not pq_rows:
         pq_rows.append({"cells": [_cell("No units yet. Load the PQ file and the rows will show here.")]})
@@ -6230,6 +6263,9 @@ def pr_slides(pack: dict) -> list:
             {"where": "Will pay this year", "do": "The levy only.", "why": "It moves when the yellow agreed rand on the BUDGET sheet moves."},
             {"where": "Reserve fund", "do": "Its own column, if they pay one.", "why": "Not inside the levy. It follows the yellow reserve amount."},
         ]
+    pq_steps.append({"where": "Levy change", "do": "White. Leave it.", "why": "The ordinary levy only. This year minus what they pay now."})
+    pq_steps.append({"where": "Reserve change", "do": "White. Leave it.", "why": "This year’s reserve minus last year’s reserve, for that unit. It follows the yellow reserve rand."})
+    pq_steps.append({"where": "Total change", "do": "White. Leave it.", "why": "Levy change plus reserve change. It is not added again into the invoice Total."})
     pq_steps.append({"where": "CSOS and the Total", "do": "White. Leave them.", "why": "CSOS is worked from the levy. The Total is the levy plus CSOS and anything else on the invoice. Do not type a unit."})
     slides.append(guide(
         "PQ sheet",
@@ -7134,6 +7170,8 @@ The **PQ** sheet is the invoice: Levies, Reserve, CSOS, Insurance and any fixed 
 
 The first money column is **Pay now**. It is the current ordinary levy from the left, shared by PQ. It is not last year’s cash received. **Will pay this year** follows the yellow agreed rand. If that rand is 0, the two columns are the same.
 
+**Levy change** is the ordinary levy only: this year minus what they pay now. **Reserve change** is this year’s reserve minus last year’s reserve, shared by PQ. **Total change** is those two added. None of these three is added again into the invoice Total.
+
 If **Added into the ordinary levy** is chosen, the PQ tab shows **Ordinary levy** and **Reserve fund** as two amounts. **Will pay this year** is those two added. That is the one levy on the invoice. There is still no separate reserve line.
 
 **EACH UNIT** is a separate sheet. It does not change the PQ sheet. One row per unit, in rands a month:
@@ -7206,7 +7244,7 @@ It goes in the same order as the workbook. The sheet itself is on the slides, so
 1. **BUDGET sheet.** Start at the top. Yellow is the only place the meeting types. **What the costs need** is the bills added up. **Agreed increase** is the rand they accept. Type **0** if the levy must stay what owners pay now. The PQ then stays the same. **Still short** is pink. Above zero means the bills are still higher. It is not added again. Then go down the sheet, one block at a time: levy income, other income, recoveries, the city bill, expenditure, repairs, personnel, tax, then special projects. Say what the line is, what it was, and what it will be. A line that says it is not in the levy is not added again.
 2. **Special projects** are on that same Budget sheet, after tax. These jobs cannot wait. They are inside the ordinary levy. They are not the reserve and not the 10-year plan.
 3. **RESERVE sheet.** This is the savings account. Spent last year is what was paid. On a **2026** budget the total at the top is the whole **2026** column, plus any rand marked Funded by reserve. A **2027** job stays on the list. It is not taken off this closing balance. One project is not the total.
-4. **PQ sheet.** **Pay now** is the current levy, shared by PQ. **Will pay this year** follows the yellow rand. If that rand is 0, the two are the same. CSOS is 2% of (that unit’s levy minus R500), never more than R40. If the reserve is inside the levy, the PQ shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added.
+4. **PQ sheet.** **Pay now** is the current levy, shared by PQ. **Will pay this year** follows the yellow rand. If that rand is 0, the two are the same. **Levy change** is the ordinary levy only. **Reserve change** is this year’s reserve minus last year’s. **Total change** adds those two. CSOS is 2% of (that unit’s levy minus R500), never more than R40. If the reserve is inside the levy, the PQ shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added.
 
 Yellow is the only place they type. White cells follow. A pink cell is a result to check. It is not a second charge. Typing a lower rand does not make a bill smaller. Download the presentation, open it in the browser, and press F for full screen. The Excel sheet is where the yellow amount is changed.
             """
@@ -7712,18 +7750,27 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             inside = reserve_inside_levy(st.session_state) and reserve_contribution(st.session_state) > 0.5
             reserve_m = reserve_contribution(st.session_state) / 12.0 if inside else 0.0
             prev["Pay now"] = prev["PQ"].astype(float) * last_m
+            reserve_new_m = reserve_contribution(st.session_state) / 12.0
+            reserve_old = 0.0
+            for rr in st.session_state["sections"].get("levy") or []:
+                if family(rr.get("desc") or "") == "reserve":
+                    reserve_old = float(rr.get("actual") or 0)
+            reserve_old_m = reserve_old / 12.0
             if inside:
                 prev["Ordinary levy"] = prev["PQ"].astype(float) * (new_ordinary_m - reserve_m)
                 prev["Reserve fund"] = prev["PQ"].astype(float) * reserve_m
                 prev["Will pay this year"] = prev["Ordinary levy"] + prev["Reserve fund"]
+                prev["Levy change"] = prev["Ordinary levy"] - prev["Pay now"]
                 extra_cols = [c for c in extra_cols if c != "Levies"]
             else:
                 prev["Will pay this year"] = prev["PQ"].astype(float) * new_ordinary_m
-            prev["Change"] = prev["Will pay this year"] - prev["Pay now"]
+                prev["Levy change"] = prev["Will pay this year"] - prev["Pay now"]
+            prev["Reserve change"] = prev["PQ"].astype(float) * (reserve_new_m - reserve_old_m)
+            prev["Total change"] = prev["Levy change"] + prev["Reserve change"]
             if inside:
-                ordered = ["Unit", "PQ", "Pay now", "Ordinary levy", "Reserve fund", "Will pay this year", "Change"] + extra_cols
+                ordered = ["Unit", "PQ", "Pay now", "Ordinary levy", "Reserve fund", "Will pay this year", "Levy change", "Reserve change", "Total change"] + extra_cols
             else:
-                ordered = ["Unit", "PQ", "Pay now", "Will pay this year", "Change"] + extra_cols
+                ordered = ["Unit", "PQ", "Pay now", "Will pay this year", "Levy change", "Reserve change", "Total change"] + extra_cols
             if extra_cols or inside:
                 parts = (["Will pay this year"] if inside else []) + extra_cols
                 prev["Total monthly"] = prev[parts].sum(axis=1) if parts else 0.0
@@ -7734,7 +7781,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 show.columns = _dedupe_headers([str(c) for c in show.columns])
             if "PQ" in show.columns:
                 show["PQ"] = show["PQ"].astype(float).round(6)
-            money_cols = ["Pay now", "Will pay this year", "Change"] + extra_cols
+            money_cols = ["Pay now", "Will pay this year", "Levy change", "Reserve change", "Total change"] + extra_cols
             if inside:
                 money_cols += ["Ordinary levy", "Reserve fund", "Total monthly"]
             elif extra_cols:
