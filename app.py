@@ -3511,19 +3511,15 @@ def generate_excel(state: dict) -> BytesIO:
             cnote.alignment = Alignment(wrap_text=True, vertical="top")
             cnote.border = THIN
             bits = []
+            child_rows = []
+            parent = r
             for sub in it.get("subs") or []:
                 sub_name = str(sub.get("desc") or "").strip()
                 if not sub_name:
                     continue
                 bits.append(f"{sub_name} {float(sub.get('yearly') or 0):,.2f}")
             if bits:
-                extra = "Breakdown: " + "; ".join(bits) + ". Already inside this line. Not added again."
-                sub_year = sum(abs(float(sub.get("yearly") or 0)) for sub in it.get("subs") or [])
-                if abs(sub_year - abs(y)) > 1:
-                    extra += (
-                        f" The parts add to {sub_year:,.2f}. This line is {abs(y):,.2f}. "
-                        f"They differ by {abs(sub_year - abs(y)):,.2f}. The levy uses this line, not the parts."
-                    )
+                extra = "Breakdown: " + "; ".join(bits) + ". This line is the total of the parts under it. The parts are not added again."
                 cnote.value = f"{note} | {extra}".strip(" |") if note else extra
             r += 1
             for sub in it.get("subs") or []:
@@ -3536,9 +3532,22 @@ def generate_excel(state: dict) -> BytesIO:
                 inp(ws.cell(r, 4), float(sub.get("actual") or 0), MONEY)
                 inp(ws.cell(r, 6), float(sub.get("yearly") or 0), MONEY)
                 fml(ws.cell(r, 7), f"F{r}/12")
-                sn = ws.cell(r, 8, "Breakdown only. Already inside the line above. Not added again.")
+                sn = ws.cell(r, 8, "Part of the line above. Already in that total. Not added again.")
                 sn.font = Font(name="Calibri", size=9, italic=True, color="666666")
+                child_rows.append(r)
                 r += 1
+            if child_rows:
+                d_sum = "+".join(f"D{n}" for n in child_rows)
+                f_sum = "+".join(f"F{n}" for n in child_rows)
+                d_formula = f"MAX(0,{d_sum}-N(L{parent}))" if claim_actual > 0.5 else d_sum
+                for col, formula in ((4, d_formula), (6, f_sum)):
+                    cell = ws.cell(parent, col)
+                    cell.value = "=" + formula
+                    cell.font = Font(name="Calibri", size=10)
+                    cell.border = THIN
+                    cell.number_format = MONEY
+                    cell.fill = PatternFill("solid", fgColor="FFFFFF")
+                    cell.protection = Protection(locked=True)
         return start, r - 1
 
     def tot(label, start, end, only_rows=None):
@@ -4904,6 +4913,19 @@ def place_moved(key: str, rows: list) -> list:
     return kept
 
 
+def rollup_breakdown(it: dict) -> None:
+    """The main account is the total of its breakdown. A line with no breakdown is left as typed."""
+    parts = [s for s in (it.get("subs") or []) if str(s.get("desc") or "").strip()]
+    if not parts:
+        return
+    actual = sum(abs(float(s.get("actual") or 0)) for s in parts)
+    yearly = sum(abs(float(s.get("yearly") or 0)) for s in parts)
+    it["actual"] = actual
+    it["yearly"] = yearly
+    it["pct"] = 0.0 if actual < 0.5 else (yearly / actual) * 100.0 - 100.0
+    it["edit_mode"] = "yearly"
+
+
 def _take_breakdown(desc: str, pools: dict) -> list | None:
     n = norm(desc)
     if n in pools:
@@ -4918,8 +4940,8 @@ def _take_breakdown(desc: str, pools: dict) -> list | None:
 
 def subs_editor(key: str) -> None:
     """Breakdown under a main account. Shown on the sheet. Not added to the levy."""
-    st.markdown("**Breakdown — for the trustees. Not added to the levy.**")
-    st.caption("Pick the main account exactly as it is on the list, for example Garden Services. Type the period in Detail. Click Save breakdown. The sheet shows it under that line. It is not added again.")
+    st.markdown("**Breakdown — these lines add up to the main account.**")
+    st.caption("Pick the main account, type each part, then click Save breakdown. Actual adds into the main Actual. Budgeted yearly adds into the main Budgeted yearly. The parts are not added again.")
     items = st.session_state.sections.get(key) or []
     names = [it.get("desc") or "" for it in items if (it.get("desc") or "").strip()]
     if not names:
@@ -4975,6 +4997,7 @@ def subs_editor(key: str) -> None:
         for it in st.session_state.sections.get(key) or []:
             got = _take_breakdown(it.get("desc") or "", pools)
             it["subs"] = got or []
+            rollup_breakdown(it)
         if pools or skipped:
             missed = []
             for rows_left in pools.values():
@@ -4982,7 +5005,10 @@ def subs_editor(key: str) -> None:
             missed.extend(skipped)
             st.error("These were not attached to a line: " + ", ".join(missed) + ". Pick the main account from the list, for example Garden Services, then Save breakdown again.")
         else:
-            st.success("Breakdown saved. It shows under that line on the sheet and is not added again.")
+            st.session_state[f"_nonce_{key}"] = int(st.session_state.get(f"_nonce_{key}") or 0) + 1
+            apply_levy_lines(st.session_state)
+            st.session_state.msg = "Breakdown saved. The main account is now the total of those lines."
+            st.rerun()
 
 
 def section_form(key: str, title: str, help_text: str, rm: bool = False, recover: bool = False, income: bool = False, claims: bool = False, reserve_tick: bool = False, reorder: bool = False, move: bool = False, plan: bool = False):
@@ -5090,7 +5116,11 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
         st.rerun()
     saved = st.button("Save this section", type="primary", key=f"save_{key}")
     if saved:
-        st.session_state.sections[key] = place_moved(key, save_editor(edited, items, rm, municipal=(key == "municipal"), plan=plan))
+        saved_rows = place_moved(key, save_editor(edited, items, rm, municipal=(key == "municipal"), plan=plan))
+        if key in ("expenditure", "rm"):
+            for it in saved_rows:
+                rollup_breakdown(it)
+        st.session_state.sections[key] = saved_rows
         st.session_state[f"_nonce_{key}"] = nonce + 1
         if key == "levy":
             for r in st.session_state.sections["levy"]:
@@ -5187,14 +5217,15 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
                 st.caption("Actual on the sheet is already lower: " + "; ".join(off_bits) + ". Do not subtract it again.")
             gap_bits = []
             for it in st.session_state.sections.get(key) or []:
-                parts = [abs(float(sub.get("yearly") or 0)) for sub in (it.get("subs") or []) if str(sub.get("desc") or "").strip()]
+                parts = [s for s in (it.get("subs") or []) if str(s.get("desc") or "").strip()]
                 if not parts:
                     continue
-                line = abs(float(it.get("yearly") or 0))
-                if abs(sum(parts) - line) > 1:
-                    gap_bits.append(f"{it.get('desc')} line {money(line)}, parts {money(sum(parts))}")
+                gap_bits.append(
+                    f"{it.get('desc')} is {money(sum(abs(float(s.get('actual') or 0)) for s in parts))} actual"
+                    f" and {money(sum(abs(float(s.get('yearly') or 0)) for s in parts))} budgeted, from the breakdown"
+                )
             if gap_bits:
-                st.warning("The breakdown does not match the line. The levy uses the line, not the parts. " + "; ".join(gap_bits))
+                st.caption("Main account follows the breakdown. " + "; ".join(gap_bits) + ".")
             rows = st.session_state.sections.get(key) or []
             books = sum(cost_for_levy(st.session_state, r) for r in rows)
             in_levy = sum(line_in_levy(st.session_state, r) for r in rows)
@@ -7003,7 +7034,7 @@ On both:
 - **Cost recoveries** is what only some owners pay towards that same bill (for example a private refuse company for a few units). It is not income, not municipal, and not a column on the PQ. The levy carries the bill minus that amount.
 - On repairs, **Insurance payout** is what the insurer pays towards that job. It is a deduction. Do not type the new budget in the payout column.
 - **Move to** sends a line to another section when WeConnectU filed it in the wrong place. Choose the section and Save. The amounts go with it.
-- **Breakdown**, at the bottom of Expenditure and of Repairs, is the detail inside a main account. For garden, the main account must be **Garden Services** (the same name as the expenditure line). Type the period in Detail, then **Save breakdown**. The sheet shows **Garden Services —** that period under the garden line, and the same words in the note. It is already inside the main amount. It is not added again. If Save says it was not attached, the main account was not on the list.
+- **Breakdown**, at the bottom of Expenditure and of Repairs, is the detail inside a main account. Pick the main account, type each part’s Actual and Budgeted yearly, then **Save breakdown**. Those parts add up into the main account. Two actuals become the main Actual. Two budgeted amounts become the main Budgeted yearly. The parts show under the line on the sheet and are not added again. On the sheet the main line is locked. Type the yellow parts, and the main line changes.
 
 ### 9. Garden and other equal charges
 Add the garden contract in **all three** places. Do not set Expenditure to 0.
@@ -7164,7 +7195,7 @@ The meeting block is at the top of **BUDGET**.
 
 Yellow cells can be typed without a password. White cells are locked. Pink is a result to check, not a second charge. Green is the monthly levy the meeting approved. To unlock a white cell: Review, Unprotect Sheet, password **domus**. If Excel offered to repair the file, do not use that copy. Download a fresh one.
 
-On a cost line, type **Budgeted yearly** only. **Cost recoveries** come off that bill. **Funded by reserve** moves that rand to the reserve sheet as you type. If a breakdown does not add up to the line, the levy still uses the line. Change the yellow line if the parts are the real bill.
+On a cost line, type **Budgeted yearly** only. **Cost recoveries** come off that bill. **Funded by reserve** moves that rand to the reserve sheet as you type. If the line has a breakdown, the main amount is the total of the yellow parts. Change the parts, not the main line.
 
 If you already know the decision before you download, you can set the same choice on the Income tab under **Meeting decision**. The sheet still shows it, so the meeting can change it.
 
