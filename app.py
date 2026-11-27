@@ -910,11 +910,29 @@ def reserve_project_spend(state: dict) -> float:
     return total
 
 
+def is_reserve_interest(desc: str) -> bool:
+    """Bank or investment interest that belongs to the reserve. Not interest on arrears."""
+    d = (desc or "").lower()
+    if "arrear" in d:
+        return False
+    if family(desc) == "invest":
+        return True
+    return "interest" in d or "investment" in d or "marketlink" in d
+
+
+def reserve_interest_lines(state: dict) -> list:
+    return [r for r in (state.get("sections") or {}).get("other") or [] if is_reserve_interest(r.get("desc") or "")]
+
+
+def reserve_interest(state: dict, field: str) -> float:
+    return sum(abs(float(r.get(field) or 0)) for r in reserve_interest_lines(state))
+
+
 def projected_reserve(state: dict) -> float:
     """Same closing as the RESERVE sheet.
-    Last year = bank now + last year’s contribution − what was paid (projects and a municipal payment).
-    This budget = that figure + this year’s contribution − this year’s plan.
-    Interest already sits in the bank figure. It is not added again.
+    Last year = opening + last year’s contribution + interest earned that year − what was paid.
+    This budget = that figure + this year’s contribution + budgeted interest − this year’s plan.
+    The opening is the first day of the Actual year, so that year’s interest is not already in it.
     """
     opening = float(state.get("reserve_balance") or 0)
     last = 0.0
@@ -927,8 +945,8 @@ def projected_reserve(state: dict) -> float:
             max(0.0, float(r.get("actual") or 0))
             for r in (state.get("sections") or {}).get("special") or []
         )
-    close_last = opening + last - spent_last
-    return close_last + reserve_contribution(state) - reserve_project_spend(state)
+    close_last = opening + last + reserve_interest(state, "actual") - spent_last
+    return close_last + reserve_contribution(state) + reserve_interest(state, "yearly") - reserve_project_spend(state)
 
 
 def rm_budget(state: dict) -> float:
@@ -3329,12 +3347,13 @@ def generate_excel(state: dict) -> BytesIO:
     recovery_excel_rows = {}
     reserve_from_rows = []
     muni_from_rows = []
+    interest_rows = []
     reserve_mark_rows = []
     write_bucket = {"name": None}
 
-    def write(items, recovery_as_income=False, in_levy=False, owner_box=False, levy_tick=False, claim_col=False, reserve_col=False, mains=None, l_rows=None, no_pct=False):
+    def write(items, recovery_as_income=False, in_levy=False, owner_box=False, levy_tick=False, claim_col=False, reserve_col=False, mains=None, l_rows=None, no_pct=False, track_interest=False):
         """Old pack formulas: F = D*(1+E), G = F/12. Recoveries shown as positive income when asked."""
-        nonlocal r, reserve_mark_rows, cover_pending, recovery_excel_rows, reserve_from_rows, muni_from_rows
+        nonlocal r, reserve_mark_rows, cover_pending, recovery_excel_rows, reserve_from_rows, muni_from_rows, interest_rows
         if not items:
             start = r
             r += 1
@@ -3372,6 +3391,8 @@ def generate_excel(state: dict) -> BytesIO:
                 levy_rows["csos"] = r
             if fam == "reserve":
                 levy_rows["reserve"] = r
+            if track_interest and is_reserve_interest(desc):
+                interest_rows.append(r)
             if fam == "ins_bill" or re.search(r"insurance recovered|levy\s*[-–]\s*insurance", desc, re.I):
                 levy_rows["insurance"] = r
             named_rows[desc] = r
@@ -3571,7 +3592,7 @@ def generate_excel(state: dict) -> BytesIO:
     inc_tot = tot("TOTAL LEVY INCOME", a, b)
     bar("OTHER INCOME")
     hdr()
-    a, b = write(list(s.get("other") or []), levy_tick=True)
+    a, b = write(list(s.get("other") or []), levy_tick=True, track_interest=True)
     tot("TOTAL OTHER INCOME", a, b)
     bar("RECOVERY INCOME")
     hdr()
@@ -4236,6 +4257,18 @@ def generate_excel(state: dict) -> BytesIO:
     res["H9"].font = Font(italic=True, size=9, color="1F4E79")
     res["H9"].alignment = Alignment(wrap_text=True, vertical="center")
     sr = 10
+    res.cell(sr, 2, "Interest received").font = Font(name="Calibri", size=10)
+    res.cell(sr, 2).border = THIN
+    if interest_rows:
+        fml(res.cell(sr, 4), "+".join(f"BUDGET!D{n}" for n in interest_rows))
+        fml(res.cell(sr, 6), "+".join(f"BUDGET!F{n}" for n in interest_rows))
+    else:
+        fml(res.cell(sr, 4), "0")
+        fml(res.cell(sr, 6), "0")
+    res.cell(sr, 8, "Bank and investment interest from Other Income. Added to the reserve. Not interest on arrears. Not inside the opening balance. Leave Lowers the levy off.").font = Font(italic=True, size=9, color="1F4E79")
+    res.cell(sr, 8).alignment = Alignment(wrap_text=True, vertical="center")
+    interest_row = sr
+    sr += 1
     special_rows = []
     for src_row, src_desc in reserve_from_rows:
         label = src_desc or "Special levy"
@@ -4250,8 +4283,8 @@ def generate_excel(state: dict) -> BytesIO:
     res.cell(maint_summary, 2, "Maintenance plan expenditure")
     close_row = maint_summary + 1
     res.cell(close_row, 2, "Closing reserve balance").font = Font(bold=True)
-    in_parts = ["D8", "D9"] + [f"D{n}" for n in special_rows]
-    in_next = ["F8", "F9"] + [f"F{n}" for n in special_rows]
+    in_parts = ["D8", "D9", f"D{interest_row}"] + [f"D{n}" for n in special_rows]
+    in_next = ["F8", "F9", f"F{interest_row}"] + [f"F{n}" for n in special_rows]
     fml(res.cell(close_row, 4), "+".join(in_parts) + f"-D{maint_summary}", TOTAL)
     fml(res.cell(close_row, 6), "+".join(in_next) + f"-F{maint_summary}", TOTAL)
     fml(res["F8"], f"D{close_row}")
@@ -4830,11 +4863,11 @@ def apply_falcon_view_notes(state: dict) -> None:
                 if state.get("reserve_mode") == "rm100"
                 else "Collected for the reserve. "
             )
-            + "Interest is already in the opening balance and is not added again."
+            + "Interest is on its own line and is added to the reserve. It is not already inside the opening."
         ),
         "csos levy recovered": "R18,763.91. Owners pay this on its own column. It is not part of the ordinary levy. The expense is the same amount.",
         "csos levy": "R18,763.91, the same as CSOS income. Left out of the ordinary levy so owners are not charged twice.",
-        "investment income": "7% on last year’s R85,615.96 = R91,609.08. Already inside the reserve balance, so it is not added to the reserve again and it does not reduce the levy. Kept here only for the tax estimate.",
+        "investment income": "Bank and investment interest. Added on the reserve sheet. It is not inside the opening balance, and it does not reduce the ordinary levy. It is still used for the tax estimate.",
         "rental income": "R216,695.40, same as last year. Not used to reduce the levy until the trustees confirm what this rental is for.",
         "audit fees": "R12,663.45, being last year’s R11,835 plus 7%. The previous fee was for the 2023/2024 year-end. Confirm against the latest quotation.",
         "security": "R445,484.18. That is 8.24% above last year’s R411,570.72, not 5%.",
@@ -5312,9 +5345,9 @@ def local_box_help(key: str, state) -> str:
             "Not the closing balance at the end of that year, and not the balance in the bank today.\n\n"
             "Example: the Actual file is 2025/2026 and you are budgeting 2027/2028. "
             "Type what was in the reserve bank on the **first day of 2025/2026**.\n\n"
-            "The sheet then adds what was collected in that year and subtracts what was spent in that year. "
-            "That gives the closing balance at the end of 2025/2026. That closing figure is the start of the budget column.\n\n"
-            "Do not type the contribution into this box. It is the next line, and it would be counted twice.\n\n"
+            "The sheet then adds what was collected in that year, adds the interest earned in that year, and subtracts what was spent. "
+            "That gives the closing balance at the end of the Actual year. That closing figure is the start of the budget column.\n\n"
+            "Do not type the contribution or the interest into this box. Those are the next lines, and they would be counted twice.\n\n"
             "If the budget skips a year, the sheet has no column for the year in between. "
             "Anything collected or spent in that in-between year is not in this sum.\n\n"
             f"You have typed **{money(bal)}**."
@@ -5725,11 +5758,12 @@ def _pr_grids(state: dict, approved: float, current_m: float) -> dict:
         plan_note = f"The {NOW_YEAR} jobs only. A {NOW_YEAR + 1} job stays on the list. It is not taken off this closing balance."
     else:
         plan_note = f"The {NOW_YEAR + 1} plan, plus any rand the reserve pays. One project is not the total."
-    close_d = opening + last_r - spent
-    close_f = close_d + reserve - nxt
+    close_d = opening + last_r + reserve_interest(state, "actual") - spent
+    close_f = close_d + reserve + reserve_interest(state, "yearly") - nxt
     reserve_grid = {"headers": ["", "Spent last year", "This year" if budget_uses_this_plan_year(state) else "Next year", "What to do"], "rows": [
         {"cells": [_cell("Opening reserve balance"), _cell(money(opening), num=True, yellow=True), _cell(money(close_d), num=True), _cell("Yellow only if the opening is wrong. This is the first day of the Actual year, not the year-end closing.")]},
         {"cells": [_cell("Reserve contributions"), _cell(money(last_r), num=True), _cell(money(reserve), num=True), _cell("Next year follows the yellow reserve.")]},
+        {"cells": [_cell("Interest received"), _cell(money(reserve_interest(state, "actual")), num=True), _cell(money(reserve_interest(state, "yearly")), num=True), _cell("Bank and investment interest. Not interest on arrears. Added to the reserve. Not inside the opening.")]},
         {"cells": [_cell("Maintenance plan expenditure"), _cell(money(spent), num=True), _cell(money(nxt), num=True), _cell(plan_note)]},
         {"cells": [_cell("Closing reserve balance"), _cell(money(close_d), num=True), _cell(money(close_f), num=True), _cell("Opening, plus contributions, minus the plan.")]},
         {"cells": [_cell("Overspent"), _cell(money(max(0.0, -close_d)), num=True, pink=close_d < -0.5), _cell(money(max(0.0, -close_f)), num=True, pink=close_f < -0.5), _cell("Above zero is the hole. Not added again.")]},
@@ -6245,6 +6279,7 @@ def pr_slides(pack: dict) -> list:
                 [
                     {"where": "Opening reserve balance", "do": "Yellow only if the opening is wrong.", "why": "The reserve bank balance on the first day of the year in the Actual column. Not the year-end closing, and not today's balance. Do not include that year's contribution."},
                     {"where": "Reserve contributions", "do": "This year is white. It follows the yellow Agreed reserve.", "why": reserve_where},
+                    {"where": "Interest received", "do": "White. It follows Other Income.", "why": "Bank and investment interest earned in that year. It is added to the reserve. It is not interest on arrears, and it is not already inside the opening balance. Leave Lowers the levy off."},
                     {"where": "Maintenance plan expenditure", "do": "White. Leave it.", "why": (
                         f"On a {NOW_YEAR} budget this is every job in the {NOW_YEAR} column, added together, plus any rand marked Funded by reserve. "
                         f"A {NOW_YEAR + 1} job is still on the list so you can see it. It is not taken off this year's reserve. "
@@ -6999,7 +7034,7 @@ On **Income → Other Income** each line has **Lower the levies**.
 - Tick a line only if **this** complex uses that money to pay the running costs. Rental is the usual one.
 - Nothing is ticked for you. Complexes are not the same.
 - Unticked income stays on the sheet and does **not** change the levy.
-- Do **not** tick bank interest if that interest is already inside the reserve balance. Using it again would spend it twice. Leave it for the tax estimate.
+- Do **not** tick bank interest or investment income to lower the levy. That interest is added on the **Reserve fund** tab and on the reserve sheet. Ticking it would use it twice. It still counts for the tax estimate.
 - Do **not** tick interest on arrears or penalties unless you are sure that money will come in. You cannot count on owners paying late.
 - Save. The caption under the table shows how much is coming off the levy.
 
@@ -7057,9 +7092,10 @@ Do the same for a private refuse contract when every unit pays the same rand. Do
 Open the **Reserve fund** tab. This is the savings account. It is not Levy Income.
 
 - **Opening balance** is the money in the reserve bank on the **first day of the year in the Actual column**. It is not the closing balance at the end of that year, and it is not the balance today.
-- Example: Actual is 2025/2026 and the budget is 2027/2028. Type the balance on the first day of 2025/2026. The sheet adds what was collected in 2025/2026 and subtracts what was spent in 2025/2026. That result is the closing balance at the end of 2025/2026, and it becomes the start of the budget column. Do not type that closing balance here. Do not type the contribution in this box. It is the next line.
+- Example: Actual is 2025/2026 and the budget is 2027/2028. Type the balance on the first day of 2025/2026. The sheet adds what was collected in 2025/2026, adds the interest earned in 2025/2026, and subtracts what was spent in 2025/2026. That result is the closing balance at the end of 2025/2026, and it becomes the start of the budget column. Do not type that closing balance here. Do not type the contribution in this box. It is the next line.
 - If the budget skips a year, there is no column for the year in between. Anything collected or spent in that in-between year is not in this sum.
 - **Collected last year** is what owners paid in during the Actual year. It is not the bank balance.
+- **Interest received** is bank and investment interest earned during that year. Type it on the Reserve fund tab. It is the same figure as Other Income, so the tax still sees it. It is not interest on arrears. It is not inside the opening balance. The sheet adds it. Leave **Lower the levies** off.
 - Then pick this year’s contribution. It works for a body corporate and an HOA: own amount, 15% of last year’s ordinary levy, 25% of that levy, or 100% of this year’s repairs.
 - **How do owners pay it.** Extra line on the invoice is the usual choice. The ordinary levy does not include it. Added into the ordinary levy means owners pay one amount, and the PQ still shows the two parts.
 - Leave **Pay the 10-year projects from the ordinary levy** off. The reserve pays those jobs.
@@ -7068,13 +7104,13 @@ On the Excel file, type the contribution once: the yellow **Agreed reserve** at 
 
 On Expenditure, Repairs, Personnel or Tax, type a rand in **Funded by reserve** when the reserve pays that line, or only a part of it. Leave it at 0 if the levy pays it. The rand you type leaves the ordinary levy and shows on the reserve sheet.
 
-**Closing reserve balance, spent last year** = opening at the start of the Actual year + collected in that year − what was paid in that year. That closing figure is the start of the budget column. Do not type the year-end closing into the opening box. The sheet works it out. Do not type the contribution inside the opening balance as well. That would count it twice.
+**Closing reserve balance** = opening at the start of the Actual year + collected in that year + interest earned in that year − what was paid in that year. That closing figure is the start of the budget column. The budget column then adds this year’s contribution and this year’s interest, and subtracts this year’s plan. Do not type the year-end closing into the opening box. The sheet works it out. Do not type the contribution or the interest inside the opening balance as well. That would count it twice.
 
 **This year** on a 2026/2027 budget uses the 2026 plan, the **Budgeted this year** column. Closing this year = what is left + this year’s contribution − that plan. The 2027 column stays on the list. It is not in this closing balance.
 
 **Overspent** shows when a closing figure is below zero. Example: R18,000 at the start of the Actual year plus R5,000 collected is R23,000 available. The plan is R28,000 and the sheet shows **R5,000 overspent**.
 
-Interest already sits inside the opening balance. It is not added again. Leave the interest line under Other Income for the tax estimate, and leave **Lowers the ordinary levy** off.
+Interest earned in the Actual year is added on the **Interest received** line. It is not already inside the opening. Budget next year’s interest on the same line. Leave **Lowers the ordinary levy** off. Interest on arrears is not this line.
 
 The body-corporate minimum on this tab is guidance only, not legal advice. It does not override the option you picked.
 
@@ -7665,7 +7701,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             value=float(st.session_state.get("reserve_balance") or 0),
             min_value=0.0,
             step=1000.0,
-            help="The reserve bank balance on the first day of the year in the Actual column. Not the year-end closing, and not the balance today. Example: Actual is 2025/2026, so type the balance on the first day of 2025/2026. The sheet adds that year’s collections and subtracts that year’s spend.",
+            help="The reserve bank balance on the first day of the year in the Actual column. Not the year-end closing, and not the balance today. Example: Actual is 2025/2026, so type the balance on the first day of 2025/2026. Interest earned during that year is the next block. Do not put it in this box.",
         )
         box_help("balance")
         reserve_line = next((r for r in (st.session_state.sections.get("levy") or []) if family(r.get("desc") or "") == "reserve"), None)
@@ -7677,6 +7713,38 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 step=1000.0,
                 help="What owners paid into the reserve last year. Not the bank balance.",
             )
+        st.markdown("**Interest received**")
+        st.caption(
+            "Bank and investment interest only. Not interest on arrears. "
+            "Type what was earned in the actual year, and what you expect in the budget year. "
+            "This is the same line as Other Income, so the tax still sees it. "
+            "It is added on the reserve sheet. It is not inside the opening balance. Leave Lower the levies off."
+        )
+        interest_lines = reserve_interest_lines(st.session_state)
+        if not interest_lines:
+            added = row("Investment Income", "Bank and investment interest. Added on the reserve sheet. Not part of the ordinary levy.")
+            st.session_state.sections.setdefault("other", []).append(added)
+            interest_lines = [added]
+        for line in interest_lines:
+            name = line.get("desc") or "Investment Income"
+            c1, c2 = st.columns(2)
+            earned = c1.number_input(
+                f"{name} — earned in the actual year",
+                value=float(line.get("actual") or 0),
+                min_value=0.0,
+                step=100.0,
+            )
+            budgeted = c2.number_input(
+                f"{name} — budget for the new year",
+                value=float(line.get("yearly") or 0),
+                min_value=0.0,
+                step=100.0,
+            )
+            line["actual"] = earned
+            line["yearly"] = budgeted
+            line["pct"] = 0.0 if earned < 0.5 else (budgeted / earned) * 100.0 - 100.0
+            line["edit_mode"] = "yearly"
+            line["reduces_levy"] = False
         mode_now = st.session_state.get("reserve_mode") or "amount"
         if mode_now in ("15pct", "legal"):
             mode_now = "pct15"
@@ -7738,16 +7806,18 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         spent_last = municipal_paid_by_reserve(st.session_state)
         if not st.session_state.special_in_ordinary:
             spent_last += sum(max(0.0, float(r.get("actual") or 0)) for r in (st.session_state.sections.get("special") or []))
-        close_last = opening + last - spent_last
+        close_last = opening + last + reserve_interest(st.session_state, "actual") - spent_last
         plan = reserve_project_spend(st.session_state)
-        close_next = close_last + contrib - plan
+        close_next = close_last + contrib + reserve_interest(st.session_state, "yearly") - plan
         st.markdown(
             f"**Same totals as the reserve sheet**\n\n"
             f"- Opening at the start of the actual year: {money(opening)}\n"
             f"- Collected last year: {money(last)}\n"
+            f"- Interest earned last year: {money(reserve_interest(st.session_state, 'actual'))}\n"
             f"- Spent last year: {money(spent_last)}\n"
             f"- Left after last year: {money(close_last)}\n"
             f"- This year’s contribution: {money(contrib)}\n"
+            f"- Interest budgeted this year: {money(reserve_interest(st.session_state, 'yearly'))}\n"
             f"- This year’s plan: {money(plan)}\n"
             f"- Left after this year: {money(close_next)}"
         )
