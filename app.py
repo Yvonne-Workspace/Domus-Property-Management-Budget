@@ -5301,7 +5301,8 @@ def local_box_help(key: str, state) -> str:
         return (
             "**Extra line on the owner invoice** — owners see Levies and Reserve as two amounts. "
             "The reserve is not inside the ordinary levy.\n\n"
-            "**Added into the ordinary levy** — there is no reserve column. Do not also add it on the invoice."
+            "**Added into the ordinary levy** — owners pay one levy. The PQ still shows the two parts. "
+            "It is not a second line under Levy Income."
         )
     if key == "plan":
         return (
@@ -6878,101 +6879,7 @@ def main():
             help="12 = a full year. If WeConnectU is only 6 months, put 6 and we scale up for the %.",
         )
         box_help("months")
-        st.header("Reserve fund")
-        st.session_state.scheme_type = st.radio(
-            "What kind of scheme is this?",
-            ["bc", "hoa"],
-            format_func=lambda x: "Sectional title body corporate" if x == "bc" else "Homeowners association (HOA)",
-            index=0 if st.session_state.get("scheme_type") != "hoa" else 1,
-        )
-        box_help("scheme")
-        st.session_state.reserve_balance = st.number_input(
-            "How much is already in the reserve fund?",
-            value=float(st.session_state.get("reserve_balance") or 0),
-            min_value=0.0,
-            step=1000.0,
-            help="Money in the reserve bank account before any municipal payment typed on the Municipal tab. Not this year’s contribution. If this figure is already after that payment, leave Paid by the reserve at 0.",
-        )
-        box_help("balance")
-        mode_now = st.session_state.get("reserve_mode") or "amount"
-        if mode_now in ("15pct", "legal"):
-            mode_now = "pct15"
-        if mode_now not in ("amount", "pct15", "pct25", "rm100"):
-            mode_now = "amount"
-        st.session_state.reserve_mode = st.radio(
-            "This year’s reserve contribution",
-            ["amount", "pct15", "pct25", "rm100"],
-            index=["amount", "pct15", "pct25", "rm100"].index(mode_now),
-            format_func=lambda x: {
-                "amount": "Own amount",
-                "pct15": "15% of last year’s ordinary levy (Actual)",
-                "pct25": "25% of last year’s ordinary levy (Actual)",
-                "rm100": "100% of this year’s Repairs and Maintenance",
-            }[x],
-        )
-        if st.session_state.reserve_mode == "amount":
-            st.session_state.reserve_amount = st.number_input(
-                "Reserve fund contribution (yearly rands)",
-                value=float(st.session_state.reserve_amount),
-                step=1000.0,
-                min_value=0.0,
-            )
-        box_help("contrib")
-        contrib = reserve_contribution(st.session_state)
-        st.caption(f"This year’s contribution: {money(contrib)}.")
-        if st.session_state.reserve_mode in ("pct15", "pct25") and prev_admin_contributions(st.session_state) < 1:
-            st.warning("Put last year’s ordinary levy in the Actual column on Levy Income. 15% and 25% use that figure.")
-        if st.session_state.scheme_type == "hoa":
-            st.caption(
-                "An HOA may use any of these. There is no automatic 15% or 25% rule. "
-                "Use the option the MOI, constitution or members approved."
-            )
-        else:
-            rule = bc_reserve_rule(st.session_state)
-            if rule["band"] != "unknown":
-                st.caption(
-                    f"Body corporate note only: the Act’s minimum would be {money(rule['minimum'])}. "
-                    "That does not change the option you picked above."
-                )
-        opening = float(st.session_state.reserve_balance or 0)
-        projects = reserve_project_spend(st.session_state)
-        st.caption(
-            f"Already in reserve {money(opening)} + this year {money(contrib)} "
-            f"− this year’s projects {money(projects)} "
-            f"= projected {money(projected_reserve(st.session_state))}."
-        )
-        st.caption(
-            "Interest already sits inside the reserve balance, so it is not added again. "
-            "Leave the interest line under Other Income only for the tax estimate."
-        )
-        st.caption(
-            "Guidance only, not legal advice. Body corporate minimums: STSMA Regulation 2. "
-            "HOA amounts follow the MOI or constitution."
-        )
-        bill_now = st.session_state.get("reserve_bill") or "pq"
-        if bill_now not in ("pq", "levy"):
-            bill_now = "pq"
-        st.session_state.reserve_bill = st.radio(
-            "How do owners pay the reserve contribution?",
-            ["pq", "levy"],
-            index=0 if bill_now == "pq" else 1,
-            format_func=lambda x: (
-                "Extra line on the owner invoice"
-                if x == "pq"
-                else "Added into the ordinary levy"
-            ),
-        )
-        if st.session_state.reserve_bill == "levy":
-            st.caption("The contribution is inside the one levy. It is not a line under Levy Income. The PQ shows the two parts, and Will pay this year is those two added.")
-        else:
-            st.caption("Owners see Levies and Reserve as two amounts. The contribution is on the reserve sheet, not under Levy Income. Changing it does not change the ordinary levy.")
-        box_help("bill")
-        st.session_state.special_in_ordinary = st.checkbox(
-            "Pay the 10-year projects from the ordinary levy",
-            value=st.session_state.special_in_ordinary,
-            help="Leave this off. The reserve pays these jobs. Tick it only when this complex pays the plan from the levy.",
-        )
-        box_help("plan")
+        st.caption("The reserve fund is on the **Reserve fund** tab, not here.")
         st.caption("This wipes the screen. Download Excel first if you still need the numbers.")
         if st.button("Erase everything"):
             for k in list(st.session_state.keys()):
@@ -6984,8 +6891,8 @@ def main():
 
     tabs = st.tabs([
         "How it works", "Income", "Municipal", "Expenditure",
-        "Repair & Maintenance", "Personnel", "Tax", "Special projects", "10-year projects",
-        "PQ / Levies", "10-year plan", "Notes for the PR", "Download",
+        "Repair & Maintenance", "Personnel", "Tax", "Special projects", "Reserve fund",
+        "10-year projects", "PQ / Levies", "10-year plan", "Notes for the PR", "Download",
     ])
 
     with tabs[0]:
@@ -6997,7 +6904,9 @@ def main():
 ### 1. Name the complex
 In the sidebar, type the **complex name** and the **financial year** (for example 1 March 2027 – 28 February 2028).
 
-Choose **body corporate** or **HOA**. The four reserve choices work for both. The note under the reserve box changes: a body corporate also sees the Act’s minimum, an HOA follows its MOI or constitution. The note does not change the amount. You do.
+Choose **body corporate** or **HOA** on the **Reserve fund** tab. The four contribution choices work for both. A body corporate also sees the Act’s minimum. An HOA follows its MOI or constitution. The note does not change the amount. You do.
+
+The reserve contribution is not on the left. Open **Reserve fund**.
 
 On each sidebar box there is a **?**. Click it when you are not sure what to type. It explains that box only, using the numbers already on the screen. It does not change a figure.
 
@@ -7108,21 +7017,15 @@ Each owner pays that total ÷ 12 ÷ the number of units. The same rand, not by P
 Do the same for a private refuse contract when every unit pays the same rand. Do not put insurance on Fixed monthly charges. Insurance uses **Extra on the owner invoice**.
 
 ### 10. Reserve fund
-Type **How much is already in the reserve fund?** That is the bank balance now, not this year’s contribution.
+Open the **Reserve fund** tab. This is the savings account. It is not Levy Income.
 
-Then pick one. It works for a body corporate and an HOA:
+- **Money already in the bank** is the balance now, not this year’s contribution.
+- **Collected last year** is what owners paid in. It is not the bank balance.
+- Then pick this year’s contribution. It works for a body corporate and an HOA: own amount, 15% of last year’s ordinary levy, 25% of that levy, or 100% of this year’s repairs.
+- **How do owners pay it.** Extra line on the invoice is the usual choice. The ordinary levy does not include it. Added into the ordinary levy means owners pay one amount, and the PQ still shows the two parts.
+- Leave **Pay the 10-year projects from the ordinary levy** off. The reserve pays those jobs.
 
-- Own amount
-- 15% of last year’s ordinary levy (the Actual on Levies received)
-- 25% of last year’s ordinary levy (that same Actual)
-- 100% of this year’s Repairs and Maintenance (after recovery income and payouts)
-
-The amount is **not** a line under Levy Income, and it is **not** in Total Levy Income. On the Excel file, type it once: the yellow **Agreed reserve** at the top of the BUDGET sheet. The RESERVE sheet shows the same number. Changing that yellow rand does **not** change the ordinary levy.
-
-Then choose how owners pay it. Pick one:
-
-- **Extra line on the owner invoice.** They see Levies and Reserve as two amounts. This is the usual choice. The ordinary levy does not include it.
-- **Added into the ordinary levy.** Owners pay one levy. The yellow reserve rand is inside that levy. It is still not listed under Levy Income. The PQ shows Ordinary levy and Reserve fund apart, and Will pay this year is those two added.
+On the Excel file, type the contribution once: the yellow **Agreed reserve** at the top of the BUDGET sheet. The RESERVE sheet shows the same number. It is not a line under Levy Income. Changing it does not change the ordinary levy, unless you chose Added into the ordinary levy.
 
 On Expenditure, Repairs, Personnel or Tax, type a rand in **Funded by reserve** when the reserve pays that line, or only a part of it. Leave it at 0 if the levy pays it. The rand you type leaves the ordinary levy and shows on the reserve sheet.
 
@@ -7134,7 +7037,7 @@ On Expenditure, Repairs, Personnel or Tax, type a rand in **Funded by reserve** 
 
 Interest already sits inside the opening balance. It is not added again. Leave the interest line under Other Income for the tax estimate, and leave **Lowers the ordinary levy** off.
 
-The body-corporate minimum on the side is guidance only, not legal advice. It does not override the option you picked.
+The body-corporate minimum on this tab is guidance only, not legal advice. It does not override the option you picked.
 
 ### 11. Insurance
 On the Income tab, choose one:
@@ -7283,7 +7186,7 @@ Yellow is the only place they type. White cells follow. A pink cell is a result 
         )
 
     with tabs[1]:
-        st.info("Ordinary and Reserve update when you save the cost sections / sidebar.")
+        st.info("Ordinary levies update when you save the cost sections. The reserve contribution is on the Reserve fund tab.")
         st.session_state.insurance_mode = st.radio(
             "Insurance — how do owners pay it?",
             ["levy", "pq"],
@@ -7705,12 +7608,119 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         )
 
     with tabs[8]:
+        st.subheader("Reserve fund budget")
+        st.caption(
+            "This is the savings account. It is not Levy Income. "
+            "Type this year’s contribution here. The yellow Agreed reserve on the Excel sheet follows this tab. "
+            "Changing it does not change the ordinary levy, unless you choose Added into the ordinary levy."
+        )
+        st.session_state.scheme_type = st.radio(
+            "What kind of scheme is this?",
+            ["bc", "hoa"],
+            format_func=lambda x: "Sectional title body corporate" if x == "bc" else "Homeowners association (HOA)",
+            index=0 if st.session_state.get("scheme_type") != "hoa" else 1,
+        )
+        box_help("scheme")
+        st.session_state.reserve_balance = st.number_input(
+            "Money already in the reserve bank account",
+            value=float(st.session_state.get("reserve_balance") or 0),
+            min_value=0.0,
+            step=1000.0,
+            help="Not this year’s contribution. If this figure is already after a municipal payment from the reserve, leave Paid by the reserve at 0 on Municipal.",
+        )
+        box_help("balance")
+        reserve_line = next((r for r in (st.session_state.sections.get("levy") or []) if family(r.get("desc") or "") == "reserve"), None)
+        if reserve_line is not None:
+            reserve_line["actual"] = st.number_input(
+                "Collected last year",
+                value=float(reserve_line.get("actual") or 0),
+                min_value=0.0,
+                step=1000.0,
+                help="What owners paid into the reserve last year. Not the bank balance.",
+            )
+        mode_now = st.session_state.get("reserve_mode") or "amount"
+        if mode_now in ("15pct", "legal"):
+            mode_now = "pct15"
+        if mode_now not in ("amount", "pct15", "pct25", "rm100"):
+            mode_now = "amount"
+        st.session_state.reserve_mode = st.radio(
+            "This year’s contribution",
+            ["amount", "pct15", "pct25", "rm100"],
+            index=["amount", "pct15", "pct25", "rm100"].index(mode_now),
+            format_func=lambda x: {
+                "amount": "Own amount",
+                "pct15": "15% of last year’s ordinary levy",
+                "pct25": "25% of last year’s ordinary levy",
+                "rm100": "100% of this year’s Repairs and Maintenance",
+            }[x],
+        )
+        if st.session_state.reserve_mode == "amount":
+            st.session_state.reserve_amount = st.number_input(
+                "Own amount for the year",
+                value=float(st.session_state.reserve_amount or 0),
+                step=1000.0,
+                min_value=0.0,
+            )
+        box_help("contrib")
+        if st.session_state.reserve_mode in ("pct15", "pct25") and prev_admin_contributions(st.session_state) < 1:
+            st.warning("Put last year’s ordinary levy in the Actual column on Income. 15% and 25% use that figure.")
+        contrib = reserve_contribution(st.session_state)
+        st.caption(f"This year’s contribution: {money(contrib)} ({money(contrib / 12)} a month).")
+        if st.session_state.scheme_type == "hoa":
+            st.caption("An HOA may use any of these. There is no automatic 15% or 25% rule. Use what the MOI or the members approved. This note does not change the amount.")
+        else:
+            rule = bc_reserve_rule(st.session_state)
+            if rule["band"] != "unknown":
+                st.caption(f"Body corporate note only: the Act’s minimum would be {money(rule['minimum'])}. That does not change the option you picked.")
+            else:
+                st.caption("Body corporate note only. The Act’s minimum shows once last year’s ordinary levy is on Income. The note does not change the amount.")
+        bill_now = st.session_state.get("reserve_bill") or "pq"
+        if bill_now not in ("pq", "levy"):
+            bill_now = "pq"
+        st.session_state.reserve_bill = st.radio(
+            "How do owners pay it?",
+            ["pq", "levy"],
+            index=0 if bill_now == "pq" else 1,
+            format_func=lambda x: "Extra line on the owner invoice" if x == "pq" else "Added into the ordinary levy",
+        )
+        box_help("bill")
+        if st.session_state.reserve_bill == "levy":
+            st.caption("Owners pay one levy. This amount is inside that levy. It is not a line under Levy Income. The PQ still shows the two parts.")
+        else:
+            st.caption("Owners see Levies and Reserve as two amounts. This amount is not inside the ordinary levy.")
+        st.session_state.special_in_ordinary = st.checkbox(
+            "Pay the 10-year projects from the ordinary levy",
+            value=bool(st.session_state.special_in_ordinary),
+            help="Leave this off. The reserve pays these jobs.",
+        )
+        box_help("plan")
+        opening = float(st.session_state.reserve_balance or 0)
+        last = float(reserve_line.get("actual") or 0) if reserve_line is not None else 0.0
+        spent_last = municipal_paid_by_reserve(st.session_state)
+        if not st.session_state.special_in_ordinary:
+            spent_last += sum(max(0.0, float(r.get("actual") or 0)) for r in (st.session_state.sections.get("special") or []))
+        close_last = opening + last - spent_last
+        plan = reserve_project_spend(st.session_state)
+        close_next = close_last + contrib - plan
+        st.markdown(
+            f"**Same totals as the reserve sheet**\n\n"
+            f"- Bank balance now: {money(opening)}\n"
+            f"- Collected last year: {money(last)}\n"
+            f"- Spent last year: {money(spent_last)}\n"
+            f"- Left after last year: {money(close_last)}\n"
+            f"- This year’s contribution: {money(contrib)}\n"
+            f"- This year’s plan: {money(plan)}\n"
+            f"- Left after this year: {money(close_next)}"
+        )
+        st.caption("Interest is already in the bank balance. It is not added again. The jobs are on 10-year projects.")
+
+    with tabs[9]:
         section_form(
             "special",
             "10 Year Maintenance Projects",
             f"Spent last year is what was paid. Budgeted this year is the plan for this year, so spent last year minus that shows an overspend. "
             f"A 2026 project is this year. Next year is only the {NOW_YEAR + 1} column. A later year stays on the 10-year plan. "
-            "This year and next year are on this list. A later year is not. Leave the sidebar tick off if the reserve pays these jobs.",
+            "This year and next year are on this list. A later year is not. Leave the tick off on the Reserve fund tab if the reserve pays these jobs.",
             plan=True,
         )
         act_sum = sum(float(r.get("actual") or 0) for r in (st.session_state.sections.get("special") or []))
@@ -7721,7 +7731,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             f"Next year ({NOW_YEAR + 1}) {money(yr_sum)}. Above zero on Over / under means we spent more than was budgeted."
         )
 
-    with tabs[9]:
+    with tabs[10]:
         st.subheader("PQ / levy schedule")
         st.caption("Choose the unit ratio Excel here. WeConnectU’s PQ column is often 0 — we use Ratio 1. The ratios must add to 1.000.")
         pq_here = st.file_uploader(
@@ -7849,7 +7859,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             else:
                 st.caption("Type the current ordinary levy on the left to fill Pay now. It does not change the budget.")
 
-    with tabs[10]:
+    with tabs[11]:
         st.subheader("10-year maintenance plan")
         st.caption(
             "Type the plan, or paste it from Excel, including the year headings. "
@@ -7951,10 +7961,10 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             st.success(f"Saved {len(kept)} projects. Next year is on 10 Year Maintenance Projects ({n} lines). Deleted rows stay deleted.")
             st.rerun()
 
-    with tabs[11]:
+    with tabs[12]:
         show_pr_notes(st.session_state)
 
-    with tabs[12]:
+    with tabs[13]:
         st.subheader("Download Excel")
         st.caption("Budget, Reserve, PQ and 10-year plan. Special projects that must be done now are on the Budget sheet, inside the levy. Yellow cells are Budgeted Yearly. Type the rand. The levy follows the rand.")
         st.checkbox(
