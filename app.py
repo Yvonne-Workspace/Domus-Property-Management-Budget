@@ -3265,7 +3265,7 @@ def generate_excel(state: dict) -> BytesIO:
         sheet.page_margins.footer = 0.28
 
     # Old pack: Description | GL Code | Actual | % | Budgeted Yearly | Monthly | Comments
-    for i, w in enumerate([3, 42, 12, 14, 10, 16, 14, 36], 1):
+    for i, w in enumerate([3, 42, 12, 14, 10, 16, 14, 46], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
     def fill(c, color):
@@ -3295,26 +3295,77 @@ def generate_excel(state: dict) -> BytesIO:
     ws["B2"].font = Font(name="Calibri", bold=True, size=16, color=NAVY)
     ws["B3"] = state.get("fin_year") or ""
     ws["B3"].font = Font(bold=True, size=12)
-    ws["B5"] = "MEETING DECISION — Levies received"
-    ws["B5"].font = Font(bold=True, size=12, color=NAVY)
-    ws["B6"] = "What the costs need"
-    ws["B7"] = "Increase the costs need"
-    ws["B8"] = "Agreed increase — type the rand"
-    ws["B9"] = "What owners will be charged"
-    ws["B10"] = "Still short. Above zero means the costs are still higher."
-    ws["B10"].font = Font(italic=True, size=9, color="9C0006")
-    ws["H8"].font = Font(name="Calibri", size=9, italic=True, color="1F4E79")
-    ws["H8"].alignment = Alignment(wrap_text=True, vertical="center")
-    ws.row_dimensions[8].height = 32
+    MED = Side(style="medium", color="000000")
+
+    def set_side(cell, left=None, right=None, top=None, bottom=None):
+        old = cell.border
+        cell.border = Border(
+            left=left if left is not None else old.left,
+            right=right if right is not None else old.right,
+            top=top if top is not None else old.top,
+            bottom=bottom if bottom is not None else old.bottom,
+        )
+
+    def outline(r1, r2, c1=2, c2=8, line=None):
+        line = line or MED
+        if r2 < r1:
+            return
+        for rr in range(r1, r2 + 1):
+            for cc in range(c1, c2 + 1):
+                set_side(
+                    ws.cell(rr, cc),
+                    left=line if cc == c1 else None,
+                    right=line if cc == c2 else None,
+                    top=line if rr == r1 else None,
+                    bottom=line if rr == r2 else None,
+                )
+
+    def box_cells(row, cols):
+        for cc in cols:
+            set_side(ws.cell(row, cc), left=MED, right=MED, top=MED, bottom=MED)
+
+    # Row 5 is the levy-increase box. Row 6 is the gap. Rows 7–12 are the meeting block.
+    # PQ and Each Unit use F11 (the agreed levy) and F12 (the pink gap). Do not renumber them.
+    ws.merge_cells("B7:D7")
+    ws["B7"] = "MEETING DECISION — Levies received"
+    ws["B7"].font = Font(name="Calibri", bold=True, size=12, color=NAVY)
+    ws["B7"].alignment = Alignment(vertical="center")
+    ws.row_dimensions[7].height = 20
+    for col, lab in ((6, "Budgeted Yearly"), (7, "Monthly"), (8, "Comments / Notes")):
+        c = ws.cell(7, col, lab)
+        fill(c, NAVY)
+        c.font = Font(name="Calibri", bold=True, color="FFFFFF", size=10)
+        c.border = THIN
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    meet_labels = {
+        8: "Required Annual Levy",
+        9: "Required Increase in Levies",
+        10: "Agreed increase — type the rand",
+        11: "Total Annual Levy for the Complex",
+    }
+    for rr, lab in meet_labels.items():
+        ws.merge_cells(start_row=rr, start_column=2, end_row=rr, end_column=4)
+        cell = ws.cell(rr, 2, lab)
+        cell.font = Font(name="Calibri", size=14 if rr == 10 else 11)
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+    ws.merge_cells("B12:D12")
+    for rr, height in ((8, 36), (9, 36), (10, 42), (11, 20), (12, 20)):
+        ws.row_dimensions[rr].height = height
     _ord_actual = ordinary_actual(state)
     _mode = state.get("levy_approve_mode") or "costs"
     _approved_year = approved_ordinary(state)
     _costs_need = ordinary_total(state)
-    ws["H8"] = (
+    ws["H8"] = "Annual Levy Required: The total levy amount that needs to be collected from the entire complex over the year to cover the costs."
+    ws["H9"] = "Required Levy Increase: The additional amount that needs to be added to the current annual levy to ensure that the total yearly levy covers the projected costs."
+    ws["H10"] = (
         "No increase. Leave this at 0. What owners will pay stays on what they pay now. The PQ does not change."
         if _mode == "hold" else
         "This follows the costs. Leave it to keep the true increase. Type 0 if the levy must stay the same. Type another rand only when the meeting agrees a different increase."
     )
+    ws["H12"] = "Above zero means costs remain higher"
+    for rr, bold, color in ((8, True, NAVY), (9, True, NAVY), (10, False, NAVY), (12, False, "9C0006")):
+        ws.cell(rr, 8).font = Font(name="Calibri", size=9, italic=True, bold=bold, color=color)
+        ws.cell(rr, 8).alignment = Alignment(wrap_text=True, vertical="center")
     _pay_base = float(state.get("current_monthly_levy") or 0) * 12.0
     if _pay_base < 0.5:
         _pay_base = _ord_actual
@@ -3322,35 +3373,26 @@ def generate_excel(state: dict) -> BytesIO:
         _seed_increase = _approved_year - _pay_base
     else:
         _seed_increase = _approved_year
-    approved_row = 9
-    pct_words = (
-        "The % column is worked out from the rand. Do not type on it. Type Budgeted Yearly."
-        if state.get("show_pct")
-        else "There is no % column."
-    )
-    ws["B11"] = (
-        "Colours. Yellow with blue numbers: type here. White: locked formula, do not type. "
-        "Pink: a result to check (the levy, a gap, a shortfall or an overspend). It is not added again. "
-        "Pale blue: a total. Dark blue with white words: a heading. Green: the monthly levy the meeting approved. "
-        "The reserve contribution is on the RESERVE sheet, not here. "
-        + pct_words
-    )
-    ws["B11"].alignment = Alignment(wrap_text=True, vertical="center")
-    ws.row_dimensions[11].height = 32
-    ws["B11"].font = Font(italic=True, size=9, color="666666")
-    ws.merge_cells("B11:H11")
+    approved_row = 11
 
-    r = 13
+    r = 14
+    section_start = None
+    block_last = 8
 
     def bar(title):
-        nonlocal r
-        # Do not merge across Budgeted Yearly or Monthly. A merge hides the amount.
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=5)
+        nonlocal r, section_start, block_last
+        section_start = r
+        block_last = 8
         for col in range(2, 9):
-            fill(ws.cell(r, col), SECTION)
-            ws.cell(r, col).border = THIN
+            cell = ws.cell(r, col)
+            fill(cell, SECTION)
+            cell.border = Border()
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=8)
         ws.cell(r, 2).value = title
         ws.cell(r, 2).font = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
+        ws.cell(r, 2).alignment = Alignment(vertical="center")
+        ws.row_dimensions[r].height = 20
+        outline(r, r)
         r += 1
 
     def hdr():
@@ -3361,7 +3403,17 @@ def generate_excel(state: dict) -> BytesIO:
             fill(c, NAVY)
             c.font = Font(bold=True, color="FFFFFF", size=10)
             c.border = THIN
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.row_dimensions[r].height = 18
         r += 1
+
+    def close_block(total_row):
+        if not section_start:
+            return
+        last_data = total_row - 1
+        if last_data >= section_start:
+            outline(section_start, last_data)
+        box_cells(total_row, (4, 6, 7))
 
     levy_rows = {}
     named_rows = {}
@@ -3377,7 +3429,16 @@ def generate_excel(state: dict) -> BytesIO:
 
     def write(items, recovery_as_income=False, in_levy=False, owner_box=False, levy_tick=False, claim_col=False, reserve_col=False, mains=None, l_rows=None, no_pct=False, track_interest=False):
         """Old pack formulas: F = D*(1+E), G = F/12. Recoveries shown as positive income when asked."""
-        nonlocal r, reserve_mark_rows, cover_pending, recovery_excel_rows, reserve_from_rows, muni_from_rows, interest_rows
+        nonlocal r, reserve_mark_rows, cover_pending, recovery_excel_rows, reserve_from_rows, muni_from_rows, interest_rows, block_last
+        covered = set()
+        for it in items or []:
+            parent = str(it.get("desc") or "").strip()
+            for sub in it.get("subs") or []:
+                part = str(sub.get("desc") or "").strip()
+                if parent and part:
+                    covered.add(norm(f"{parent} — {part}"))
+        if covered:
+            items = [it for it in items if norm(it.get("desc") or "") not in covered]
         if not items:
             start = r
             r += 1
@@ -3389,18 +3450,21 @@ def generate_excel(state: dict) -> BytesIO:
             hc.font = Font(bold=True, color="FFFFFF", size=10)
             hc.border = THIN
             ws.column_dimensions["I"].width = 24
+            block_last = max(block_last, 9)
         if items and claim_col:
             hc = ws.cell(start - 1, 9, "Comes off this cost")
             fill(hc, NAVY)
             hc.font = Font(bold=True, color="FFFFFF", size=10)
             hc.border = THIN
             ws.column_dimensions["I"].width = 28
+            block_last = max(block_last, 9)
         if items and reserve_col:
             hc = ws.cell(start - 1, 10, "Funded by reserve")
             fill(hc, NAVY)
             hc.font = Font(bold=True, color="FFFFFF", size=10)
             hc.border = THIN
             ws.column_dimensions["J"].width = 20
+            block_last = max(block_last, 10)
         for it in items:
             desc = it.get("desc") or ""
             inp(ws.cell(r, 2), desc)
@@ -3454,7 +3518,10 @@ def generate_excel(state: dict) -> BytesIO:
                 pct_cell.border = THIN
                 pct_cell.alignment = Alignment(horizontal="center")
             if fam == "ordinary":
-                pass  # F filled after the cost total
+                cell = ws.cell(r, 6)
+                cell.border = THIN
+                cell.number_format = MONEY
+                cell.font = Font(name="Calibri", size=10)
             elif fam == "reserve" and state.get("reserve_mode") in ("pct15", "15pct", "legal") and levy_rows.get("ordinary"):
                 months = max(1, int(state.get("actual_months") or 12))
                 scale = f"*12/{months}" if months < 12 else ""
@@ -3488,6 +3555,7 @@ def generate_excel(state: dict) -> BytesIO:
                     hc.font = Font(bold=True, color="FFFFFF", size=10)
                     hc.border = THIN
                     ws.column_dimensions["I"].width = 22
+                    block_last = max(block_last, 9)
                 inp(ws.cell(r, 9), own, MONEY)
                 if own:
                     extra = "Cost recovery " + f"{own:,.2f}" + ". Not income. Taken off this line."
@@ -3531,6 +3599,7 @@ def generate_excel(state: dict) -> BytesIO:
                     hc.font = Font(bold=True, color="FFFFFF", size=10)
                     hc.border = THIN
                     ws.column_dimensions["J"].width = 28
+                    block_last = max(block_last, 10)
                 dest = (it.get("goes_to") or "").strip()
                 inp(ws.cell(r, 10), dest or "— stays on the invoice —")
                 if goes_to_reserve(it, state):
@@ -3566,6 +3635,9 @@ def generate_excel(state: dict) -> BytesIO:
             if bits:
                 extra = "Breakdown: " + "; ".join(bits) + ". This line is the total of the parts under it. The parts are not added again."
                 cnote.value = f"{note} | {extra}".strip(" |") if note else extra
+            shown = str(cnote.value or "")
+            if len(shown) > 110:
+                ws.row_dimensions[r].height = min(108, 22 + (len(shown) // 40) * 14)
             r += 1
             for sub in it.get("subs") or []:
                 sub_name = str(sub.get("desc") or "").strip()
@@ -3606,6 +3678,7 @@ def generate_excel(state: dict) -> BytesIO:
             fml(ws.cell(r, 6), f"SUM(F{start}:F{end})", TOTAL)
         fml(ws.cell(r, 7), f"F{r}/12", TOTAL)
         row_n = r
+        close_block(row_n)
         r += 2
         return row_n
 
@@ -3644,6 +3717,14 @@ def generate_excel(state: dict) -> BytesIO:
     hdr()
     a, b = write(muni_gross)
     muni_g_tot = tot("TOTAL CITY BILL", a, b)
+    muni_box = r
+    for col, lab in ((4, "Actual"), (6, "Budgeted Yearly"), (7, "Monthly")):
+        c = ws.cell(r, col, lab)
+        fill(c, NAVY)
+        c.font = Font(bold=True, color="FFFFFF", size=9)
+        c.border = THIN
+        c.alignment = Alignment(horizontal="center")
+    r += 1
     ws.cell(r, 2, "What the complex pays for municipal").font = Font(bold=True)
     fml(ws.cell(r, 4), f"MAX(0,D{muni_g_tot}-D{util_tot})")
     fml(ws.cell(r, 6), f"MAX(0,F{muni_g_tot}-F{util_tot})", RED)
@@ -3689,6 +3770,7 @@ def generate_excel(state: dict) -> BytesIO:
     elif paid_amt <= 0.5:
         ws.cell(r, 2, "If this is zero, owners paid the city bill back. There is no municipal shortfall.").font = Font(italic=True, size=9, color="666666")
         r += 1
+    outline(muni_box, r - 1)
     r += 1
     def write_actual_after_recoveries(label, total_row, items):
         nonlocal r
@@ -3830,12 +3912,14 @@ def generate_excel(state: dict) -> BytesIO:
     label = ws.cell(r, 2, "Ordinary levy")
     label.font = Font(name="Calibri", bold=True, size=11)
     note = ws.cell(r, 8, levy_words)
-    note.font = Font(italic=True, size=9, color="666666")
+    note.font = Font(name="Calibri", italic=True, size=9, color=NAVY)
     note.alignment = Alignment(wrap_text=True, vertical="center")
-    ws.row_dimensions[r].height = 32
+    ws.row_dimensions[r].height = 96
     fml(ws.cell(r, 6), f"MAX(0,{bits})", RED)
     fml(ws.cell(r, 7), f"F{r}/12", RED)
     ord_check = r
+    outline(section_start, ord_check)
+    box_cells(ord_check, (6, 7))
     if levy_rows.get("ordinary"):
         ws.cell(levy_rows["ordinary"], 6).value = f"=F{ord_check}"
         ws.cell(levy_rows["ordinary"], 6).font = Font(name="Calibri", size=10)
@@ -3845,48 +3929,66 @@ def generate_excel(state: dict) -> BytesIO:
     if levy_rows.get("ordinary"):
         ord_row = levy_rows["ordinary"]
         wb.defined_names.add(DefinedName(name="OrdinaryActual", attr_text=f"BUDGET!$D${ord_row}"))
-        fml(ws.cell(6, 6), f"F{ord_check}")
-        fml(ws.cell(6, 7), "F6/12")
-        fml(ws.cell(7, 6), "IF(PayNow=0,IF(OrdinaryActual=0,F6,F6-OrdinaryActual),F6-PayNow)")
-        fml(ws.cell(7, 7), "F7/12")
-        agreed = ws.cell(8, 6)
+        fml(ws.cell(8, 6), f"F{ord_check}")
+        fml(ws.cell(8, 7), "F8/12")
+        fml(ws.cell(9, 6), "IF(PayNow=0,IF(OrdinaryActual=0,F8,F8-OrdinaryActual),F8-PayNow)")
+        fml(ws.cell(9, 7), "F9/12")
+        agreed = ws.cell(10, 6)
         if _mode in ("hold", "pct", "amount") and _approved_year > 0.5 and not (
             _mode == "amount" and float(state.get("levy_approved_amount") or 0) < 0.5
         ) and not (_mode == "pct" and _ord_actual < 0.5):
             inp(agreed, _seed_increase, MONEY)
         else:
-            agreed.value = "=F7"
+            agreed.value = "=F9"
             fill(agreed, YELLOW)
-            agreed.font = Font(name="Calibri", color=BLUE, size=10)
             agreed.border = THIN
             agreed.protection = Protection(locked=False)
             agreed.number_format = MONEY
-        fml(ws.cell(9, 6), "IF(PayNow=0,IF(OrdinaryActual=0,F8,OrdinaryActual+F8),PayNow+F8)")
-        fml(ws.cell(9, 7), "F9/12", "C6EFCE")
-        fml(ws.cell(10, 6), "F6-F9", RED)
-        fml(ws.cell(10, 7), "F10/12", RED)
+        agreed.font = Font(name="Calibri", color=BLUE, size=14)
+        agreed.alignment = Alignment(horizontal="center", vertical="center")
+        month = ws.cell(10, 7)
+        month.value = "=F10/12"
+        month.font = Font(name="Calibri", size=11)
+        month.number_format = MONEY
+        month.alignment = Alignment(horizontal="center", vertical="center")
+        fml(ws.cell(11, 6), "IF(PayNow=0,IF(OrdinaryActual=0,F10,OrdinaryActual+F10),PayNow+F10)")
+        fml(ws.cell(11, 7), "F11/12", "C6EFCE")
+        fml(ws.cell(12, 6), "F8-F11", RED)
+        fml(ws.cell(12, 7), "F12/12", RED)
         _pay_now_year = float(state.get("current_monthly_levy") or 0) * 12.0
         ws["AA1"] = _pay_now_year
         ws["AA1"].number_format = MONEY
         wb.defined_names.add(DefinedName(name="PayNow", attr_text="BUDGET!$AA$1"))
         ws.column_dimensions["AA"].hidden = True
         if state.get("show_levy_pct"):
-            ws["B4"] = "Levy increase"
-            ws["B4"].font = Font(name="Calibri", bold=True, size=14, color=NAVY)
-            pct = ws["F4"]
-            pct.value = '=IF(PayNow=0,IF(OrdinaryActual=0,"",(F9-OrdinaryActual)/OrdinaryActual),(F9-PayNow)/PayNow)'
+            ws.merge_cells("B5:D5")
+            ws["B5"] = "Levy increase"
+            ws["B5"].font = Font(name="Calibri", bold=True, size=14, color=NAVY)
+            ws["B5"].alignment = Alignment(horizontal="center", vertical="center")
+            pct = ws["F5"]
+            pct.value = '=IF(PayNow=0,IF(OrdinaryActual=0,"",(F11-OrdinaryActual)/OrdinaryActual),(F11-PayNow)/PayNow)'
             pct.number_format = "0.0%"
             pct.font = Font(name="Calibri", bold=True, size=18, color=NAVY)
             pct.border = THIN
-            pct.alignment = Alignment(horizontal="center")
-            ws["G4"] = "Worked out from the rand. It does not change the levy."
-            ws["G4"].font = Font(italic=True, size=9, color="1F4E79")
+            pct.alignment = Alignment(horizontal="center", vertical="center")
+            ws.merge_cells("G5:H5")
+            ws["G5"] = "Worked out from the rand. It does not change the levy."
+            ws["G5"].font = Font(name="Calibri", italic=True, size=9, color=NAVY)
+            ws["G5"].alignment = Alignment(vertical="center", wrap_text=True)
+            ws.row_dimensions[5].height = 24
+            outline(5, 5)
+        outline(7, 12)
+        for rr in (8, 9, 11, 12):
+            for cc in (6, 7):
+                ws.cell(rr, cc).alignment = Alignment(horizontal="center", vertical="center")
+    else:
+        outline(7, 12)
     wb.defined_names.add(DefinedName(name="ReserveActual", attr_text="RESERVE!$C$6"))
     for fam in ("boathouse", "boatport"):
         row = levy_rows.get(fam)
         if not row:
             continue
-        fml(ws.cell(row, 6), f"IF(PayNow=0,IF(OrdinaryActual=0,0,D{row}*F9/OrdinaryActual),D{row}*F9/PayNow)")
+        fml(ws.cell(row, 6), f"IF(PayNow=0,IF(OrdinaryActual=0,0,D{row}*F11/OrdinaryActual),D{row}*F11/PayNow)")
         fml(ws.cell(row, 7), f"F{row}/12")
     ws.column_dimensions["E"].hidden = not bool(state.get("show_pct"))
     if state.get("show_pct"):
@@ -3900,7 +4002,7 @@ def generate_excel(state: dict) -> BytesIO:
         pq["E1"].font = Font(name="Calibri", bold=True, size=14, color=NAVY)
         pq["E1"].alignment = Alignment(horizontal="right", vertical="center")
         pq_pct = pq["F1"]
-        pq_pct.value = "=BUDGET!F4"
+        pq_pct.value = "=BUDGET!F5"
         pq_pct.number_format = "0.0%"
         pq_pct.font = Font(name="Calibri", bold=True, size=18, color=NAVY)
         pq_pct.border = THIN
@@ -4091,9 +4193,9 @@ def generate_excel(state: dict) -> BytesIO:
     eu["A3"] = "Monthly rand for that unit. Municipal — common property is the city bill for the complex after owners have paid their own electricity and water. It is not their home's municipal account. Personnel and tax are left off when they are zero."
     eu["A3"].font = Font(italic=True, size=9, color="666666")
     eu.merge_cells("A3:L3")
-    eu["A4"] = "Still short for the whole complex. Not inside the totals below."
+    eu["A4"] = "Above zero means costs remain higher. Not inside the totals below."
     eu["A4"].font = Font(italic=True, size=9, color="9C0006")
-    fml(eu["C4"], "BUDGET!F10", RED)
+    fml(eu["C4"], "BUDGET!F12", RED)
 
     def _budget_expr(expr: str) -> str:
         return re.sub(r"\b([A-Z]{1,3})(\d+)\b", lambda m: f"BUDGET!{m.group(1)}{m.group(2)}", expr)
@@ -4142,7 +4244,7 @@ def generate_excel(state: dict) -> BytesIO:
     eu.cell(5, 3).font = Font(italic=True, size=8, color="666666")
     for j, (_name, expr) in enumerate(eu_cols):
         fml(eu.cell(5, 4 + j), expr)
-    scale = f"IF(BUDGET!F{ord_check}=0,1,BUDGET!F9/BUDGET!F{ord_check})"
+    scale = f"IF(BUDGET!F{ord_check}=0,1,BUDGET!F11/BUDGET!F{ord_check})"
     first_u = 7
     for i, u in enumerate(units):
         rr = first_u + i
@@ -4516,6 +4618,8 @@ def generate_excel(state: dict) -> BytesIO:
         "deck_copy": state.get("deck_copy") or {},
         "facilities": state.get("facilities") or {},
         "muni_paid_by_reserve": municipal_paid_by_reserve(state),
+        "show_pct": bool(state.get("show_pct")),
+        "show_levy_pct": bool(state.get("show_levy_pct")),
     }
     blob = json.dumps(payload, ensure_ascii=False)
     # Excel cell cap is 32767; split across rows if needed.
@@ -4585,6 +4689,8 @@ def _apply_budget_sheet(wb, data: dict, wb_values=None) -> None:
             "colours", "colors", "ordinary levy", "last year", "reserve approved",
             "type the", "what the complex pays", "why the complex", "still to carry",
             "if this is zero", "already paid", "paid by the reserve", "cost shortfall",
+            "levy increase", "required annual", "required increase", "agreed increase",
+            "total annual levy", "above zero",
         )) or any(x in low for x in (
             "shortfall", "under-recovery", "under recovery", "do not add it again",
             "already inside the actual", "already inside the new levy",
@@ -4598,6 +4704,19 @@ def _apply_budget_sheet(wb, data: dict, wb_values=None) -> None:
                 d_val = ws_values.cell(r, 4).value
             if _cell_amount(f_val) is None:
                 f_val = ws_values.cell(r, 6).value
+        note_now = ws.cell(r, 8).value
+        if isinstance(note_now, str) and note_now.strip().lower().startswith("part of the line above"):
+            if " — " in desc and current:
+                parent_name, part = desc.split(" — ", 1)
+                parent = next((it for it in sections.get(current) or [] if norm(it.get("desc") or "") == norm(parent_name)), None)
+                if parent:
+                    for sub in parent.get("subs") or []:
+                        if norm(str(sub.get("desc") or "")) == norm(part.strip()):
+                            if isinstance(d_val, (int, float)):
+                                sub["actual"] = abs(float(d_val))
+                            if isinstance(f_val, (int, float)):
+                                sub["yearly"] = abs(float(f_val))
+            continue
         mapped = next((k for title, k in RESTORE_BARS if title in low and "total" not in low and "check" not in low), None)
         if mapped and d_val is None and f_val is None:
             current = mapped
@@ -4783,6 +4902,9 @@ def _read_meeting_from_sheet(wb, data: dict) -> None:
                         break
                 data["levy_approve_mode"] = "amount"
                 data["levy_approved_amount"] = actual + float(year_v) if actual > 0.5 else float(year_v)
+            continue
+        if label.strip().lower() == "levy increase":
+            data["show_levy_pct"] = True
             continue
         if label.startswith("Agreed reserve"):
             year_v = None
@@ -5871,15 +5993,15 @@ def _pr_grids(state: dict, approved: float, current_m: float) -> dict:
         if family(r.get("desc") or "") == "reserve":
             last_r = float(r.get("actual") or 0)
     levy_rows = [
-        ["What the costs need", costs, False, "White. Leave it. This is what the bills add up to."],
-        ["Increase the costs need", increase, False, "White. Leave it. How much more than what owners pay now."],
+        ["Required Annual Levy", costs, False, "White. Leave it. This is what the bills add up to."],
+        ["Required Increase in Levies", increase, False, "White. Leave it. How much more than what owners pay now."],
         ["Agreed increase — type the rand", agreed_increase, True, "Yellow. Leave it, or type 0 if the levy must stay the same."],
-        ["What owners will be charged", agreed_levy, False, "White. What they pay now, plus the yellow rand."],
-        ["Still short", short, False, "Pink if it is above zero. The bills have not gone down."],
+        ["Total Annual Levy for the Complex", agreed_levy, False, "White. What they pay now, plus the yellow rand."],
+        ["Above zero means costs remain higher", short, False, "Pink if it is above zero. The bills have not gone down."],
     ]
     levy = {"headers": ["", "For the year", "A month", "What to do"], "rows": []}
     for name, year, yellow, note in levy_rows:
-        pink = name == "Still short" and short > 0.5
+        pink = name == "Above zero means costs remain higher" and short > 0.5
         levy["rows"].append({"cells": [
             _cell(name),
             _cell(money(year), yellow=yellow, num=True, pink=pink),
@@ -6356,12 +6478,12 @@ def pr_slides(pack: dict) -> list:
             "Start at the top. Do not scroll yet.",
             "The first block is the levy decision.",
             [
-                {"where": "What the costs need", "do": "White. Leave it.", "why": f"Add up the bills. That is {pack.get('costs_year') or 'the yearly total'} for the year, {pack.get('costs_month') or 'the monthly total'} a month. This is not the levy until the meeting agrees it."},
-                {"where": "Increase the costs need", "do": "White. Leave it.", "why": "How many more rands the bills need than what owners pay now. It is not last year's cash in the bank."},
+                {"where": "Required Annual Levy", "do": "White. Leave it.", "why": f"Add up the bills. That is {pack.get('costs_year') or 'the yearly total'} for the year, {pack.get('costs_month') or 'the monthly total'} a month. This is not the levy until the meeting agrees it."},
+                {"where": "Required Increase in Levies", "do": "White. Leave it.", "why": "How many more rands the bills need than what owners pay now. It is not last year's cash in the bank."},
                 {"where": "Agreed increase — type the rand", "do": "Yellow. This is the one you change.", "why": "Leave it if owners must pay the full increase. Type 0 if the levy must stay exactly what they pay now. Type another rand only if the meeting agrees a different increase. It is rands, not a percentage."},
-                {"where": "What owners will be charged", "do": "White. It follows the yellow.", "why": "What they pay now, plus the yellow rand. If the yellow rand is 0, they pay the same and every unit on the PQ stays the same."},
+                {"where": "Total Annual Levy for the Complex", "do": "White. It follows the yellow.", "why": "What they pay now, plus the yellow rand. If the yellow rand is 0, they pay the same and every unit on the PQ stays the same."},
                 {"where": "Levy increase", "do": "At the top, only if you can see it.", "why": "One percentage. It follows the yellow rand. Typing here does not change the rand. If it is missing, the increase was left off because it is high."},
-                {"where": "Still short", "do": "Pink. Read it. Do not add it.", "why": "Above zero means the bills are still higher than the levy. Below zero means the bills are lower and the levy was not cut."},
+                {"where": "Above zero means costs remain higher", "do": "Pink. Read it. Do not add it.", "why": "Above zero means the bills are still higher than the levy. Below zero means the bills are lower and the levy was not cut."},
             ],
             "Say this. Typing a lower rand does not make a bill smaller. It only says what owners will pay. If it is short, the meeting still has to say which bill comes down, or that the reserve pays it.",
         ),
@@ -7054,6 +7176,7 @@ def main():
                     "current_monthly_levy", "actual_months", "tax_auto",
                     "levy_approve_mode", "levy_approved_pct", "levy_approved_amount",
                     "deck_copy", "facilities", "muni_paid_by_reserve",
+                    "show_pct", "show_levy_pct",
                 ):
                     if k in data and data[k] is not None:
                         st.session_state[k] = data[k]
@@ -7142,7 +7265,7 @@ On each cost tab you have Actual, % Increase, Budgeted yearly, Monthly, and Note
 ### 4. What ordinary levies are
 Ordinary levies are the rands the costs need. They are not last year’s levy plus a %.
 
-On **Levy Income**, under **Meeting decision**, choose **Levies stay as they are** when the levy must not change. Owners keep paying the current ordinary levy typed on the left. The PQ stays on that amount. Do not use last year's received levy for this. The sheet then shows any saving under **Still short**.
+On **Levy Income**, under **Meeting decision**, choose **Levies stay as they are** when the levy must not change. Owners keep paying the current ordinary levy typed on the left. The PQ stays on that amount. Do not use last year's received levy for this. The sheet then shows the difference on the pink row, **Above zero means costs remain higher**.
 
 **Ordinary = net municipal + expenditure + repairs + personnel + tax + special projects − income you tick − fixed charges owners pay on the invoice − rand the reserve pays**
 
@@ -7325,7 +7448,7 @@ If **Added into the ordinary levy** is chosen, the sheet also shows **Ordinary l
 - Reserve, CSOS, insurance and garden, where those are billed on their own
 - **Total** — what that unit pays
 
-If the meeting agrees less than the costs need, these rows use the lower rand. **Still short** at the top is the hole for the whole complex. It is not added again into the totals.
+If the meeting agrees less than the costs need, these rows use the lower rand. The pink row under **Total Annual Levy for the Complex** is the hole for the whole complex. Above zero means costs remain higher. It is not added again into the totals.
 
 Boathouse and boatport stay on the budget, under Levy Income. They move with the agreed levy, in the same proportion as last year. They are not on the PQ.
 
@@ -7361,10 +7484,10 @@ The % on the sheet follows the yellow rand. It does not drive the rand. The meet
 
 The meeting block is at the top of **BUDGET**.
 
-- **What the costs need** is locked.
-- **Increase** is the rand the costs need above what owners pay now. The % is not on the sheet unless you ticked **Show the levy increase % at the top**. If the costs need 5.5% more, that tick shows 5.5%. There is no second %.
-- **Agreed increase** is yellow. Leave it to keep that increase. Type **0** when the levy must stay the same. **What owners will pay** then equals what they pay now, and the PQ does not change.
-- **What owners will be charged** and **Still short** calculate. Above zero on Still short means the bills are still higher than the amount the meeting agreed. It is not added again.
+- **Required Annual Levy** is locked. It is what the bills add up to.
+- **Required Increase in Levies** is the rand the costs need above what owners pay now. The % is not on the sheet unless you ticked **Show the levy increase % at the top**. If the costs need 5.5% more, that tick shows 5.5%. There is no second %.
+- **Agreed increase** is yellow. Leave it to keep that increase. Type **0** when the levy must stay the same. **Total Annual Levy for the Complex** then equals what they pay now, and the PQ does not change.
+- **Total Annual Levy for the Complex** and the pink line under it calculate. The note says **Above zero means costs remain higher**. It is not added again.
 - **Agreed reserve** is yellow, on the **RESERVE** sheet. Type the reserve contribution in rands. It is not on the normal budget and not a line under Levy Income. Changing it does not change the ordinary levy, unless you chose **Added into the ordinary levy**. Then that rand is inside the one levy, and the PQ still shows the two parts.
 
 Yellow cells can be typed without a password. White cells are locked. Pink is a result to check, not a second charge. Green is the monthly levy the meeting approved. To unlock a white cell: Review, Unprotect Sheet, password **domus**. If Excel offered to repair the file, do not use that copy. Download a fresh one.
@@ -7381,7 +7504,7 @@ Do not use **Erase everything** unless you mean to wipe the screen. Download fir
 ### 21. Notes for the PR
 It goes in the same order as the workbook. The sheet itself is on the slides, so Excel does not have to be open.
 
-1. **BUDGET sheet.** Start at the top. Yellow is the only place the meeting types. **What the costs need** is the bills added up. **Agreed increase** is the rand they accept. Type **0** if the levy must stay what owners pay now. The PQ then stays the same. **Still short** is pink. Above zero means the bills are still higher. It is not added again. Then go down the sheet, one block at a time: levy income, other income, recoveries, the city bill, expenditure, repairs, personnel, tax, then special projects. Say what the line is, what it was, and what it will be. A line that says it is not in the levy is not added again.
+1. **BUDGET sheet.** Start at the top. Yellow is the only place the meeting types. **Required Annual Levy** is the bills added up. **Agreed increase** is the rand they accept. Type **0** if the levy must stay what owners pay now. The PQ then stays the same. The pink row is the gap. **Above zero means costs remain higher.** It is not added again. Then go down the sheet, one block at a time: levy income, other income, recoveries, the city bill, expenditure, repairs, personnel, tax, then special projects. Say what the line is, what it was, and what it will be. A line that says it is not in the levy is not added again.
 2. **Special projects** are on that same Budget sheet, after tax. These jobs cannot wait. They are inside the ordinary levy. They are not the reserve and not the 10-year plan.
 3. **RESERVE sheet.** This is separate from the normal budget. The yellow **Agreed reserve** is at the top of this sheet. Under that, the actual year shows what was budgeted and what was spent. The budget year, on the right, is next year’s plan. The closing balance subtracts **what was spent**, not what was only budgeted. Bank charges stay on Expenditure.
 4. **PQ sheet.** Go across one unit, then the next. **Pay now** is what they pay today. **Will pay this year** is the new ordinary levy. **Levy change** is the difference, ordinary levy only. **Reserve change** is this year’s reserve minus last year’s, for that unit. **Total change** adds those two. It tells the meeting how much more, or less, that owner pays for the levy and the reserve together. Do not add those three into the invoice Total. The Total on the right is the bill: levy, reserve, CSOS and any fixed charge. CSOS is 2% of (that unit’s levy minus R500), never more than R40. If the reserve is inside the levy, the sheet shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added.
