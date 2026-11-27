@@ -185,6 +185,41 @@ def replace_plan(state: dict, projects: list) -> int:
     return refresh_special(state)
 
 
+def apply_reserve_actuals(state: dict, extracted: list) -> int:
+    """Fill Budgeted and Spent on reserve jobs only. Do not touch expenditure."""
+    specials = state.setdefault("sections", {}).setdefault("special", [])
+    plan = state.get("ymp") or []
+    n = 0
+    for src in extracted or []:
+        desc = str(src.get("desc") or "").strip()
+        if not desc or re.search(r"\b(total|subtotal|sub-total|grand total)\b", desc, re.I):
+            continue
+        tagged = src.get("section") == "special" or section_for(desc) == "special"
+        plan_hit = next((
+            p for p in plan
+            if norm(p.get("desc") or "") == norm(desc) or _same_job(p.get("desc") or "", desc)
+        ), None)
+        spec_hit = next((
+            it for it in specials
+            if norm(it.get("desc") or "") == norm(desc) or _same_job(it.get("desc") or "", desc)
+        ), None)
+        if not tagged and plan_hit is None and spec_hit is None:
+            continue
+        hit = spec_hit
+        if hit is None:
+            name = (plan_hit or {}).get("desc") or desc
+            hit = row(name, "From the reserve actual-vs-budget file. Spent is what was paid.")
+            specials.append(hit)
+        spent = abs(float(src.get("actual") or 0))
+        bud = abs(float(src.get("budget") or 0))
+        if spent < 0.5 and bud < 0.5:
+            continue
+        hit["actual"] = spent
+        hit["actual_budget"] = bud
+        n += 1
+    return n
+
+
 def seed_plan_from_special(state: dict) -> int:
     """If the 10-year plan has no Year 1 yet, use the Special Projects that came from Actual vs Budget."""
     already = 0.0
@@ -4448,26 +4483,50 @@ def generate_excel(state: dict) -> BytesIO:
     res.row_dimensions[10].height = 28
     res.row_dimensions[12].height = 28
 
+    def res_frame(r1, r2, c1=2, c2=6):
+        med = Side(style="medium", color="000000")
+        thin = Side(style="thin", color="B0B0B0")
+        if r2 < r1:
+            return
+        saved = []
+        for mr in list(res.merged_cells.ranges):
+            if mr.min_row >= r1 and mr.max_row <= r2 and mr.min_col >= c1 and mr.max_col <= c2:
+                saved.append((mr.min_row, mr.min_col, mr.max_row, mr.max_col))
+                res.unmerge_cells(str(mr))
+        for rr_ in range(r1, r2 + 1):
+            for cc in range(c1, c2 + 1):
+                res.cell(rr_, cc).border = Border(
+                    left=med if cc == c1 else thin,
+                    right=med if cc == c2 else thin,
+                    top=med if rr_ == r1 else thin,
+                    bottom=med if rr_ == r2 else thin,
+                )
+        for a, b, c, d in saved:
+            res.merge_cells(start_row=a, start_column=b, end_row=c, end_column=d)
+
+    def res_bar(row, title, note=""):
+        for cc in range(2, 7):
+            cell = res.cell(row, cc)
+            fill(cell, NAVY)
+            cell.font = Font(bold=True, size=12, color="FFFFFF")
+            cell.alignment = Alignment(vertical="center")
+        res.cell(row, 2, title)
+        if note:
+            res.cell(row, 5, note).font = Font(italic=True, size=9, color="FFFFFF")
+            res.cell(row, 5).alignment = Alignment(vertical="center", wrap_text=True)
+        res.row_dimensions[row].height = 22
+
     plan_title = over_row + 2
-    res.cell(plan_title, 2, "ACTUAL YEAR").font = Font(bold=True, size=12, color=NAVY)
-    res.cell(plan_title, 8, f"{budget_year} BUDGET").font = Font(bold=True, size=12, color=NAVY)
+    res_bar(plan_title, "ACTUAL YEAR")
     hdr_row = plan_title + 1
     for col, lab in enumerate(["Description", "Budgeted", "Spent", "Notes / Comments", "Over / under"], 2):
         c = res.cell(hdr_row, col, lab)
         fill(c, NAVY)
         c.font = Font(bold=True, color="FFFFFF", size=10)
+        c.alignment = Alignment(horizontal="center", wrap_text=True, vertical="center")
         c.border = THIN
-    for col, lab in enumerate(["Description", "Budgeted", "Notes / Comments"], 8):
-        c = res.cell(hdr_row, col, lab)
-        fill(c, NAVY)
-        c.font = Font(bold=True, color="FFFFFF", size=10)
-        c.border = THIN
+    res.row_dimensions[hdr_row].height = 22
 
-    plan_index = {}
-    for i, p in enumerate(projects):
-        desc = str(p.get("desc") or "").strip()
-        if desc:
-            plan_index[norm(desc)] = first_data + i
     by_plan = {}
     for p in projects:
         desc = str(p.get("desc") or "").strip()
@@ -4484,7 +4543,8 @@ def generate_excel(state: dict) -> BytesIO:
         return 0.0
 
     left_rows = []
-    right_rows = []
+    budget_rows = []
+    sheet_end = hdr_row
     if not state.get("special_in_ordinary"):
         jobs = []
         seen = set()
@@ -4501,8 +4561,7 @@ def generate_excel(state: dict) -> BytesIO:
             if re.search(r"\b(total|subtotal|sub-total|grand total)\b", desc, re.I):
                 continue
             jobs.append({"desc": desc, "actual": 0.0, "this_budget": 0.0, "yearly": 0.0, "note": p.get("note") or ""})
-        left_at = hdr_row + 1
-        right_at = hdr_row + 1
+        prepared = []
         for it in jobs:
             desc = it.get("desc") or ""
             spent = abs(float(it.get("actual") or 0))
@@ -4520,72 +4579,114 @@ def generate_excel(state: dict) -> BytesIO:
             elif nxt < 0.5 and budget_year <= NOW_YEAR:
                 nxt = abs(float(it.get("this_budget") or 0))
             note = clean_note(it.get("note"))
-            if spent > 0.5 or budgeted > 0.5:
-                res.cell(left_at, 2, desc).border = THIN
-                inp(res.cell(left_at, 3), budgeted, MONEY)
-                inp(res.cell(left_at, 4), spent, MONEY)
-                gap = spent - budgeted
-                if spent < 0.5 and budgeted > 0.5:
-                    words = "Nothing typed as spent. The closing does not take this budget off. Type Spent if the reserve paid it."
-                elif gap > 0.5:
-                    words = "Overspent. More was spent than was budgeted."
-                elif gap < -0.5:
-                    words = "Under budget. Not all of the budget was spent."
-                else:
-                    words = "In line with the budget."
-                shown = words if (not note or str(note).startswith("2026 is this year")) else note
-                res.cell(left_at, 5, shown).font = Font(italic=True, size=9, color="1F4E79")
-                res.cell(left_at, 5).alignment = Alignment(wrap_text=True, vertical="center")
-                fml(res.cell(left_at, 6), f"D{left_at}-C{left_at}", RED if gap > 0.5 else None)
-                left_rows.append(left_at)
-                left_at += 1
-            if nxt > 0.5:
-                res.cell(right_at, 8, desc).border = THIN
-                src = plan_index.get(norm(desc))
-                if src and 0 <= budget_idx <= 9:
-                    fml(res.cell(right_at, 9), f"'10 YMP'!{get_column_letter(5 + budget_idx)}{src}")
-                else:
-                    inp(res.cell(right_at, 9), nxt, MONEY)
-                res.cell(right_at, 10, "" if str(note).startswith("2026 is this year") else note).font = Font(italic=True, size=9, color="1F4E79")
-                res.cell(right_at, 10).alignment = Alignment(wrap_text=True, vertical="center")
-                right_rows.append(right_at)
-                right_at += 1
-        rr = max(left_at, right_at)
+            prepared.append((desc, budgeted, spent, nxt, note))
+        left_at = hdr_row + 1
+        for desc, budgeted, spent, nxt, note in prepared:
+            if spent < 0.5 and budgeted < 0.5:
+                continue
+            res.cell(left_at, 2, desc)
+            inp(res.cell(left_at, 3), budgeted, MONEY)
+            inp(res.cell(left_at, 4), spent, MONEY)
+            gap = spent - budgeted
+            if spent < 0.5 and budgeted > 0.5:
+                words = "Nothing typed as spent. The closing does not take this budget off. Type Spent if the reserve paid it."
+            elif gap > 0.5:
+                words = "Overspent. More was spent than was budgeted."
+            elif gap < -0.5:
+                words = "Under budget. Not all of the budget was spent."
+            else:
+                words = "In line with the budget."
+            shown = words if (not note or str(note).startswith("2026 is this year")) else note
+            res.cell(left_at, 5, shown).font = Font(italic=True, size=9, color="1F4E79")
+            res.cell(left_at, 5).alignment = Alignment(wrap_text=True, vertical="center")
+            fml(res.cell(left_at, 6), f"D{left_at}-C{left_at}", RED if gap > 0.5 else None)
+            res.row_dimensions[left_at].height = 30
+            left_rows.append(left_at)
+            left_at += 1
+        if paid_row:
+            res.cell(left_at, 2, "Municipal paid from the reserve")
+            fml(res.cell(left_at, 4), f"N(BUDGET!D{paid_row})")
+            res.cell(left_at, 5, "Already paid from the reserve. Comes off the actual year. Not in the new levy.").font = Font(italic=True, size=9, color="1F4E79")
+            res.cell(left_at, 5).alignment = Alignment(wrap_text=True, vertical="center")
+            left_rows.append(left_at)
+            left_at += 1
+        actual_end = left_at - 1 if left_rows else hdr_row
+        res_frame(plan_title, actual_end)
+
+        budget_title = actual_end + 2
+        res_bar(budget_title, f"{budget_year} BUDGET", "Yellow amounts. The meeting can change them.")
+        bud_hdr = budget_title + 1
+        for col in range(2, 7):
+            c = res.cell(bud_hdr, col)
+            fill(c, NAVY)
+            c.font = Font(bold=True, color="FFFFFF", size=10)
+            c.alignment = Alignment(horizontal="center", wrap_text=True, vertical="center")
+        res.cell(bud_hdr, 2, "Description")
+        res.cell(bud_hdr, 3, "Budgeted")
+        res.cell(bud_hdr, 5, "Notes / Comments")
+        res.row_dimensions[bud_hdr].height = 22
+        bud_at = bud_hdr + 1
+        for desc, budgeted, spent, nxt, note in prepared:
+            if nxt < 0.5 and spent < 0.5 and budgeted < 0.5:
+                continue
+            res.cell(bud_at, 2, desc)
+            inp(res.cell(bud_at, 3), nxt, MONEY)
+            shown = "" if str(note).startswith("2026 is this year") else note
+            res.cell(bud_at, 5, shown).font = Font(italic=True, size=9, color="1F4E79")
+            res.cell(bud_at, 5).alignment = Alignment(wrap_text=True, vertical="center")
+            res.row_dimensions[bud_at].height = 22
+            budget_rows.append(bud_at)
+            bud_at += 1
+        funded_now = 0.0
+        if reserve_mark_rows:
+            for key in ("expenditure", "rm", "personnel", "tax"):
+                for it in (s.get(key) or []):
+                    funded_now += funded_by_reserve(state, it)
+        if reserve_mark_rows and funded_now > 0.5:
+            res.cell(bud_at, 2, "Funded by reserve, typed on the budget")
+            fml(res.cell(bud_at, 3), "+".join(f"N(BUDGET!J{n})" for n in reserve_mark_rows))
+            res.cell(bud_at, 5, "A rand typed in Funded by reserve on the budget sheet. It lowers the levy and this reserve.").font = Font(italic=True, size=9, color="1F4E79")
+            res.cell(bud_at, 5).alignment = Alignment(wrap_text=True, vertical="center")
+            budget_rows.append(bud_at)
+            bud_at += 1
+        budget_end = bud_at - 1 if bud_at > bud_hdr + 1 else bud_hdr
+        res_frame(budget_title, budget_end)
+        sheet_end = budget_end
+        funded_tail = ""
+        if reserve_mark_rows and funded_now <= 0.5:
+            funded_tail = "+(" + "+".join(f"N(BUDGET!J{n})" for n in reserve_mark_rows) + ")"
     else:
         rr = hdr_row + 1
         res.cell(rr, 2, "The maintenance plan is paid from the ordinary levy, so it is not listed here.").font = Font(italic=True, size=9, color="9C0006")
-        rr += 1
-    if paid_row:
-        res.cell(rr, 2, "Municipal paid from the reserve").border = THIN
-        fml(res.cell(rr, 4), f"N(BUDGET!D{paid_row})")
-        res.cell(rr, 5, "Already paid from the reserve. Comes off the actual year. Not in the new levy.").font = Font(italic=True, size=9, color="1F4E79")
-        left_rows.append(rr)
-        rr += 1
-    funded_extra = ""
-    if reserve_mark_rows:
-        funded_now = 0.0
-        for key in ("expenditure", "rm", "personnel", "tax"):
-            for it in (s.get(key) or []):
-                funded_now += funded_by_reserve(state, it)
-        if funded_now > 0.5:
-            res.cell(rr, 8, "Funded by reserve, typed on the budget").border = THIN
-            fml(res.cell(rr, 9), "+".join(f"N(BUDGET!J{n})" for n in reserve_mark_rows))
-            res.cell(rr, 10, "A rand typed in Funded by reserve on the budget sheet. It lowers the levy and this reserve.").font = Font(italic=True, size=9, color="1F4E79")
-            right_rows.append(rr)
-            rr += 1
-        else:
-            funded_extra = "+(" + "+".join(f"N(BUDGET!J{n})" for n in reserve_mark_rows) + ")"
+        res_frame(plan_title, rr)
+        sheet_end = rr
+        funded_tail = ""
     if left_rows:
         fml(res.cell(maint_summary, 3), "+".join(f"D{n}" for n in left_rows))
     else:
         fml(res.cell(maint_summary, 3), "0")
-    if right_rows or funded_extra:
-        bits = "+".join(f"I{n}" for n in right_rows) if right_rows else "0"
-        fml(res.cell(maint_summary, 4), bits + funded_extra)
+    if budget_rows or funded_tail:
+        bits = "+".join(f"C{n}" for n in budget_rows) if budget_rows else "0"
+        fml(res.cell(maint_summary, 4), bits + funded_tail)
     else:
         fml(res.cell(maint_summary, 4), "0")
-    res.cell(maint_summary, 5, "Actual year is what was spent. The budget year is the work on the right. The closing subtracts those amounts.").font = Font(italic=True, size=9, color="1F4E79")
+    res.cell(maint_summary, 5, "Actual year, in the list below, is what was spent. The budget year under that is yellow. The meeting can change it. The closing subtracts those amounts.").font = Font(italic=True, size=9, color="1F4E79")
     res.cell(maint_summary, 5).alignment = Alignment(wrap_text=True, vertical="center")
+    res.row_dimensions[maint_summary].height = 32
+    for col in range(7, 12):
+        res.column_dimensions[get_column_letter(col)].hidden = True
+    res.page_setup.orientation = "portrait"
+    res.page_setup.paperSize = res.PAPERSIZE_A4
+    res.page_setup.fitToWidth = 1
+    res.page_setup.fitToHeight = 0
+    res.page_setup.horizontalCentered = True
+    res.sheet_properties.pageSetUpPr.fitToPage = True
+    res.page_margins.left = 0.45
+    res.page_margins.right = 0.4
+    res.page_margins.top = 0.5
+    res.page_margins.bottom = 0.4
+    res.print_area = f"A1:F{sheet_end}"
+    res.sheet_view.zoomScale = 110
 
     lock_sheet(res)
 
@@ -4833,54 +4934,136 @@ def _apply_budget_sheet(wb, data: dict, wb_values=None) -> None:
         sections[sec] = cleaned
 
 
+def _put_budget_year_amount(data: dict, desc: str, amount: float) -> None:
+    """A yellow budget-year rand on the reserve sheet wins, and is written onto the plan."""
+    year = budget_calendar_year(data)
+    idx = year - NOW_YEAR
+    items = data.setdefault("sections", {}).setdefault("special", [])
+    hit = next((it for it in items if norm(it.get("desc") or "") == norm(desc)), None)
+    if hit is None:
+        hit = row(desc, "")
+        items.append(hit)
+    if year <= NOW_YEAR:
+        hit["this_budget"] = amount
+    else:
+        hit["yearly"] = amount
+    if not 0 <= idx < 10:
+        return
+    plans = data.setdefault("ymp", [])
+    plan = next((p for p in plans if norm(p.get("desc") or "") == norm(desc)), None)
+    if plan is None:
+        years = [0.0] * 10
+        years[idx] = amount
+        plans.append({
+            "desc": desc, "years": years, "first_cycle": "", "freq": "",
+            "estimate": 0.0, "note": "",
+        })
+    else:
+        years = (list(plan.get("years") or []) + [0.0] * 10)[:10]
+        years[idx] = amount
+        plan["years"] = years
+
+
 def _read_reserve_jobs(res, data: dict) -> None:
-    """Yellow Budgeted and Spent on the reserve sheet win when the file comes back."""
-    header = None
-    kind = None
+    """Yellow Budgeted, Spent, and the budget-year amounts win when the file comes back."""
     max_r = int(res.max_row or 1)
+    actual_header = None
+    stacked_header = None
+    side_header = None
     for r in range(1, max_r + 1):
         c = str(res.cell(r, 3).value or "").strip().lower()
         d = str(res.cell(r, 4).value or "").strip().lower()
         e = str(res.cell(r, 5).value or "").strip().lower()
-        if c == "budgeted" and d == "spent":
-            header, kind = r, "new"
+        h = str(res.cell(r, 8).value or "").strip().lower()
+        i = str(res.cell(r, 9).value or "").strip().lower()
+        if c == "budgeted" and d == "spent" and actual_header is None:
+            actual_header = r
+            if h == "description" and i == "budgeted":
+                side_header = r
+            continue
+        if actual_header and stacked_header is None and c == "budgeted" and d != "spent" and (
+            d.startswith("note") or e.startswith("note")
+        ):
+            stacked_header = r
             break
-        if d.startswith("spent") and e.startswith("budget"):
-            header, kind = r, "old"
-            break
-    if not header:
+    if not actual_header and not stacked_header:
         return
     items = data.setdefault("sections", {}).setdefault("special", [])
-    blank = 0
-    for r in range(header + 1, max_r + 1):
-        desc = str(res.cell(r, 2).value or "").strip()
-        if not desc:
-            blank += 1
-            if blank >= 3:
-                break
-            continue
-        blank = 0
+
+    def _hit(desc: str):
+        found = next((it for it in items if norm(it.get("desc") or "") == norm(desc)), None)
+        if found is None:
+            found = row(desc, "")
+            items.append(found)
+        return found
+
+    def _skip(desc: str) -> bool:
         low = desc.lower()
-        if low.startswith(("total", "over /", "overspent", "colours", "colors")):
-            break
-        if low.startswith(("municipal paid", "funded by", "actual year", "the maintenance", "the contribution")):
-            continue
-        if kind == "new":
+        if low.startswith((
+            "total", "over /", "overspent", "colours", "colors",
+            "municipal paid", "funded by", "actual year", "the maintenance",
+            "the contribution",
+        )):
+            return True
+        if re.match(r"20\d{2}\s+budget", low):
+            return True
+        return False
+
+    if actual_header:
+        blank = 0
+        for r in range(actual_header + 1, max_r + 1):
+            if stacked_header and r >= stacked_header:
+                break
+            desc = str(res.cell(r, 2).value or "").strip()
+            if not desc:
+                blank += 1
+                if blank >= 2:
+                    break
+                continue
+            blank = 0
+            if _skip(desc):
+                if re.match(r"20\d{2}\s+budget", desc.lower()):
+                    break
+                continue
             bud = res.cell(r, 3).value
             spent = res.cell(r, 4).value
-        else:
-            spent = res.cell(r, 4).value
-            bud = res.cell(r, 5).value
-        if not isinstance(bud, (int, float)) and not isinstance(spent, (int, float)):
-            continue
-        hit = next((it for it in items if norm(it.get("desc") or "") == norm(desc)), None)
-        if hit is None:
-            hit = row(desc, "")
-            items.append(hit)
-        if isinstance(spent, (int, float)):
-            hit["actual"] = abs(float(spent))
-        if isinstance(bud, (int, float)):
-            hit["actual_budget"] = abs(float(bud))
+            if not isinstance(bud, (int, float)) and not isinstance(spent, (int, float)):
+                continue
+            hit = _hit(desc)
+            if isinstance(spent, (int, float)):
+                hit["actual"] = abs(float(spent))
+            if isinstance(bud, (int, float)):
+                hit["actual_budget"] = abs(float(bud))
+    if side_header:
+        blank = 0
+        for r in range(side_header + 1, max_r + 1):
+            desc = str(res.cell(r, 8).value or "").strip()
+            if not desc:
+                blank += 1
+                if blank >= 2:
+                    break
+                continue
+            blank = 0
+            if _skip(desc):
+                continue
+            amt = res.cell(r, 9).value
+            if isinstance(amt, (int, float)):
+                _put_budget_year_amount(data, desc, abs(float(amt)))
+    if stacked_header:
+        blank = 0
+        for r in range(stacked_header + 1, max_r + 1):
+            desc = str(res.cell(r, 2).value or "").strip()
+            if not desc:
+                blank += 1
+                if blank >= 2:
+                    break
+                continue
+            blank = 0
+            if _skip(desc):
+                continue
+            amt = res.cell(r, 3).value
+            if isinstance(amt, (int, float)):
+                _put_budget_year_amount(data, desc, abs(float(amt)))
 
 
 def _read_meeting_from_sheet(wb, data: dict) -> None:
@@ -4996,6 +5179,8 @@ def restore_from_app_excel(uploaded) -> dict:
                 projects = parse_ymp_sheet(pd.DataFrame(rows), NOW_YEAR) if rows else []
                 if projects:
                     packed["ymp"] = projects
+            if "RESERVE" in wb.sheetnames:
+                _read_reserve_jobs(wb["RESERVE"], packed)
             try:
                 recs, _msg = parse_pq_upload(BytesIO(raw))
                 if recs:
@@ -5309,7 +5494,11 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
     st.subheader(title)
     if help_text:
         st.caption(help_text)
-    items = st.session_state.sections.get(key) or []
+    items = list(st.session_state.sections.get(key) or [])
+    hidden_reserve = []
+    if key == "levy":
+        hidden_reserve = [it for it in items if family(it.get("desc") or "") == "reserve"]
+        items = [it for it in items if family(it.get("desc") or "") != "reserve"]
     claim_map = claims_against(st.session_state) if key in ("expenditure", "rm") else None
     cost_names = ["— none —"]
     if claims:
@@ -5404,6 +5593,8 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
         )
     if sort_name or sort_gl:
         saved_rows = place_moved(key, save_editor(edited, items, rm, municipal=(key == "municipal"), plan=plan))
+        if key == "levy":
+            saved_rows = [r for r in saved_rows if family(r.get("desc") or "") != "reserve"] + hidden_reserve
         st.session_state.sections[key] = sort_lines(saved_rows, "gl" if sort_gl else "name")
         st.session_state[f"_nonce_{key}"] = nonce + 1
         apply_levy_lines(st.session_state)
@@ -5411,6 +5602,8 @@ def section_form(key: str, title: str, help_text: str, rm: bool = False, recover
     saved = st.button("Save this section", type="primary", key=f"save_{key}")
     if saved:
         saved_rows = place_moved(key, save_editor(edited, items, rm, municipal=(key == "municipal"), plan=plan))
+        if key == "levy":
+            saved_rows = [r for r in saved_rows if family(r.get("desc") or "") != "reserve"] + hidden_reserve
         if key in ("expenditure", "rm"):
             for it in saved_rows:
                 rollup_breakdown(it)
@@ -6542,7 +6735,7 @@ def pr_slides(pack: dict) -> list:
                     {"where": "Closing reserve balance", "do": "White. Leave it.", "why": "Actual year is opening, plus what was collected, plus interest, minus what was spent. The budget column starts from that figure and then subtracts the plan."},
                     {"where": "Overspent", "do": "Pink, only if it is above zero.", "why": "The hole. It is not added to the levy. Read it, do not type it."},
                 ],
-                "Then read the jobs. On the left: Budgeted, Spent, and Over / under for the actual year. On the right: the plan for the year you are budgeting. The closing subtracts Spent, not Budgeted.",
+                "Then read the jobs. First the actual year: Budgeted, Spent, and Over / under. Under that, the yellow plan for the year you are budgeting. The meeting can change those yellow amounts. The closing subtracts Spent, not Budgeted.",
             ))
             reserve_grid = (pack.get("grids") or {}).get("reserve") or {}
             if reserve_grid.get("rows"):
@@ -7217,7 +7410,7 @@ def main():
     tabs = st.tabs([
         "How it works", "Income", "Municipal", "Expenditure",
         "Repair & Maintenance", "Personnel", "Tax", "Special projects", "Reserve fund",
-        "10-year projects", "PQ / Levies", "10-year plan", "Notes for the PR", "Download",
+        "10-year plan", "PQ / Levies", "Notes for the PR", "Download",
     ])
 
     with tabs[0]:
@@ -7359,7 +7552,7 @@ On Expenditure, Repairs, Personnel or Tax, type a rand in **Funded by reserve** 
 
 **Closing reserve balance** = opening at the start of the Actual year + collected in that year + interest earned in that year − what was **spent** in that year. Budgeted is not subtracted. A job can show a budget and a zero spend. That budget stays on the list until you type the spend. That closing figure is the start of the budget column. The budget column then adds this year’s contribution and this year’s interest, and subtracts this year’s plan. Do not type the year-end closing into the opening box. The sheet works it out. Do not type the contribution or the interest inside the opening balance as well. That would count it twice.
 
-On the reserve sheet the jobs sit in two blocks. The left block is the actual year: Description, Budgeted, Spent, Notes, Over / under. The right block is the year you are budgeting: Description, Budgeted, Notes. Over / under is Spent minus Budgeted. Above zero means it cost more than was allowed. The maintenance total on the left is the sum of Spent. The maintenance total on the right is the plan. Bank charges stay on Expenditure. They are not on this sheet.
+On the reserve sheet the jobs are one under the other, so the page prints. First the actual year: Description, Budgeted, Spent, Notes, Over / under. Under that, the year you are budgeting: Description, Budgeted, Notes. Those Budgeted amounts are yellow. The meeting can change them. Over / under is Spent minus Budgeted. Above zero means it cost more than was allowed. The maintenance total for the actual year is the sum of Spent. The maintenance total for the budget year is the sum of the yellow amounts. Bank charges stay on Expenditure. They are not on this sheet.
 
 **Overspent** shows when a closing figure is below zero. Example: R18,000 at the start of the Actual year plus R5,000 collected is R23,000 available. If R28,000 was spent, the sheet shows **R5,000 overspent**. If R28,000 was only budgeted, and nothing was typed as spent, the closing does not take the R28,000 off.
 
@@ -7406,13 +7599,13 @@ It is part of the ordinary levy. It is not the reserve fund. It is not the 10-ye
 - **EACH UNIT** shows a Special projects column only when there is an amount. That is each unit’s share of the same levy. It is not a second charge.
 - Yellow on the sheet is **Budgeted yearly**. If the meeting changes that rand, the levy moves with it.
 - If a line landed on Expenditure or Repairs by mistake, use **Move to → Special projects**, then Save.
-- If the job can wait, or it is on the 10-year plan, do not put it here. Put it on **10-year projects**. The reserve pays that.
+- If the job can wait, or it is on the 10-year plan, do not put it here. Put it on **10-year plan**. The reserve pays that.
 - Do not put the same job in both places. Owners would pay it twice.
 
 ### 16. Personnel and the 10-year plan
 **Personnel** is salaries, casuals, PAYE / UIF, travel, bonuses and the like.
 
-**10 Year Maintenance Projects** do not show on the levy sheet. They are the reserve fund's costs. On **Reserve fund**, each job has Budgeted and Spent for the actual year, and the plan amount for the year you are budgeting. Spent is what was paid. The Excel closing subtracts Spent, not Budgeted. The right-hand block on the reserve sheet is that budget year. A later year stays on the 10-year plan only. There is no %. Tick **Pay the 10-year projects from the ordinary levy** only when this complex pays the plan from the levy. Then they move onto the levy sheet and off the reserve sheet.
+**10 Year Maintenance Projects** do not show on the levy sheet. They are the reserve fund's costs. On **Reserve fund**, each job has Budgeted and Spent for the actual year, and the plan amount for the year you are budgeting. Spent is what was paid. The Excel closing subtracts Spent, not Budgeted. On the reserve sheet that budget year is the yellow list under the actual year. The meeting can change those yellow amounts. A later year stays on the **10-year plan** only. There is no %. Tick **Pay the 10-year projects from the ordinary levy** only when this complex pays the plan from the levy. Then they move onto the levy sheet and off the reserve sheet.
 
 A job you did not do, and that has no amount next year, is not on this list. It stays on the 10-year plan if a later year still has it.
 
@@ -7456,16 +7649,16 @@ Boathouse and boatport stay on the budget, under Levy Income. They move with the
 Do these steps in this order.
 
 1. On the left, choose the WeConnectU **Actual vs Budget** file and click **Load Excel**.
-2. Open **Reserve fund**. The 10-year jobs are listed there. **Budgeted** is what the actual year allowed. **Spent** is what was paid. Type the spend, then **Save reserve jobs**. The closing uses Spent. A budget with no spend is not taken off. The column for the year you are budgeting is the plan, on the right of the Excel sheet. To add a project that is not on the plan, type it on **10-year projects**, enter the amount, and click **Save this section**. A total line is not a project.
-3. Open **10-year plan**. Upload the Excel, or paste the projects. **This replaces the old plan.** Projects that are not in the new paste are removed. Copy from the project names down to the last project. A year heading row is useful, but a paste of name, first cycle, frequency and the amounts is enough.
+2. Open **Reserve fund**. The 10-year jobs are listed there. **Budgeted** is what the actual year allowed. **Spent** is what was paid. Type the spend, then **Save reserve jobs**. The closing uses Spent. A budget with no spend is not taken off. The column for the year you are budgeting is yellow on the Excel sheet, under the actual year. The meeting can change it. To add a project, type it on **10-year plan**, enter the year and the amount, and click **Save 10-year plan**. A total line is not a project.
+3. Open **10-year plan**. It is next to Reserve fund. Upload the Excel, or paste the projects, or type in the grid. Years and amounts are editable. **Paste** or **Save 10-year plan** replaces the old plan. Projects that are not in the new paste are removed. Copy from the project names down to the last project. A year heading row is useful, but a paste of name, first cycle, frequency and the amounts is enough.
 4. To remove a project, click the trash can on that row, then click **Save 10-year plan**. It stays deleted. Click a project name to read the full words. Scroll right for the later years. A note that sat to the right of the years is in the **Note** column.
 5. Open **Reserve fund** again.
    - Paid in the actual year: Spent is filled. That amount comes off the closing.
    - On the plan for the actual year, but not paid: Budgeted is filled, Spent is 0. The budget is not taken off.
    - On the plan for the year you are budgeting: that amount is in the budget-year column. It comes off the budget column, not off the actual year.
-   - One line, such as Staircases, is not the total. The total is the sum of Spent on the left, and the sum of the budget-year plan on the right.
-6. On **10-year projects**, type a new job and click **Save this section**. That writes it onto the plan. Click the note, change it or clear it, then Save. A blank note stays blank.
-7. **Paste** or **Save 10-year plan** replaces the plan. A project that is not on the list you just saved is removed. It does not come back. Leave **Pay the 10-year projects from the ordinary levy** unticked. The reserve pays these jobs.
+   - One line, such as Staircases, is not the total. The total is the sum of Spent, and under that the sum of the yellow budget-year amounts.
+6. To load reserve actuals, stay on **Reserve fund** and use **Reserve actual vs budget**. It fills Budgeted and Spent. It does not change Expenditure.
+7. **Paste** or **Save 10-year plan** replaces the plan. A project that is not on the list you just saved is removed. It does not come back. Leave **Pay the 10-year projects from the ordinary levy** unticked. The reserve pays these jobs. Saving the plan updates the Reserve fund tab and the Excel sheet.
 
 **First cycle** is the year a job starts, for example 2025. Leave it blank if the rands are already under the years.
 
@@ -7506,7 +7699,7 @@ It goes in the same order as the workbook. The sheet itself is on the slides, so
 
 1. **BUDGET sheet.** Start at the top. Yellow is the only place the meeting types. **Required Annual Levy** is the bills added up. **Agreed increase** is the rand they accept. Type **0** if the levy must stay what owners pay now. The PQ then stays the same. The pink row is the gap. **Above zero means costs remain higher.** It is not added again. Then go down the sheet, one block at a time: levy income, other income, recoveries, the city bill, expenditure, repairs, personnel, tax, then special projects. Say what the line is, what it was, and what it will be. A line that says it is not in the levy is not added again.
 2. **Special projects** are on that same Budget sheet, after tax. These jobs cannot wait. They are inside the ordinary levy. They are not the reserve and not the 10-year plan.
-3. **RESERVE sheet.** This is separate from the normal budget. The yellow **Agreed reserve** is at the top of this sheet. Under that, the actual year shows what was budgeted and what was spent. The budget year, on the right, is next year’s plan. The closing balance subtracts **what was spent**, not what was only budgeted. Bank charges stay on Expenditure.
+3. **RESERVE sheet.** This is separate from the normal budget. The yellow **Agreed reserve** is at the top of this sheet. Under that, the actual year shows what was budgeted and what was spent. The budget year is underneath, not beside it, so the sheet prints. Those amounts are yellow. The meeting can change them. The closing balance subtracts **what was spent**, not what was only budgeted. Bank charges stay on Expenditure.
 4. **PQ sheet.** Go across one unit, then the next. **Pay now** is what they pay today. **Will pay this year** is the new ordinary levy. **Levy change** is the difference, ordinary levy only. **Reserve change** is this year’s reserve minus last year’s, for that unit. **Total change** adds those two. It tells the meeting how much more, or less, that owner pays for the levy and the reserve together. Do not add those three into the invoice Total. The Total on the right is the bill: levy, reserve, CSOS and any fixed charge. CSOS is 2% of (that unit’s levy minus R500), never more than R40. If the reserve is inside the levy, the sheet shows **Ordinary levy** and **Reserve fund** apart, and **Will pay this year** is those two added.
 
 Yellow is the only place they type. White cells follow. A pink cell is a result to check. It is not a second charge. Typing a lower rand does not make a bill smaller. Download the presentation, open it in the browser, and press F for full screen. The Excel sheet is where the yellow amount is changed.
@@ -7514,7 +7707,7 @@ Yellow is the only place they type. White cells follow. A pink cell is a result 
         )
 
     with tabs[1]:
-        st.info("Ordinary levies update when you save the cost sections. The reserve contribution is on the Reserve fund tab.")
+        st.info("Ordinary levies update when you save the cost sections. The reserve contribution is on the Reserve fund tab. It is not a row in this list.")
         st.session_state.insurance_mode = st.radio(
             "Insurance — how do owners pay it?",
             ["levy", "pq"],
@@ -8055,13 +8248,40 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         )
         box_help("plan")
         by = budget_calendar_year(st.session_state)
+        st.markdown("**Reserve actual vs budget**")
+        st.caption(
+            "Upload the WeConnectU Actual vs Budget file when it has the reserve or 10-year section. "
+            "This fills Budgeted and Spent on the jobs below. Expenditure is not changed."
+        )
+        reserve_wcu = st.file_uploader(
+            "Reserve actual vs budget (Excel)",
+            type=["xlsx", "xls", "xlsm"],
+            key="reserve_actual_xlsx",
+        )
+        if reserve_wcu is not None and st.button("Load into reserve jobs", key="load_reserve_actuals"):
+            try:
+                rows = extract_wcu(reserve_wcu)
+                n_res = apply_reserve_actuals(st.session_state, rows)
+                st.session_state["_nonce_reserve_jobs"] = int(st.session_state.get("_nonce_reserve_jobs") or 0) + 1
+                if n_res:
+                    st.session_state.msg = (
+                        f"Loaded {n_res} reserve jobs. Budgeted and Spent are on this tab. Expenditure was not changed."
+                    )
+                else:
+                    st.session_state.msg = (
+                        "No reserve or 10-year lines were found in that file. "
+                        "The job names need to match the plan, or the file needs a 10-year heading."
+                    )
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not read that file: {e}")
         st.markdown(f"**Jobs — actual year, and the {by} plan**")
         st.caption(
             "These rows come from the 10-year plan. "
             "Budgeted is what the actual year allowed for that job. Spent is what the reserve paid in that year. "
-            f"{by} budget is the plan for the year you are preparing. "
-            "Save, then download. The Excel closing subtracts Spent. It does not subtract Budgeted. "
-            "Load WeConnectU Actual vs Budget on the left. A reserve or 10-year line fills Spent when that cell is still empty."
+            f"{by} budget is the plan for the year you are preparing. Type it here, or on the 10-year plan tab. "
+            "Save, then download. On the Excel sheet the actual year is listed first. The budget year is underneath, in yellow, so the meeting can change it. "
+            "The closing subtracts Spent. It does not subtract Budgeted."
         )
         job_rows = []
         special_by = {}
@@ -8122,7 +8342,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 "Notes": old.get("note") or "",
             })
         if not job_rows:
-            st.info("No 10-year jobs yet. Open 10-year plan, paste the plan, then come back here and type what was spent.")
+            st.info("No 10-year jobs yet. Open 10-year plan, next to this tab. Paste or type the plan, then come back here and type what was spent.")
         else:
             reserve_nonce = int(st.session_state.get("_nonce_reserve_jobs") or 0)
             edited_jobs = st.data_editor(
@@ -8208,24 +8428,6 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             f"- Left after this year: {money(close_next)}"
         )
         st.caption("The opening box is the first day of the Actual year, not the year-end closing and not the balance today. Interest is added on its own line. It is not already inside the opening. Spent is what was paid. The plan for the budget year is not taken off the actual year.")
-
-    with tabs[9]:
-        section_form(
-            "special",
-            "10 Year Maintenance Projects",
-            "Actual is what was paid in the actual year. Type that on this tab or on Reserve fund. "
-            "Budgeted this year is the 2026 column of the plan. Next year is the 2027 column. "
-            "On the reserve sheet, the closing subtracts Actual (Spent), not the plan. "
-            "The year you are budgeting uses that year’s column of the plan. A later year stays on the plan only.",
-            plan=True,
-        )
-        act_sum = sum(float(r.get("actual") or 0) for r in (st.session_state.sections.get("special") or []))
-        yr_sum = sum(float(r.get("yearly") or 0) for r in (st.session_state.sections.get("special") or []))
-        st.caption(
-            f"Budgeted this year {money(sum(float(r.get('this_budget') or 0) for r in (st.session_state.sections.get('special') or [])))}. "
-            f"Spent {money(act_sum)}. Over / under {money(act_sum - sum(float(r.get('this_budget') or 0) for r in (st.session_state.sections.get('special') or [])))}. "
-            f"Next year ({NOW_YEAR + 1}) {money(yr_sum)}. Above zero on Over / under means we spent more than was budgeted."
-        )
 
     with tabs[10]:
         st.subheader("PQ / levy schedule")
@@ -8355,7 +8557,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             else:
                 st.caption("Type the current ordinary levy on the left to fill Pay now. It does not change the budget.")
 
-    with tabs[11]:
+    with tabs[9]:
         st.subheader("10-year maintenance plan")
         st.caption(
             "Type the plan, or paste it from Excel, including the year headings. "
@@ -8363,7 +8565,8 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             "Frequency is not a year. 10 means every 10 years. 3 means every 3 years. Leave it blank if the years are already filled. "
             "Current estimate is the whole project cost, if you have one. It is not 2026 and not 2027. "
             f"The {NOW_YEAR} column is this budget when the year on the left starts in {NOW_YEAR}. "
-            f"When the budget starts in a later year, that later column is the plan the reserve sheet shows on the right. "
+            f"When the budget starts in a later year, that later column is the yellow list under the actual year on the reserve sheet. "
+            "Type the year and the amount here. Save writes it to the Reserve fund tab and to the Excel sheet. "
             "Spent, on the Reserve fund tab, is what was paid. The closing subtracts Spent, not the plan amount."
         )
         ymp_up = st.file_uploader("Upload 10-year plan Excel (or last year’s budget workbook)", type=["xlsx", "xls"], key="ymp_xlsx")
@@ -8455,13 +8658,13 @@ Confirm the dates and the amount with the auditor or tax practitioner.
                 })
             n = replace_plan(st.session_state, kept)
             st.session_state["ymp_nonce"] = nonce + 1
-            st.success(f"Saved {len(kept)} projects. Next year is on 10 Year Maintenance Projects ({n} lines). Deleted rows stay deleted.")
+            st.success(f"Saved {len(kept)} projects. The Reserve fund tab and the reserve sheet use this plan. Deleted rows stay deleted.")
             st.rerun()
 
-    with tabs[12]:
+    with tabs[11]:
         show_pr_notes(st.session_state)
 
-    with tabs[13]:
+    with tabs[12]:
         st.subheader("Download Excel")
         st.caption("Budget, Reserve, PQ and 10-year plan. Special projects that must be done now are on the Budget sheet, inside the levy. Yellow cells are Budgeted Yearly. Type the rand. The levy follows the rand.")
         st.checkbox(
