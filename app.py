@@ -4259,7 +4259,7 @@ def generate_excel(state: dict) -> BytesIO:
     res.cell(over_row, 2, "Overspent last year (D) and still to be accumulated this year (F)" if use_this_plan else "Overspent this year (D) and still to be accumulated next year (F)")
     fml(res.cell(over_row, 4), f"MAX(0,-D{close_row})", RED)
     fml(res.cell(over_row, 6), f"MAX(0,-F{close_row})", RED)
-    res.cell(8, 8, "Opening is the bank balance now. Do not include this year's contribution in that figure. Contribution is the next line. A special levy for the reserve is its own line. Next year's opening is what is left after this year.")
+    res.cell(8, 8, "Opening is the reserve bank balance on the first day of the year in the Actual column. Not the year-end closing, and not the balance today. Do not include that year's contribution. Contribution is the next line. The closing of that year is the start of the budget column. A special levy for the reserve is its own line.")
     res.cell(8, 8).font = Font(italic=True, size=9, color="1F4E79")
     res.cell(8, 8).alignment = Alignment(wrap_text=True, vertical="center")
     note_row = over_row + 1
@@ -5308,9 +5308,15 @@ def local_box_help(key: str, state) -> str:
         )
     if key == "balance":
         return (
-            "Money **already in the reserve bank account**. Not the contribution on the billing run.\n\n"
-            "Use today’s balance. If you only have the year-end balance, use that. "
-            "Do not add this year’s contribution on top. "
+            "This is the **opening balance at the start of the year in the Actual column**. "
+            "Not the closing balance at the end of that year, and not the balance in the bank today.\n\n"
+            "Example: the Actual file is 2025/2026 and you are budgeting 2027/2028. "
+            "Type what was in the reserve bank on the **first day of 2025/2026**.\n\n"
+            "The sheet then adds what was collected in that year and subtracts what was spent in that year. "
+            "That gives the closing balance at the end of 2025/2026. That closing figure is the start of the budget column.\n\n"
+            "Do not type the contribution into this box. It is the next line, and it would be counted twice.\n\n"
+            "If the budget skips a year, the sheet has no column for the year in between. "
+            "Anything collected or spent in that in-between year is not in this sum.\n\n"
             f"You have typed **{money(bal)}**."
         )
     if key == "contrib":
@@ -5722,7 +5728,7 @@ def _pr_grids(state: dict, approved: float, current_m: float) -> dict:
     close_d = opening + last_r - spent
     close_f = close_d + reserve - nxt
     reserve_grid = {"headers": ["", "Spent last year", "This year" if budget_uses_this_plan_year(state) else "Next year", "What to do"], "rows": [
-        {"cells": [_cell("Opening reserve balance"), _cell(money(opening), num=True, yellow=True), _cell(money(close_d), num=True), _cell("Yellow only if the bank figure is wrong.")]},
+        {"cells": [_cell("Opening reserve balance"), _cell(money(opening), num=True, yellow=True), _cell(money(close_d), num=True), _cell("Yellow only if the opening is wrong. This is the first day of the Actual year, not the year-end closing.")]},
         {"cells": [_cell("Reserve contributions"), _cell(money(last_r), num=True), _cell(money(reserve), num=True), _cell("Next year follows the yellow reserve.")]},
         {"cells": [_cell("Maintenance plan expenditure"), _cell(money(spent), num=True), _cell(money(nxt), num=True), _cell(plan_note)]},
         {"cells": [_cell("Closing reserve balance"), _cell(money(close_d), num=True), _cell(money(close_f), num=True), _cell("Opening, plus contributions, minus the plan.")]},
@@ -6021,7 +6027,7 @@ def pr_pack(state: dict) -> dict:
         "tone": "same",
         "impact": 0,
         "where": "Reserve bank account",
-        "say": f"The reserve bank account has {money(opening)}. Do not add this year’s contribution into that balance.",
+        "say": f"The opening balance is {money(opening)}. That is the reserve bank on the first day of the year in the Actual column, not the year-end closing and not today's balance. Do not add that year's contribution into it.",
     })
     reserve_lines.append({
         "name": "This year’s contribution",
@@ -6237,7 +6243,7 @@ def pr_slides(pack: dict) -> list:
                 "Open the RESERVE sheet. Start at the top.",
                 "This is not the monthly levy. This is the savings for the big jobs.",
                 [
-                    {"where": "Opening reserve balance", "do": "Yellow only if the bank figure is wrong.", "why": "Money in the reserve account now. Do not include this year’s contribution in it."},
+                    {"where": "Opening reserve balance", "do": "Yellow only if the opening is wrong.", "why": "The reserve bank balance on the first day of the year in the Actual column. Not the year-end closing, and not today's balance. Do not include that year's contribution."},
                     {"where": "Reserve contributions", "do": "This year is white. It follows the yellow Agreed reserve.", "why": reserve_where},
                     {"where": "Maintenance plan expenditure", "do": "White. Leave it.", "why": (
                         f"On a {NOW_YEAR} budget this is every job in the {NOW_YEAR} column, added together, plus any rand marked Funded by reserve. "
@@ -7050,8 +7056,10 @@ Do the same for a private refuse contract when every unit pays the same rand. Do
 ### 10. Reserve fund
 Open the **Reserve fund** tab. This is the savings account. It is not Levy Income.
 
-- **Money already in the bank** is the balance now, not this year’s contribution.
-- **Collected last year** is what owners paid in. It is not the bank balance.
+- **Opening balance** is the money in the reserve bank on the **first day of the year in the Actual column**. It is not the closing balance at the end of that year, and it is not the balance today.
+- Example: Actual is 2025/2026 and the budget is 2027/2028. Type the balance on the first day of 2025/2026. The sheet adds what was collected in 2025/2026 and subtracts what was spent in 2025/2026. That result is the closing balance at the end of 2025/2026, and it becomes the start of the budget column. Do not type that closing balance here. Do not type the contribution in this box. It is the next line.
+- If the budget skips a year, there is no column for the year in between. Anything collected or spent in that in-between year is not in this sum.
+- **Collected last year** is what owners paid in during the Actual year. It is not the bank balance.
 - Then pick this year’s contribution. It works for a body corporate and an HOA: own amount, 15% of last year’s ordinary levy, 25% of that levy, or 100% of this year’s repairs.
 - **How do owners pay it.** Extra line on the invoice is the usual choice. The ordinary levy does not include it. Added into the ordinary levy means owners pay one amount, and the PQ still shows the two parts.
 - Leave **Pay the 10-year projects from the ordinary levy** off. The reserve pays those jobs.
@@ -7060,11 +7068,11 @@ On the Excel file, type the contribution once: the yellow **Agreed reserve** at 
 
 On Expenditure, Repairs, Personnel or Tax, type a rand in **Funded by reserve** when the reserve pays that line, or only a part of it. Leave it at 0 if the levy pays it. The rand you type leaves the ordinary levy and shows on the reserve sheet.
 
-**Closing reserve balance, spent last year** = opening + last year’s contribution − what was paid last year.
+**Closing reserve balance, spent last year** = opening at the start of the Actual year + collected in that year − what was paid in that year. That closing figure is the start of the budget column. Do not type the year-end closing into the opening box. The sheet works it out. Do not type the contribution inside the opening balance as well. That would count it twice.
 
 **This year** on a 2026/2027 budget uses the 2026 plan, the **Budgeted this year** column. Closing this year = what is left + this year’s contribution − that plan. The 2027 column stays on the list. It is not in this closing balance.
 
-**Overspent** shows when a closing figure is below zero. Example: R18,000 in the bank plus R5,000 collected is R23,000 available. The plan is R28,000 and the sheet shows **R5,000 overspent**. Do not type the contribution inside the opening balance as well. That would count it twice.
+**Overspent** shows when a closing figure is below zero. Example: R18,000 at the start of the Actual year plus R5,000 collected is R23,000 available. The plan is R28,000 and the sheet shows **R5,000 overspent**.
 
 Interest already sits inside the opening balance. It is not added again. Leave the interest line under Other Income for the tax estimate, and leave **Lowers the ordinary levy** off.
 
@@ -7653,11 +7661,11 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         )
         box_help("scheme")
         st.session_state.reserve_balance = st.number_input(
-            "Money already in the reserve bank account",
+            "Opening balance — start of the actual year",
             value=float(st.session_state.get("reserve_balance") or 0),
             min_value=0.0,
             step=1000.0,
-            help="Not this year’s contribution. If this figure is already after a municipal payment from the reserve, leave Paid by the reserve at 0 on Municipal.",
+            help="The reserve bank balance on the first day of the year in the Actual column. Not the year-end closing, and not the balance today. Example: Actual is 2025/2026, so type the balance on the first day of 2025/2026. The sheet adds that year’s collections and subtracts that year’s spend.",
         )
         box_help("balance")
         reserve_line = next((r for r in (st.session_state.sections.get("levy") or []) if family(r.get("desc") or "") == "reserve"), None)
@@ -7735,7 +7743,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
         close_next = close_last + contrib - plan
         st.markdown(
             f"**Same totals as the reserve sheet**\n\n"
-            f"- Bank balance now: {money(opening)}\n"
+            f"- Opening at the start of the actual year: {money(opening)}\n"
             f"- Collected last year: {money(last)}\n"
             f"- Spent last year: {money(spent_last)}\n"
             f"- Left after last year: {money(close_last)}\n"
@@ -7743,7 +7751,7 @@ Confirm the dates and the amount with the auditor or tax practitioner.
             f"- This year’s plan: {money(plan)}\n"
             f"- Left after this year: {money(close_next)}"
         )
-        st.caption("Interest is already in the bank balance. It is not added again. The jobs are on 10-year projects.")
+        st.caption("The opening box is the first day of the Actual year, not the year-end closing and not the balance today. Interest is already in that opening. It is not added again. The jobs are on 10-year projects.")
 
     with tabs[9]:
         section_form(
